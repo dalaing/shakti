@@ -1090,10 +1090,14 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         break;
     case T_ERR: fprintf(fp, "Error: %s", v->s); break;
     case T_IVEC:
+        /* Empty typed vectors are written as constructors (as list[char](0) is below): []
+           would read back as a generic list. */
+        if (v->n <= 0) { fprintf(fp, "list[int](0)"); break; }
         fprintf(fp, "[");
         for(int64_t i=0;i<v->n;i++) { if(i) fprintf(fp,", "); fprintf(fp,"%lld",(long long)v->J[i]); }
         fprintf(fp, "]"); break;
     case T_FVEC:
+        if (v->n <= 0) { fprintf(fp, "list[float](0)"); break; }
         fprintf(fp, "[");
         for(int64_t i=0;i<v->n;i++) {
             if(i) fprintf(fp,", ");
@@ -1102,6 +1106,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         }
         fprintf(fp, "]"); break;
     case T_BVEC:
+        if (v->n <= 0) { fprintf(fp, "list[bool](0)"); break; }
         fprintf(fp, "[");
         for(int64_t i=0;i<v->n;i++) { if(i) fprintf(fp,", "); fprintf(fp,"%s",v->B[i]?"True":"False"); }
         fprintf(fp, "]"); break;
@@ -1199,7 +1204,6 @@ void v_print(V *v, int nl) { print_val(v, stdout, PV_SHOWN); if(nl) putchar('\n'
 static char *v_repr_int_seq(int64_t n, int64_t (*at)(void *, int64_t), void *ctx) {
     /* Worst case: each int is 20 digits + ", " (2) + brackets. */
     size_t cap = (size_t)n * 22 + 3;
-    if (n == 0) cap = 3;
     char *buf = malloc(cap);
     if (!buf) return NULL;
     size_t pos = 0;
@@ -1228,7 +1232,7 @@ static int64_t repr_ivec_at(void *ctx, int64_t i) { return ((V *)ctx)->J[i]; }
 static int64_t repr_list_int_at(void *ctx, int64_t i) { return ((V *)ctx)->L[i]->j; }
 
 char *v_repr(V *v) {
-    if (v && v->t == T_IVEC) {
+    if (v && v->t == T_IVEC && v->n > 0) {
         char *r = v_repr_int_seq(v->n, repr_ivec_at, v);
         if (r) return r;
     }

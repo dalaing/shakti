@@ -348,6 +348,10 @@ print(len(xs))                # 5
 
 `range(n)` builds an `ivec` `[0, 1, …, n - 1]`. Element-wise `+`, `-`, `*`, `/`, `//`, `%` work on matching-length `ivec` / `fvec` pairs (and scalar broadcast).
 
+An empty typed vector prints as its constructor, `list[int](0)`, `list[float](0)`,
+`list[bool](0)` or `list[char](0)`, so that it reads back as itself; `[]` is the
+empty generic `list`.
+
 | Builtin | Meaning |
 |---------|---------|
 | `dot(a, b)` | Inner product (fused; no intermediate vector) |

@@ -588,7 +588,7 @@ static V *vec_reduce_avg(V *v) {
     V *s = vec_reduce_sum(v);
     if (s->t == T_ERR) return s;
     int64_t cnt = v->t >= T_IMAT && v->t <= T_BMAT ? mat_nelem(v) : v->n;
-    if (cnt == 0) { v_free(s); return v_float(0); }
+    if (cnt == 0) { v_free(s); return v_float(NAN); }   /* mean of nothing */
     V *r;
     if (s->t == T_INT) r = v_float((double)s->j / (double)cnt);
     else r = v_float(s->f / (double)cnt);

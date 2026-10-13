@@ -66,14 +66,7 @@ extern Node *fn_ast[];
 extern V *eval(Node *n, Env *e);
 extern int g_returning;
 extern V *g_retval;
-static int v_truthy(V *v) {
-    P(!v || v->t == T_NIL,0)
-    P(v->t == T_BOOL,v->j)
-    P(v->t == T_INT,v->j != 0)
-    P(v->t == T_FLOAT,v->f != 0.0)
-    P(v->t == T_STR,v->s[0] != 0)
-    return 1;
-}
+extern int is_truthy(V *v);
 /* Safe mode: confine file paths to SHAKTI_FS_ROOT (no-op otherwise). */
 #define FS_GUARD(who, path, w) do { \
     char fs_err_[512]; \
@@ -660,11 +653,11 @@ V *bi_sorted(V **a, in, V **kwn, V **kwv, int nkw, Env *e) {
     return r;
 }
 V *bi_any(V **a, in) {
-    i(n,{P(v_truthy(a[i]),v_bool(1))})
+    i(n,{P(is_truthy(a[i]),v_bool(1))})
     return v_bool(0);
 }
 V *bi_all(V **a, in) {
-    i(n,{P(!v_truthy(a[i]),v_bool(0))})
+    i(n,{P(!is_truthy(a[i]),v_bool(0))})
     return v_bool(1);
 }
 V *bi_isinstance(V **a, in) {

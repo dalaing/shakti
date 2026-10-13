@@ -42,16 +42,6 @@ static inline int isl_vec_omp_threads(int64_t ne) { (void)ne; return 1; }
 #endif
 
 #if defined(__aarch64__)
-static double sum_f64_neon(const double *d, int64_t n) {
-    float64x2_t acc = vdupq_n_f64(0);
-    int64_t i = 0;
-    for (; i + 2 <= n; i += 2)
-        acc = vaddq_f64(acc, vld1q_f64(d + i));
-    double r = vaddvq_f64(acc);
-    for (; i < n; i++) r += d[i];
-    return r;
-}
-
 static double dot_f64_neon(const double *a, const double *b, int64_t n) {
     float64x2_t acc = vdupq_n_f64(0);
     int64_t i = 0;
@@ -63,42 +53,63 @@ static double dot_f64_neon(const double *a, const double *b, int64_t n) {
 }
 #endif
 
+/* A float sum adds in one order on every platform and at any thread count, so its bits depend only
+ * on the items: blocks of SUM_BLOCK items, each summed in SUM_LANES interleaved lanes (item i into
+ * lane i % SUM_LANES), the lanes then folded in halves (lane k adds lane k + w for each k < w, for
+ * w = SUM_LANES/2 down to 1), then the last n % SUM_LANES items added to lane 0 in order; the block
+ * sums are added left to right. Fewer than SUM_LANES items add left to right. Threads only share
+ * out whole blocks.
+ * The lanes are held in pairs (lanes 2j and 2j + 1 in s[j]) of the compilers' generic vector type,
+ * not any target's intrinsics: a + on pairs is two separate IEEE adds, so the order is as stated,
+ * and clang and gcc keep the pairs in SIMD registers (gcc once the pragmas unroll the loops).
+ * Folding in halves only ever adds whole pairs (s[j] += s[j + w/2]) until the last step, so no
+ * lanes are shuffled. 32 lanes keep enough adds in flight to hide their latency on NEON and
+ * AVX2. */
+#define SUM_LANES 32
+#define SUM_BLOCK 65536
+typedef double sum_f64x2 __attribute__((vector_size(16)));
+static double sum_f64_block(const double *d, int64_t n) {
+    sum_f64x2 s[SUM_LANES / 2];
+    for (int j = 0; j < SUM_LANES / 2; j++) s[j] = (sum_f64x2){0.0, 0.0};
+    int64_t i = 0;
+    for (; i + SUM_LANES <= n; i += SUM_LANES) {
+#pragma GCC unroll 16
+        for (int j = 0; j < SUM_LANES / 2; j++) {
+            sum_f64x2 x;
+            memcpy(&x, d + i + 2 * j, sizeof x);
+            s[j] += x;
+        }
+    }
+#pragma GCC unroll 8
+    for (int w = SUM_LANES / 4; w > 0; w /= 2) {
+#pragma GCC unroll 16
+        for (int j = 0; j < w; j++) s[j] += s[j + w];
+    }
+    double r = s[0][0] + s[0][1];
+    for (; i < n; i++) r += d[i];
+    return r;
+}
+
 double shakti_sum_f64(const double *d, int64_t n) {
     if (n <= 0) return 0.0;
-#if SHAKTI_USE_ACCELERATE
-    if (n >= SHAKTI_ACCEL_VEC_MIN) {
-        double r = 0.0;
-        vDSP_sveD(d, 1, &r, (vDSP_Length)n);
-        return r;
-    }
-#endif
-#if defined(__aarch64__)
-    if (n >= ISL_OMP_VEC_MIN) {
-        double r = 0;
-#ifdef _OPENMP
-        #pragma omp parallel reduction(+:r)
-        {
-            int tid = omp_get_thread_num(), nt = omp_get_num_threads();
-            int64_t chunk = (n + nt - 1) / nt;
-            int64_t start = (int64_t)tid * chunk;
-            int64_t len = (start + chunk > n) ? (n - start) : chunk;
-            if (len > 0) r += sum_f64_neon(d + start, len);
-        }
-#else
-        r = sum_f64_neon(d, n);
-#endif
-        return r;
-    }
-    return sum_f64_neon(d, n);
-#else
+    if (n <= SUM_BLOCK) return sum_f64_block(d, n);
+    int64_t nb = (n + SUM_BLOCK - 1) / SUM_BLOCK;
     double r = 0;
 #ifdef _OPENMP
     int nt = isl_vec_omp_threads(n);
-    #pragma omp parallel for reduction(+:r) if (n >= ISL_OMP_VEC_MIN) num_threads(nt)
+    double *part = nt > 1 ? malloc((size_t)nb * sizeof *part) : NULL;
+    if (part) {
+        #pragma omp parallel for num_threads(nt)
+        for (int64_t b = 0; b < nb; b++)
+            part[b] = sum_f64_block(d + b * SUM_BLOCK, b < nb - 1 ? SUM_BLOCK : n - b * SUM_BLOCK);
+        for (int64_t b = 0; b < nb; b++) r += part[b];
+        free(part);
+        return r;
+    }
 #endif
-    for (int64_t i = 0; i < n; i++) r += d[i];
+    for (int64_t b = 0; b < nb; b++)
+        r += sum_f64_block(d + b * SUM_BLOCK, b < nb - 1 ? SUM_BLOCK : n - b * SUM_BLOCK);
     return r;
-#endif
 }
 
 double shakti_min_f64(const double *d, int64_t n) {

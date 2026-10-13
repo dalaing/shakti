@@ -346,7 +346,7 @@ print(len(xs))                # 5
 | Builtin | Meaning |
 |---------|---------|
 | `dot(a, b)` | Inner product (fused; no intermediate vector) |
-| `sum(v)` | Sum of elements |
+| `sum(v)` | Sum of elements (floats: the same bits on every platform; see the summation order below) |
 | `min(v)`, `max(v)`, `avg(v)` | Reducers |
 | `abs(v)` | Element-wise absolute value |
 
@@ -356,6 +356,8 @@ b : range(1000000)
 print(dot(a, b))       # prefer this on large vectors
 print(sum(a * b))      # same math; allocates a * b first
 ```
+
+**Summation order.** A float `sum` or `avg` (of an `fvec` or a `matrix[float]`) adds in one order everywhere, so its result has the same bits on every platform and at any thread count. The items are split into blocks of 65536. In each block, the items in whole rows of 32 go into 32 lanes (item `i` of the block into lane `i % 32`); the lanes are then folded in halves, lane `k` adding lane `k + 16` for each `k` below 16, then lane `k + 8` for each `k` below 8, and so on down to lane 0 adding lane 1; then the block's remaining items (its length mod 32) are added to lane 0 in order. The block sums are added left to right. Fewer than 32 items add left to right.
 
 `.` selects attributes or columns. `dot(a, b)` is inner product.
 `mmul(a, b)` is matrix multiply. Leading `@` decorates; expression `@` is each.
@@ -412,7 +414,7 @@ Same reducers as vectors, applied over all elements: `sum`, `min`, `max`, `avg`,
 
 On x86-64, `make prod-speed` uses `-march=x86-64-v2` with scalar C (+ OpenMP) for large numeric matrix `mmul`, element-wise ops, comparisons, and table filters. On arm64 (Apple Silicon), the same matrix operations use NEON; `prod-speed` passes `-mcpu=native` (M5 and other hosts) or `-mcpu=apple-m4` with `SHAKTI_PORTABLE_CPU=1` (install `libomp` for OpenMP row parallelism). Smaller matrices use scalar code.
 
-The default `make prod` build parallelizes large `ivec` `+` / `-` / `*` with OpenMP. Vector **`dot`** and large **`sum`** on `fvec` use the SIMD/OpenMP stack in `src/vec_kernels.c` (NEON on arm64; scalar+OpenMP on x86; on Darwin with Accelerate, large `sum`/`dot` use `vDSP` and large float `mmul` uses `cblas_dgemm`). `prod-speed` also retunes C and ObjC units with `-O3` and the arch flags above. Default `make` / `make prod` also enables LTO (`-flto` / `-flto=auto`) so lexer, parser, and eval still inline across `src/*.c` units. There is no GPU backend in the standalone binary.
+The default `make prod` build parallelizes large `ivec` `+` / `-` / `*` with OpenMP. Vector **`dot`** uses the SIMD/OpenMP stack in `src/vec_kernels.c` (NEON on arm64; scalar+OpenMP on x86; on Darwin with Accelerate, large `dot` uses `vDSP` and large float `mmul` uses `cblas_dgemm`). A large float `sum` uses OpenMP over whole blocks (see the summation order under Vectors). `prod-speed` also retunes C and ObjC units with `-O3` and the arch flags above. Default `make` / `make prod` also enables LTO (`-flto` / `-flto=auto`) so lexer, parser, and eval still inline across `src/*.c` units. There is no GPU backend in the standalone binary.
 
 OpenMP thread count affects short vector timings. Keep `OMP_NUM_THREADS`
 fixed when comparing local runs.

@@ -556,6 +556,13 @@ static V *vec_reduce_sum(V *v) {
         return i64_sum_value(v->J, v->n);
     if (v->t == T_FVEC)
         return v_float(shakti_sum_f64(v->F, v->n));
+    if (v->t == T_CVEC || v->t == T_CMAT) {
+        /* the sum of the codes, as a char in arithmetic is its code */
+        int64_t s = 0;
+        int64_t ne = v->t == T_CMAT ? mat_nelem(v) : v->n;
+        for (int64_t i = 0; i < ne; i++) s += v->B[i];
+        return v_int(s);
+    }
     if (v->t == T_LIST) {
         double s = 0;
         int all_int = 1;
@@ -760,7 +767,8 @@ static V *bi_sum(V **a, in) {
     if (n == 1) {
         V *v = a[0];
         P(v->t >= T_IVEC && v->t <= T_LIST,vec_reduce_sum(v))
-        P(v->t >= T_IMAT && v->t <= T_FMAT,vec_reduce_sum(v))
+        P((v->t >= T_IMAT && v->t <= T_FMAT) || v->t == T_CMAT,vec_reduce_sum(v))
+        P(v->t == T_CHAR,v_int(v->j))
         P(v->t == T_FLOAT,v_float(v->f))
         P(v->t == T_INT,v_int(v->j))
         return v_int(0);
@@ -768,7 +776,7 @@ static V *bi_sum(V **a, in) {
     double s = 0;
     int all_int = 1;
     for (int i = 0; i < n; i++) {
-        if (a[i]->t == T_INT) s += (double)a[i]->j;
+        if (a[i]->t == T_INT || a[i]->t == T_CHAR) s += (double)a[i]->j;
         else if (a[i]->t == T_FLOAT) { s += a[i]->f; all_int = 0; }
         else if (a[i]->t >= T_IVEC && a[i]->t <= T_LIST) {
             V *p = vec_reduce_sum(a[i]);
@@ -776,7 +784,7 @@ static V *bi_sum(V **a, in) {
             if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
             else s += (double)p->j;
             v_free(p);
-        } else if (a[i]->t >= T_IMAT && a[i]->t <= T_FMAT) {
+        } else if ((a[i]->t >= T_IMAT && a[i]->t <= T_FMAT) || a[i]->t == T_CMAT) {
             V *p = vec_reduce_sum(a[i]);
             P(p->t == T_ERR,p)
             if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
@@ -813,7 +821,7 @@ static V *bi_mmul(V **a, in) {
 }
 static V *bi_avg(V **a, in) {
     P(n < 1,v_float(0))
-    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_avg(a[0]))
+    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT) || a[0]->t == T_CMAT,vec_reduce_avg(a[0]))
     return v_float(0);
 }
 /* min or max of one argument: a vector or matrix reduces over its items, and a str over its

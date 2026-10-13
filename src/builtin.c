@@ -629,6 +629,14 @@ static V *vec_reduce_min(V *v) {
         for (int64_t i = 1; i < v->n; i++) if (v->F[i] < m) m = v->F[i];
         return v_float(m);
     }
+    if (v->t == T_CVEC || v->t == T_CMAT) {
+        /* chars order by code: the least char */
+        int64_t ne = v->t == T_CMAT ? mat_nelem(v) : v->n;
+        P(ne == 0,v_nil())
+        unsigned char m = v->B[0];
+        for (int64_t i = 1; i < ne; i++) if (v->B[i] < m) m = v->B[i];
+        return v_char(m);
+    }
     if (v->t == T_LIST) {
         P(v->n == 0,v_nil())
         return bi_extreme("min", v->L, v->n, OP_LT);
@@ -665,6 +673,14 @@ static V *vec_reduce_max(V *v) {
         double m = v->F[0];
         for (int64_t i = 1; i < v->n; i++) if (v->F[i] > m) m = v->F[i];
         return v_float(m);
+    }
+    if (v->t == T_CVEC || v->t == T_CMAT) {
+        /* chars order by code: the greatest char */
+        int64_t ne = v->t == T_CMAT ? mat_nelem(v) : v->n;
+        P(ne == 0,v_nil())
+        unsigned char m = v->B[0];
+        for (int64_t i = 1; i < ne; i++) if (v->B[i] > m) m = v->B[i];
+        return v_char(m);
     }
     if (v->t == T_LIST) {
         P(v->n == 0,v_nil())
@@ -803,11 +819,11 @@ static V *bi_avg(V **a, in) {
 /* min or max of one argument: a vector or matrix reduces over its items, and a str over its
  * characters, giving the least (greatest) char by code (None when empty); a scalar that orders (a bool,
  * int, float, char, date, datetime or time) is its own min and max; an error passes through, and
- * anything else is an error. A matrix[bool] or matrix[char] gives None. */
+ * anything else is an error. A matrix[bool] gives None. */
 static V *minmax_one(const char *fn, V *v, int op) {
-    if ((v->t >= T_IVEC && v->t <= T_LIST) || (v->t >= T_IMAT && v->t <= T_FMAT))
+    if ((v->t >= T_IVEC && v->t <= T_LIST) || (v->t >= T_IMAT && v->t <= T_FMAT) || v->t == T_CMAT)
         return op == OP_LT ? vec_reduce_min(v) : vec_reduce_max(v);
-    if (v->t == T_BMAT || v->t == T_CMAT) return v_nil();
+    if (v->t == T_BMAT) return v_nil();
     if (v->t == T_STR) {
         const unsigned char *s = (const unsigned char *)v->s;
         P(!*s,v_nil())

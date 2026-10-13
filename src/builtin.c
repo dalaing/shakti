@@ -993,7 +993,7 @@ static V *table_asof_join_impl(V *left,V *right){
     int64_t out=0;
     for(int64_t c=0;c<left->keys->n;c++,out++){
         keys->L[out]=v_ref(left->keys->L[c]);
-        data->L[out]=v_ref(left->vals->L[c]);
+        data->L[out]=col_copy(left->vals->L[c]);
     }
     for(int64_t c=1;c<right->keys->n;c++,out++){
         keys->L[out]=v_ref(right->keys->L[c]);

@@ -438,6 +438,23 @@ V *col_get(V *col, int64_t row) {
     default: return v_nil();
     }
 }
+/* A column's own copy, for a table that must not share it: a vector's or matrix's
+ * data, a list's slots (the items are shared, as a filtered column shares them). */
+V *col_copy(V *col) {
+    if (col->t == T_LIST) {
+        V *r = v_ref(col);
+        v_list_unshare(&r);   /* shared now, so this gives new slots */
+        return r;
+    }
+    if (is_vec_t(col->t) || is_mat_t(col->t)) return v_copy(col);
+    return v_ref(col);
+}
+/* t with every column copied (col_copy); the column names are shared. */
+V *table_copy_cols(V *t) {
+    V *data = v_list(t->vals->n);
+    for (int64_t i = 0; i < t->vals->n; i++) data->L[i] = col_copy(t->vals->L[i]);
+    return v_table_own(v_ref(t->keys), data);
+}
 V *v_fn(V *params, V *defaults, Node *body_ast, Env *closure) {
     int idx = fn_ast_store(body_ast);
     if(idx < 0) return v_err("too many functions");

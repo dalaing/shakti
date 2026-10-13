@@ -744,7 +744,9 @@ for row in dsp.perfect7(root):
 
 import stem
 
-print("stem info:", stem.info())
+info : stem.info()
+assert(type(info) != "error", "stem not available (build with SHAKTI_STEM=1)")
+print("stem info:", info)
 stem.open(44100, 256)
 print("algorithmic latency_ms:", stem.latency_ms())
 
@@ -800,7 +802,8 @@ print("stem demo done")
 
 import sonicpi
 
-sonicpi.configure("127.0.0.1", 4560)
+r : sonicpi.configure("127.0.0.1", 4560)
+assert(type(r) != "error", "sonicpi not available: " + str(r))
 sonicpi.bpm(120)
 
 notes : 60 64 67 72
@@ -827,6 +830,7 @@ import pdf
 
 path : "/tmp/shakti_pdf_demo.pdf"
 w : pdf.create()
+assert(type(w) != "error", "pdf not available (build with SHAKTI_PDF=1)")
 pdf.add_page(w)
 pdf.text_at(w, 72, 720, "Hello Shakti", size:12)
 pdf.save(w, path)
@@ -847,37 +851,36 @@ pdf.close(d)
 
 import midi
 
-print("backend:", midi.backend())
-if midi.backend() = "none":
-    print("midi not available")
-else:
-    midi.open()
-    print("ports:")
-    for p in midi.list():
-        print(" ", p)
+backend : midi.backend()
+assert(type(backend) != "error" and backend != "none", "midi not available (needs SHAKTI_MIDI=1 and ALSA or CoreMIDI)")
+print("backend:", backend)
+midi.open()
+print("ports:")
+for p in midi.list():
+    print(" ", p)
 
-    target : getenv("MIDI_PORT")
-    if not target:
-        print("set MIDI_PORT to a port id/name substring to send a test pattern")
-        midi.close()
-    else:
-        print("connect:", target)
-        midi.connect(target)
-        midi.note_on(60, 100)
-        wait(0.4)
-        midi.note_off(60)
-        midi.note_on(64, 90)
-        wait(0.3)
-        midi.note_off(64)
-        midi.cc(1, 64)
-        # Drain any inbound events briefly
-        t0 : clock()
-        while clock() - t0 < 0.2:
-            ev : midi.poll()
-            if ev:
-                print("in:", ev)
-        midi.close()
-        print("done")
+target : getenv("MIDI_PORT")
+if not target:
+    print("set MIDI_PORT to a port id/name substring to send a test pattern")
+    midi.close()
+else:
+    print("connect:", target)
+    midi.connect(target)
+    midi.note_on(60, 100)
+    wait(0.4)
+    midi.note_off(60)
+    midi.note_on(64, 90)
+    wait(0.3)
+    midi.note_off(64)
+    midi.cc(1, 64)
+    # Drain any inbound events briefly
+    t0 : clock()
+    while clock() - t0 < 0.2:
+        ev : midi.poll()
+        if ev:
+            print("in:", ev)
+    midi.close()
+    print("done")
 
 
 # =============================================================================
@@ -942,6 +945,7 @@ import ipc
 
 port : 19090
 c : ipc.connect("127.0.0.1", port)
+assert(type(c) != "error", "cannot connect (is ipc_echo.ie running?): " + str(c))
 ipc.send(c, "hello from client")
 msg : ipc.recv(c)
 print("reply:", msg)

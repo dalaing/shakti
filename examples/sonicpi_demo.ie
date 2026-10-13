@@ -5,7 +5,8 @@
 
 import sonicpi
 
-sonicpi.configure("127.0.0.1", 4560)
+r : sonicpi.configure("127.0.0.1", 4560)
+assert(type(r) != "error", "sonicpi not available: " + str(r))
 sonicpi.bpm(120)
 
 notes : 60 64 67 72

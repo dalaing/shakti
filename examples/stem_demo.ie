@@ -1,7 +1,9 @@
 # stem demo — separate a short synthetic tone stream and print latency
 import stem
 
-print("stem info:", stem.info())
+info : stem.info()
+assert(type(info) != "error", "stem not available (build with SHAKTI_STEM=1)")
+print("stem info:", info)
 stem.open(44100, 256)
 print("algorithmic latency_ms:", stem.latency_ms())
 

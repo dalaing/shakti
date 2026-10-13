@@ -187,6 +187,11 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - `0xHH` (exactly two hex digits) is `char`; `0x1234` (even length except 6/8) is `list[char]`; `0c…` is always `list[char]`; 6/8-digit or odd `0x` is `int`
 - `char(n)` builds a `char` from an int (distinct from `chr`, which returns a
   one-character `str`)
+- `repr(x)` of a float has enough significant digits (up to 17) to read back as the same float, with a `.` or an
+  exponent (`repr(0.1 + 0.2)` is `0.30000000000000004`, `repr(1e20)` is `1e+20`,
+  `repr(float("inf"))` is `float("inf")`); `print` and `str` show a whole-number
+  float of magnitude below 1e15 with `.0` (outside tables), and other floats to six significant digits (`0.3`,
+  `123457`, `1e+15`)
 - `parse_check(src)` returns `dict(ok, error)` — syntax only, no eval
 
 String and formatted-string token text is limited to 8191 bytes, and source

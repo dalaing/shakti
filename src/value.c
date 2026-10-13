@@ -1,6 +1,7 @@
 /* shakti/src/value.c — V constructors, copy/free, print, serialize */
 #include "shakti_internal.h"
 #include "mat_simd.h"
+#include <float.h>
 #ifdef SHAKTI_HAVE_IEFS
 #include "iefs_format.h"
 #include "iefs_io.h"
@@ -143,21 +144,50 @@ V *v_cmat(int64_t rows, int64_t cols) {
     v->bits = 8;
     return v;
 }
-static void mat_cell_format(V *v, int64_t r, int64_t c, char *buf, size_t cap) {
+/* A float as shown: one decimal if integral, else %g (six digits). */
+static void format_float_shown(double d, char *buf, size_t cap) {
+    if (d < 1e15 && d > -1e15 && d == (int64_t)d)   /* range first: the cast of inf or nan is undefined */
+        snprintf(buf, cap, "%.1f", d);
+    else
+        snprintf(buf, cap, "%g", d);
+}
+/* A float as source (repr): the shortest digits that read back, always with a '.' or an
+   exponent so that it reads back as a float; inf and nan as float("inf") etc. */
+void shakti_format_float_exact(double d, char *buf, size_t cap) {
+    if (isnan(d)) { snprintf(buf, cap, "float(\"nan\")"); return; }
+    if (isinf(d)) { snprintf(buf, cap, d > 0 ? "float(\"inf\")" : "float(\"-inf\")"); return; }
+    if (d < 1e15 && d > -1e15 && d == (int64_t)d) { snprintf(buf, cap, "%.1f", d); return; }
+    /* Below DBL_MIN (subnormal) fewer than 15 digits may be all there are. */
+    for (int prec = fabs(d) < DBL_MIN ? 1 : 15; prec <= 17; prec++) {
+        snprintf(buf, cap, "%.*g", prec, d);
+        if (strtod(buf, NULL) == d) break;
+    }
+    if (!strpbrk(buf, ".e")) {
+        size_t l = strlen(buf);
+        if (l + 2 < cap) memcpy(buf + l, ".0", 3);
+    }
+}
+static void format_float(double d, int exact, char *buf, size_t cap) {
+    if (exact) shakti_format_float_exact(d, buf, cap);
+    else format_float_shown(d, buf, cap);
+}
+static void mat_cell_format(V *v, int64_t r, int64_t c, int exact, char *buf, size_t cap) {
     if (v->t == T_IMAT)
         snprintf(buf, cap, "%lld", (long long)v->J[mat_idx(v, r, c)]);
     else if (v->t == T_CMAT)
         snprintf(buf, cap, "0x%02x", v->B[mat_idx(v, r, c)]);
-    else if (v->t == T_FMAT) {
-        double d = v->F[mat_idx(v, r, c)];
-        if (d == (int64_t)d && d < 1e15 && d > -1e15)
-            snprintf(buf, cap, "%.1f", d);
-        else
-            snprintf(buf, cap, "%g", d);
-    } else
+    else if (v->t == T_FMAT)
+        format_float(v->F[mat_idx(v, r, c)], exact, buf, cap);
+    else
         snprintf(buf, cap, "%s", v->B[mat_idx(v, r, c)] ? "True" : "False");
 }
-static void print_mat_compact(V *v, FILE *fp) {
+/* print modes: shown (print, str); quoted (repr); quoted inside a shown container (strings quoted,
+   floats as shown). */
+#define PV_SHOWN 0
+#define PV_REPR 1
+#define PV_NESTED 2
+
+static void print_mat_compact(V *v, FILE *fp, int exact) {
     int64_t cols = mat_cols(v);
     fprintf(fp, "[");
     for (int64_t r = 0; r < v->n; r++) {
@@ -166,7 +196,7 @@ static void print_mat_compact(V *v, FILE *fp) {
         for (int64_t c = 0; c < cols; c++) {
             if (c) fprintf(fp, ", ");
             char buf[64];
-            mat_cell_format(v, r, c, buf, sizeof buf);
+            mat_cell_format(v, r, c, exact, buf, sizeof buf);
             fputs(buf, fp);
         }
         fprintf(fp, "]");
@@ -190,14 +220,14 @@ static void print_mat_pretty(V *v, FILE *fp) {
     }
     int *widths = calloc((size_t)cols, sizeof(int));
     if (!widths) {
-        print_mat_compact(v, fp);
+        print_mat_compact(v, fp, 0);
         return;
     }
     char buf[64];
     for (int64_t c = 0; c < cols; c++) {
         int w = 1;
         for (int64_t r = 0; r < rows; r++) {
-            mat_cell_format(v, r, c, buf, sizeof buf);
+            mat_cell_format(v, r, c, 0, buf, sizeof buf);
             int l = (int)strlen(buf);
             if (l > w) w = l;
         }
@@ -209,7 +239,7 @@ static void print_mat_pretty(V *v, FILE *fp) {
         fputc('[', fp);
         for (int64_t c = 0; c < cols; c++) {
             if (c) fputs(", ", fp);
-            mat_cell_format(v, r, c, buf, sizeof buf);
+            mat_cell_format(v, r, c, 0, buf, sizeof buf);
             fprintf(fp, "%*s", widths[c], buf);
         }
         fputc(']', fp);
@@ -218,7 +248,7 @@ static void print_mat_pretty(V *v, FILE *fp) {
     free(widths);
 }
 static void print_mat_val(V *v, FILE *fp, int repr_mode) {
-    if (repr_mode) print_mat_compact(v, fp);
+    if (repr_mode) print_mat_compact(v, fp, repr_mode == PV_REPR);
     else print_mat_pretty(v, fp);
 }
 V *v_mat_row(V *m, int64_t r) {
@@ -1019,8 +1049,10 @@ static void table_cell_buf(V *col, int64_t r, char *buf, size_t cap) {
         v_free(rw);
     }
 }
+/* repr_mode: PV_SHOWN, PV_REPR or PV_NESTED (above). */
 static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
     if (depth >= SHAKTI_PRINT_MAX_DEPTH) { fprintf(fp, "..."); return; }
+    char fbuf[64];
     if(!v) { fprintf(fp, "None"); return; }
     switch(v->t) {
     case T_NIL:  fprintf(fp, "None"); break;
@@ -1048,12 +1080,10 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         else fprintf(fp, "%s", buf);
         break;
     }
-    case T_FLOAT:{
-        if(v->f == (int64_t)v->f && v->f < 1e15 && v->f > -1e15)
-            fprintf(fp, "%.1f", v->f);
-        else fprintf(fp, "%g", v->f);
+    case T_FLOAT:
+        format_float(v->f, repr_mode == PV_REPR, fbuf, sizeof fbuf);
+        fputs(fbuf, fp);
         break;
-    }
     case T_STR:
         if(repr_mode) fprintf(fp, "\"%s\"", v->s);
         else fprintf(fp, "%s", v->s);
@@ -1067,9 +1097,8 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         fprintf(fp, "[");
         for(int64_t i=0;i<v->n;i++) {
             if(i) fprintf(fp,", ");
-            double d = v->F[i];
-            if(d == (int64_t)d && d < 1e15 && d > -1e15) fprintf(fp,"%.1f",d);
-            else fprintf(fp,"%g",d);
+            format_float(v->F[i], repr_mode == PV_REPR, fbuf, sizeof fbuf);
+            fputs(fbuf, fp);
         }
         fprintf(fp, "]"); break;
     case T_BVEC:
@@ -1105,14 +1134,13 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         } else if (all_float) {
             for (int64_t i = 0; i < v->n; i++) {
                 if (i) fprintf(fp, ", ");
-                double d = v->L[i]->f;
-                if (d == (int64_t)d && d < 1e15 && d > -1e15) fprintf(fp, "%.1f", d);
-                else fprintf(fp, "%g", d);
+                format_float(v->L[i]->f, repr_mode == PV_REPR, fbuf, sizeof fbuf);
+                fputs(fbuf, fp);
             }
         } else {
             for (int64_t i = 0; i < v->n; i++) {
                 if (i) fprintf(fp, ", ");
-                print_val_depth(v->L[i], fp, 1, depth + 1);
+                print_val_depth(v->L[i], fp, repr_mode ? repr_mode : PV_NESTED, depth + 1);
             }
         }
         fprintf(fp, "]");
@@ -1122,9 +1150,9 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         fprintf(fp, "{");
         for(int64_t i=0;i<v->n;i++) {
             if(i) fprintf(fp,", ");
-            print_val_depth(v->keys->L[i],fp,1,depth+1);
+            print_val_depth(v->keys->L[i],fp,repr_mode?repr_mode:PV_NESTED,depth+1);
             fprintf(fp,": ");
-            print_val_depth(v->vals->L[i],fp,1,depth+1);
+            print_val_depth(v->vals->L[i],fp,repr_mode?repr_mode:PV_NESTED,depth+1);
         }
         fprintf(fp, "}"); break;
     case T_TABLE: {
@@ -1165,7 +1193,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
 void print_val(V *v, FILE *fp, int repr_mode) {
     print_val_depth(v, fp, repr_mode, 0);
 }
-void v_print(V *v, int nl) { print_val(v, stdout, 0); if(nl) putchar('\n'); }
+void v_print(V *v, int nl) { print_val(v, stdout, PV_SHOWN); if(nl) putchar('\n'); }
 
 /* Fast path: format a homogeneous int list / ivec without OPEN_MEMSTREAM. */
 static char *v_repr_int_seq(int64_t n, int64_t (*at)(void *, int64_t), void *ctx) {
@@ -1216,14 +1244,14 @@ char *v_repr(V *v) {
     }
     char *buf = NULL; size_t sz = 0;
     FILE *fp = OPEN_MEMSTREAM(&buf, &sz);
-    print_val(v, fp, 1);
+    print_val(v, fp, PV_REPR);
     CLOSE_MEMSTREAM(fp, &buf, &sz);
     return buf;
 }
 char *v_to_str(V *v) {
     char *buf = NULL; size_t sz = 0;
     FILE *fp = OPEN_MEMSTREAM(&buf, &sz);
-    print_val(v, fp, 0);
+    print_val(v, fp, PV_SHOWN);
     CLOSE_MEMSTREAM(fp, &buf, &sz);
     return buf;
 }

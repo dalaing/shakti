@@ -413,6 +413,7 @@ void shakti_format_datetime_ms(int64_t ms, char *buf, size_t cap);
 int shakti_parse_date_ymd(const char *s, int64_t *out_ms);
 void shakti_format_date_ms(int64_t utc_midnight_ms, char *buf, size_t cap);
 void shakti_format_time_ms(int64_t ms_in_day, char *buf, size_t cap);
+void shakti_format_float_exact(double d, char *buf, size_t cap);
 const char *type_name(int t);
 V *vec_cmp(V *a, V *b, int op);
 Node *parse(const char *src);

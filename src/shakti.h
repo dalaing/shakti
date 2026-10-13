@@ -416,6 +416,8 @@ extern V *g_error_val;
 int fn_ast_store(Node *n);
 void fn_ast_release(int idx);
 V *col_get(V *col, int64_t row);
+V *col_copy(V *col);
+V *table_copy_cols(V *t);
 void v_dict_set(V *d, const char *key, V *val);
 V *v_dict_get(V *d, const char *key);
 int env_save(Env *e, const char *path);

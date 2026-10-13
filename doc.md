@@ -594,6 +594,8 @@ Explicit forms (same first-column key; no `on` clause):
 | `a outer b` | Full outer equi-join (tables only) |
 | `a union b` | Keyed union-join on tables; order-preserving unique concat on lists/`ivec`/`fvec` |
 
+A join's result (`,`, `outer`, `union`) is a new table with its own columns: replacing a cell of it (`j.a[0] : 9`) doesn't change either source table, nor the other way round. The items of a list column are still shared.
+
 SQL `t1 join t2 on col` remains unimplemented.
 
 ## Asof join helpers
@@ -654,6 +656,8 @@ j : t join u on id
 
 `insert` names each column at most once: `insert into u (id, id) values (1, 2)` is
 `insert: column 'id' named more than once`, and inserts nothing.
+
+The result of `select` is a new table with its own columns: replacing a cell of it (`r.a[0] : 9`) doesn't change the source table, nor the other way round. `update` and `delete` store their result in the variable they name (after `r : update … from t`, `r` and `t` are the same table), but another name that held the old table (`u : t` beforehand) keeps the old columns: a cell write through `u` doesn't reach `t`, nor the other way round. The items of a list column are still shared, as for a filtered select, so a write inside one (`r.l[2][0] : 9`) reaches the source. A column of a table built in the statement itself stays shared with the value it was built from: after `r : select from table(a: x)`, `r.a[0] : 9` changes `x`. Joins give new tables too ([Table joins](#table-joins)).
 
 `by col1, col2` groups and sorts ascending. There is no separate `group by` / `order by` clause.
 
@@ -1737,7 +1741,7 @@ print(iefs.direct_available(), iefs.uring_available(), iefs.libaio_available())
 ```
 
 - `iefs.load` / global `load("….iefs")` — full read + CRC + malloc copy.
-- `iefs.map` — `mmap` the file, skip CRC, alias contiguous vector/matrix payloads. Compressed files require `load` / `loads`.
+- `iefs.map` — `mmap` the file, skip CRC, alias contiguous vector/matrix payloads. Compressed files require `load` / `loads`. A `select` from a mapped table held in a variable (`m : iefs.map("….iefs")`, then `select from m`) copies the columns it selects into memory, as a select from any table variable does (see [`sql` module](#sql-module)); `select … from "….iefs"` reads them from the mapping when it keeps every row.
 - `iefs.dumps` / `iefs.loads` — in-memory frames as `list[char]`.
 - Host codecs: `zstd`, `snappy`, plus residual `delta_i64` / `fire_i64` / `gorilla_f64` / `date` / `time` / `datetime` (v3 extents; compounds like `fire_i64+zstd`). Also interned as `compress` / `decompress`.
 - SQL `select … from "….iefs"` opens via **map**.

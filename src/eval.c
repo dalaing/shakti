@@ -276,6 +276,22 @@ static V *eval_update_cols(Node *n, V *tbl, Env *e) {
     env_free(inner);
     return v_dict_own(keys, vals);
 }
+/* update and delete give a new table r that may still hold some of the old table's
+ * columns (those not assigned; all of them for a delete that kept every row). Once the
+ * variable is rebound to r, a reference still held on the old table (or its column list)
+ * is an alias: give r its own copy of those columns so a cell write through either one
+ * doesn't reach the other. r->vals is r's own list. */
+static void own_shared_cols(V *r, V *from) {
+    if (!r || r->t != T_TABLE || !from || from->t != T_TABLE) return;
+    if (from->rc <= 1 && from->vals->rc <= 1) return;
+    for (int64_t c = 0; c < r->vals->n && c < from->vals->n; c++) {
+        if (r->vals->L[c] == from->vals->L[c]) {
+            V *own = col_copy(r->vals->L[c]);
+            v_free(r->vals->L[c]);
+            r->vals->L[c] = own;
+        }
+    }
+}
 static V *eval_create_schema(Node *n, Env *e) {
     P(!n || n->type != N_LIST,v_err("create table: bad schema"))
     V *keys = v_list(0), *vals = v_list(0);
@@ -796,6 +812,7 @@ V *eval(Node *n, Env *e) {
 #endif
         if(r && r->t != T_ERR && n->ch[0] && n->ch[0]->type == N_NAME)
             env_update(e, n->ch[0]->sval, r);
+        own_shared_cols(r, from);   /* after env_update: see own_shared_cols */
         free(iefs_path);
         v_free(from); v_free(assignments); v_free(where);
         return r;
@@ -837,6 +854,7 @@ V *eval(Node *n, Env *e) {
 #endif
         if(r && r->t != T_ERR && n->ch[0] && n->ch[0]->type == N_NAME)
             env_update(e, n->ch[0]->sval, r);
+        own_shared_cols(r, from);   /* after env_update: see own_shared_cols */
         free(iefs_path);
         v_free(from); v_free(cols); v_free(where);
         return r;

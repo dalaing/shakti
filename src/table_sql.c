@@ -1433,6 +1433,7 @@ V *table_sql_select(V *from, V *cols, V *by, V *where) {
     if (from->t != T_TABLE) {
         return v_err("select: need table");
     }
+    int from_shared = from->rc > 1 || from->vals->rc > 1;
     const char *by_names[32];
     int nby = parse_by_names(by, by_names, 32);
     if (nby < 0) {
@@ -1488,6 +1489,15 @@ V *table_sql_select(V *from, V *cols, V *by, V *where) {
         }
         result = tbl_project_names(filtered, names);
         v_free(names);
+    }
+    /* No filter, or one that keeps every row, hands out from's own columns: copy
+     * them unless from is a temporary table that dies here (a load, a nested
+     * select). A column a temporary was built from (x in table(a: x)) is still
+     * shared with whatever holds it. */
+    if (filtered == from && result->t == T_TABLE && from_shared) {
+        V *own = table_copy_cols(result);
+        v_free(result);
+        result = own;
     }
     if (free_filtered) v_free(filtered);
     return result;
@@ -1686,6 +1696,14 @@ V *table_sql_delete(V *from, V *cols, V *where) {
     if (where && where->t != T_NIL) {
         V *result = tbl_filter_mask(from, keep);
         v_free(keep);
+        if (result == from) {
+            /* Every row kept: a new table on from's columns, as update gives (the
+             * caller copies them if from has an alias). */
+            V *data = v_ref(from->vals);
+            v_list_unshare(&data);
+            v_free(result);
+            result = v_table_own(v_ref(from->keys), data);
+        }
         return result;
     }
     v_free(keep);

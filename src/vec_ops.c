@@ -750,6 +750,42 @@ V *vec_cmp(V *a, V *b, int op) {
         }
         return v_bool(op==OP_EQ);
     }
+    /* <, >, <=, >= between two vectors or lists of the same length compare element-wise, as between
+     * two matrices of the same shape. (= and != of two lists compare whole values above.) */
+    if ((is_vec_t(a->t) || a->t == T_LIST) && (is_vec_t(b->t) || b->t == T_LIST)
+        && (op == OP_LT || op == OP_GT || op == OP_LE || op == OP_GE)) {
+        P(a->n != b->n,v_err("length mismatch"))
+        int64_t n = a->n;
+        V *r = v_bvec(n);
+        #define ORD_LOOP(X, Y) for (int64_t i = 0; i < n; i++) switch (op) { \
+            case OP_LT: r->B[i] = (X) < (Y); break;  case OP_GT: r->B[i] = (X) > (Y); break; \
+            case OP_LE: r->B[i] = (X) <= (Y); break; default: r->B[i] = (X) >= (Y); break; }
+        #define ORD_J(v) ((v)->t == T_IVEC ? (v)->J[i] : (int64_t)(v)->B[i])
+        #define ORD_F(v) ((v)->t == T_FVEC ? (v)->F[i] : (double)ORD_J(v))
+        if (is_vec_t(a->t) && is_vec_t(b->t)) {
+            if (a->t == T_FVEC || b->t == T_FVEC) ORD_LOOP(ORD_F(a), ORD_F(b))
+            else ORD_LOOP(ORD_J(a), ORD_J(b))
+        } else {
+            for (int64_t i = 0; i < n; i++) {
+                V *x = col_get(a, i), *y = col_get(b, i);
+                V *c = vec_cmp(x, y, op);
+                int xt = x->t, yt = y->t;
+                v_free(x); v_free(y);
+                if (c->t != T_BOOL) {   /* an item that doesn't order (or orders to a list): an error */
+                    v_free(r);
+                    if (c->t == T_ERR) return c;
+                    v_free(c);
+                    return v_errf("cannot order %s and %s item by item", type_name(xt), type_name(yt));
+                }
+                r->B[i] = c->j != 0;
+                v_free(c);
+            }
+        }
+        #undef ORD_F
+        #undef ORD_J
+        #undef ORD_LOOP
+        return r;
+    }
     if (is_mat_t(a->t) && (b->t == T_INT || b->t == T_FLOAT || b->t == T_BOOL || b->t == T_CHAR)) {
         int64_t ne = a->n * mat_cols(a);
         V *r = v_bmat(a->n, mat_cols(a));

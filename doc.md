@@ -343,6 +343,19 @@ print(len(xs))                # 5
 
 `range(n)` builds an `ivec` `[0, 1, …, n - 1]`. Element-wise `+`, `-`, `*`, `/`, `//`, `%` work on matching-length `ivec` / `fvec` pairs (and scalar broadcast).
 
+Comparing lists:
+
+| Operands | `=`, `!=` | `<`, `>`, `<=`, `>=` |
+|----------|-----------|----------------------|
+| a `list[int]`, `list[float]` or `list[char]` and a number or char | element-wise → `list[bool]` (`[1, 2] = 1` is `[True, False]`) | element-wise → `list[bool]` (`[1, 2] < 2` is `[True, False]`) |
+| a `list` and a `str` | element-wise (an item of another type gives `False`) | element-wise (likewise) |
+| two lists | whole value → one `bool`, like Python's `==`, so `if xs = ys:` works (`[1, 2] = [1.0, 2.0]` is `True`; different lengths are unequal); two `list[bool]`s are an error | element-wise → `list[bool]`, as for two matrices (`[1, 2] < [2, 1]` and `["a", "c"] < ["b", "b"]` are `[True, False]`); an item that doesn't order against the other (`"a"` and `1`) is an error, `None` gives `False`; different lengths are a length mismatch |
+| a `list[bool]` with anything but `None` | error | element-wise against another list (`[True, False] < [True, True]` is `[False, True]`), an error against a scalar |
+| a `list` and a number, bool or char | error | error |
+| any list and `None` | one `bool` (`[1, 2] = None` is `False`) | one `bool` |
+
+So a `where` clause can order two columns (`where a < b`), but `where a = b` compares the whole columns, and so keeps every row or none.
+
 | Builtin | Meaning |
 |---------|---------|
 | `dot(a, b)` | Inner product (fused; no intermediate vector) |
@@ -396,7 +409,9 @@ shape(m)    # [rows, cols]
 | `mmul(a, b)` | matrix multiply (`matrix[bool]` not supported) |
 | `+`, `-`, `*`, `/`, `//`, `%`, `**` | element-wise on numeric matrices |
 | unary `-` | element-wise negation (int/float matrices) |
-| `=`, `!=`, `<`, `>`, `<=`, `>=` | element-wise compare → `matrix[bool]` |
+| `=`, `!=`, `<`, `>`, `<=`, `>=` with a number, bool or char | element-wise compare → `matrix[bool]` |
+| `<`, `>`, `<=`, `>=` between two matrices | element-wise compare of same-shape matrices → `matrix[bool]` |
+| `=`, `!=` between two matrices | whole-value compare → one `bool` (different shapes are unequal) |
 
 Expression `@` is each. Leading `@` decorates. `mmul` multiplies matrices.
 

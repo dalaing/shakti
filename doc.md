@@ -347,6 +347,8 @@ print(len(xs))                # 5
 
 `range(n)` builds an `ivec` `[0, 1, …, n - 1]`. Element-wise `+`, `-`, `*`, `/`, `//`, `%` work on matching-length `ivec` / `fvec` pairs (and scalar broadcast).
 
+A zero divisor in `/`, `//` or `%` on a vector or matrix, whether an item or the number beside it, is the same error value as for scalars (`division by zero`, `modulo by zero`).
+
 | Builtin | Meaning |
 |---------|---------|
 | `dot(a, b)` | Inner product (fused; no intermediate vector) |
@@ -399,7 +401,7 @@ shape(m)    # [rows, cols]
 | Operator | Meaning |
 |----------|---------|
 | `mmul(a, b)` | matrix multiply (`matrix[bool]` not supported) |
-| `+`, `-`, `*`, `/`, `//`, `%`, `**` | element-wise on numeric matrices |
+| `+`, `-`, `*`, `/`, `//`, `%`, `**` | element-wise on numeric matrices; a zero divisor in `/`, `//` or `%` is an error, as for scalars |
 | unary `-` | element-wise negation (int/float matrices) |
 | `=`, `!=`, `<`, `>`, `<=`, `>=` | element-wise compare → `matrix[bool]` |
 

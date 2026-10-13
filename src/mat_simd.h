@@ -9,9 +9,9 @@ void mat_mul_mixed(double *Cf, int64_t *Ci, const int64_t *Aj, const double *Af,
                    const int64_t *Bj, const double *Bf, int64_t m, int64_t k, int64_t n,
                    int a_imat, int b_imat, int out_fmat);
 
-void mat_fmat_binop_mm(double *r, const double *a, const double *b, int64_t ne, int op);
+int mat_fmat_binop_mm(double *r, const double *a, const double *b, int64_t ne, int op);
 void mat_fmat_binop_scalar(double *r, const double *a, double y, int64_t ne, int op);
-void mat_fmat_binop_scalar_rev(double *r, double x, const double *b, int64_t ne, int op);
+int mat_fmat_binop_scalar_rev(double *r, double x, const double *b, int64_t ne, int op);
 
 int mat_imat_binop_mm(int64_t *r, const int64_t *a, const int64_t *b, int64_t ne, int op);
 int mat_imat_binop_scalar(int64_t *r, const int64_t *a, int64_t y, int64_t ne, int op);

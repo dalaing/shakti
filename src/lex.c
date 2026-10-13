@@ -1,5 +1,6 @@
 /* shakti/src/lex.c — tokenizer */
 #include "shakti_internal.h"
+#include <errno.h>
 
 static int is_id_start(char c) { return isalpha(c) || c=='_'; }
 static int is_id_char(char c)  { return isalnum(c) || c=='_'; }
@@ -101,6 +102,40 @@ static int lex_src_is_digit_start(const Lexer *l, size_t p) {
     return l->src[p] == '.' && p + 1 < l->len && isdigit((unsigned char)l->src[p + 1]);
 }
 
+/* The float an out-of-range hex int literal names (lit: [-]0x and its digits, n bytes). Read from a
+ * copy, as strtod would read on past the digits (a `p` exponent, a `.`), with leading zeros dropped;
+ * past 260 significant digits it is above the largest float (16^256 = 2^1024) either way. */
+static double lex_hex_float(const char *lit, size_t n) {
+    char buf[3 + 260 + 1] = "0x";
+    size_t i = lit[0] == '-' ? 3 : 2, m;
+    while (i < n && lit[i] == '0') i++;
+    m = n - i;
+    double f = HUGE_VAL;
+    if (m <= 260) {
+        memcpy(buf + 2, lit + i, m);
+        buf[2 + m] = 0;
+        f = strtod(buf, NULL);
+    }
+    return lit[0] == '-' ? -f : f;
+}
+/* Parse an int literal, [-]digits (n bytes, base 10 or 16), as an int, or as the float it names when
+ * out of int64 range, as int arithmetic past the range gives a float (int_lit marks that float).
+ * strtoll reads the literal in place, and so does strtod for a decimal one (both stop at the first
+ * character that is not a digit, such as a `_`); an out-of-range hex one is read from a copy
+ * (lex_hex_float). */
+static Token lex_int_literal(const char *lit, size_t n, int base) {
+    Token t = {.type = T_INT_};
+    errno = 0;
+    t.ival = strtoll(lit, NULL, base);
+    if (errno == ERANGE) {
+        t.type = T_FLOAT_;
+        t.int_lit = 1;
+        t.ival = 0;
+        t.fval = base == 16 ? lex_hex_float(lit, n) : strtod(lit, NULL);
+    }
+    return t;
+}
+
 int lex_peek_is_signed_literal(Lexer *l) {
     if (!l->has_peek)
         lex_peek(l);
@@ -132,7 +167,24 @@ int lex_peek_minus_is_subtraction(Lexer *l) {
     l->line = save_line;
     l->has_peek = save_peek;
     l->peek = save_tok;
-    return t.type == T_INT_;
+    return t.type == T_INT_ || t.int_lit;
+}
+/* After a '-' token: when a number literal follows it directly, read the two again as one signed
+ * literal, so `1 -9223372036854775808` holds the smallest int as `-9223372036854775808` does. A
+ * `0x` literal that reads as a char or list[char] on its own is read with the sign as an int, as it
+ * is where the lexer takes the sign itself (`-0x8000000000000000`). */
+int lex_next_signed_number(Lexer *l, Token *out) {
+    size_t p = l->pos;
+    if (l->has_peek || p == 0 || l->src[p - 1] != '-' || !lex_src_is_digit_start(l, p))
+        return 0;
+    Token t = lex_peek(l);
+    int hex_text = (t.type == T_CHARZ_ || t.type == T_CVECZ_) && (l->src[p + 1] | 0x20) == 'x';
+    if (t.type != T_INT_ && t.type != T_FLOAT_ && !hex_text)
+        return 0;
+    l->has_peek = 0;
+    l->pos = p - 1;   /* noun_pos is 0 after the '-', so the lexer takes it as the sign */
+    *out = lex_next(l);
+    return 1;
 }
 static Token lex_fstring(Lexer *l) {
     const char *s = l->src;
@@ -410,8 +462,7 @@ static Token lex_raw(Lexer *l) {
                     l->pos = p;
                     return ct;
                 }
-                t.ival = strtoll(s+start, NULL, 16);
-                if (neg_lit) t.ival = -t.ival;
+                t = lex_int_literal(s + start - neg_lit, p - start + neg_lit, 16);
             } else {
                 W(p<l->len && (isdigit(s[p])||s[p]=='_'),p++)
                 if(p<l->len && s[p]=='.') { is_float=1; p++; W(p<l->len && isdigit(s[p]),p++) }
@@ -425,8 +476,7 @@ static Token lex_raw(Lexer *l) {
                     t.fval=strtod(s+start,NULL);
                     if (neg_lit) t.fval = -t.fval;
                 } else {
-                    t.ival = strtoll(s+start, NULL, 10);
-                    if (neg_lit) t.ival = -t.ival;
+                    t = lex_int_literal(s + start - neg_lit, p - start + neg_lit, 10);
                 }
             }
             l->pos = p;

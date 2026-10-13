@@ -33,6 +33,7 @@ typedef struct LexChunk LexChunk;
 typedef struct {
     int type;
     int line;
+    int int_lit;      /* on a T_FLOAT_: written as an int literal, out of int range */
     int64_t ival;
     double fval;
     const char *sval;

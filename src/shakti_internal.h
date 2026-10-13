@@ -67,6 +67,7 @@ V *table_filter(V *tbl, V *mask);
 void lex_fail(Lexer *l, const char *message);
 int lex_peek_is_signed_literal(Lexer *l);
 int lex_peek_minus_is_subtraction(Lexer *l);
+int lex_next_signed_number(Lexer *l, Token *out);
 void parse_fail(const char *fmt, ...);
 
 void node_sprint(Node *n, FILE *fp);

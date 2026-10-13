@@ -276,6 +276,12 @@ static Node *parse_atom_body(Lexer *l) {
         return n;
     }
     case T_MINUS_: {
+        Token num;
+        if (lex_next_signed_number(l, &num)) {
+            if (num.type == T_INT_) { n = node_new(N_INT); n->ival = num.ival; }
+            else { n = node_new(N_FLOAT); n->fval = num.fval; }
+            return n;
+        }
         n = node_new(N_UNOP); n->op = OP_NEG;
         node_add(n, parse_atom(l));
         return n;

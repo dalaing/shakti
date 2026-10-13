@@ -167,108 +167,12 @@ static V *server_invoke_fn(V *fn, V **args, int nargs) {
     return shakti_call_fn(fn, NULL, args, nargs, NULL, NULL, 0, fn->closure);
 }
 
-typedef struct {
-    char *p;
-    size_t n;
-    size_t cap;
-} JsonBuf;
+/* JSON-RPC bodies are written by json_dumps's writer (src/stdlib.c), so a value is written, or
+ * refused with an error value, as json_dumps does. */
+extern V *bi_json_dumps(V **a, int n);
 
-static int jb_grow(JsonBuf *b, size_t need) {
-    if (b->n + need + 1 <= b->cap) return 0;
-    size_t cap = b->cap ? b->cap : 64;
-    while (cap < b->n + need + 1) cap *= 2;
-    char *p = realloc(b->p, cap);
-    if (!p) return -1;
-    b->p = p;
-    b->cap = cap;
-    return 0;
-}
-
-static int jb_put(JsonBuf *b, const char *s, size_t n) {
-    if (jb_grow(b, n) != 0) return -1;
-    memcpy(b->p + b->n, s, n);
-    b->n += n;
-    b->p[b->n] = 0;
-    return 0;
-}
-
-static int jb_cstr(JsonBuf *b, const char *s) {
-    return jb_put(b, s, s ? strlen(s) : 0);
-}
-
-static int jb_quoted(JsonBuf *b, const char *s) {
-    if (jb_cstr(b, "\"") != 0) return -1;
-    if (!s) s = "";
-    for (; *s; s++) {
-        unsigned char c = (unsigned char)*s;
-        char tmp[8];
-        const char *esc = NULL;
-        size_t n = 0;
-        if (c == '"') esc = "\\\"", n = 2;
-        else if (c == '\\') esc = "\\\\", n = 2;
-        else if (c == '\n') esc = "\\n", n = 2;
-        else if (c == '\r') esc = "\\r", n = 2;
-        else if (c == '\t') esc = "\\t", n = 2;
-        else if (c < 0x20) {
-            snprintf(tmp, sizeof tmp, "\\u%04x", c);
-            esc = tmp;
-            n = 6;
-        }
-        if (esc) {
-            if (jb_put(b, esc, n) != 0) return -1;
-        } else if (jb_put(b, (const char *)&c, 1) != 0) return -1;
-    }
-    return jb_cstr(b, "\"");
-}
-
-static int json_encode(JsonBuf *b, V *v);
-
-static int json_encode(JsonBuf *b, V *v) {
-    if (!v || v->t == T_NIL) return jb_cstr(b, "null");
-    if (v->t == T_BOOL) return jb_cstr(b, v->j ? "true" : "false");
-    if (v->t == T_INT) {
-        char tmp[32];
-        snprintf(tmp, sizeof tmp, "%lld", (long long)v->j);
-        return jb_cstr(b, tmp);
-    }
-    if (v->t == T_FLOAT) {
-        char tmp[64];
-        snprintf(tmp, sizeof tmp, "%.17g", v->f);
-        return jb_cstr(b, tmp);
-    }
-    if (v->t == T_STR) return jb_quoted(b, v->s);
-    if (v->t == T_LIST) {
-        if (jb_cstr(b, "[") != 0) return -1;
-        for (int64_t i = 0; i < v->n; i++) {
-            if (i && jb_cstr(b, ",") != 0) return -1;
-            if (json_encode(b, v->L[i]) != 0) return -1;
-        }
-        return jb_cstr(b, "]");
-    }
-    if (v->t == T_DICT) {
-        if (jb_cstr(b, "{") != 0) return -1;
-        int first = 1;
-        for (int64_t i = 0; i < v->keys->n; i++) {
-            V *k = v->keys->L[i];
-            if (!k || k->t != T_STR) continue;
-            if (!first && jb_cstr(b, ",") != 0) return -1;
-            first = 0;
-            if (jb_quoted(b, k->s) != 0) return -1;
-            if (jb_cstr(b, ":") != 0) return -1;
-            if (json_encode(b, v->vals->L[i]) != 0) return -1;
-        }
-        return jb_cstr(b, "}");
-    }
-    return jb_quoted(b, type_name(v->t));
-}
-
-static char *json_dumps_val(V *v) {
-    JsonBuf b = {0};
-    if (json_encode(&b, v) != 0) {
-        free(b.p);
-        return NULL;
-    }
-    return b.p;
+static V *json_dumps_val(V *v) {
+    return bi_json_dumps(&v, 1);
 }
 
 static V *http_result(int status, const char *ctype, const char *body) {
@@ -288,11 +192,23 @@ static V *rpc_error_http(int code, const char *msg, V *id) {
     v_dict_put(errd, "code", v_int(code));
     v_dict_put(errd, "message", v_str(msg ? msg : "error"));
     v_dict_put(env, "error", errd);
-    char *js = json_dumps_val(env);
+    V *js = json_dumps_val(env);
     v_free(env);
-    V *http = http_result(200, "application/json",
-        js ? js : "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"dumps\"},\"id\":null}");
-    free(js);
+    V *http = http_result(200, "application/json", js->t == T_STR ? js->s :
+        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"dumps\"},\"id\":null}");
+    v_free(js);
+    return http;
+}
+
+/* A 200 JSON response holding env, or, when env holds a value JSON has no form for, a JSON-RPC
+ * internal error, as for a handler error (SHAKTI_SERVE_DEBUG logs which value). */
+static V *rpc_json_http(V *env, V *id) {
+    V *js = json_dumps_val(env);
+    if (js->t != T_STR && serve_debug())
+        fprintf(stderr, "[serve] reply not written: %s\n", js->s ? js->s : "json_dumps failed");
+    V *http = js->t == T_STR ? http_result(200, "application/json", js->s)
+                             : rpc_error_http(-32603, "internal error", id);
+    v_free(js);
     return http;
 }
 
@@ -303,11 +219,8 @@ static V *rpc_ok_http(V *id, V *result) {
     else v_dict_put(env, "id", v_nil());
     if (result) v_dict_set(env, "result", result);
     else v_dict_put(env, "result", v_nil());
-    char *js = json_dumps_val(env);
+    V *http = rpc_json_http(env, id);
     v_free(env);
-    V *http = http_result(200, "application/json",
-        js ? js : "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"dumps\"},\"id\":null}");
-    free(js);
     return http;
 }
 
@@ -361,11 +274,8 @@ static V *dispatch_rpc(Env *global, const char *body) {
             return http;
         }
         if (r->t == T_DICT) {
-            char *js = json_dumps_val(r);
+            V *http = rpc_json_http(r, id);
             v_free(r);
-            V *http = http_result(200, "application/json",
-                js ? js : "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"dumps\"},\"id\":null}");
-            free(js);
             v_free(req);
             return http;
         }

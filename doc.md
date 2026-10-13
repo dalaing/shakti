@@ -1322,6 +1322,7 @@ Routes:
 - `POST /rpc` and `POST /jsonrpc` — JSON-RPC 2.0 (`Content-Type: application/iefs` and `application/x-hld` return **415**)
   - `handle_rpc(method, params, id)` if defined in the calling environment
   - else built-in `ping` → `"pong"`
+  - the reply is written as `json_dumps` writes it; a result JSON has no form for (inf or nan, a dict key that is not a str, …) gets error `-32603` `internal error`, as a handler error does
 - other methods/paths — `handle_request(method, path, body, content_type)` if defined (must return a dict with `status` / `content_type` / `body`)
 
 CORS: localhost Origin only; mutating cross-origin requests get 403. Optional bearer: `Authorization: Bearer …` matching `SHAKTI_SERVE_TOKEN`.

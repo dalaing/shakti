@@ -87,6 +87,8 @@ def default_depth():
         if len(v) = 0:
             return 4
         n : int(v)
+        if type(n) = "error":
+            return 4
         if n < 1:
             return 1
         if n > 4:

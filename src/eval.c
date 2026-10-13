@@ -29,6 +29,15 @@ static V *assign_map_oom(V *a, V *b, V *c, V *d) {
     if (d) v_free(d);
     return v_nil();
 }
+/* t.name: val — NULL when val can be a column of t: a vector, list or matrix with
+ * t's height (any height when t has no columns yet); otherwise the error. */
+static V *table_col_check(V *t, V *val) {
+    if (val->t == T_ERR) return v_ref(val);
+    if (!is_vec_t(val->t) && val->t != T_LIST && !is_mat_t(val->t))
+        return v_errf("table column must be a vector, list or matrix, not %s", type_name(val->t));
+    if (t->keys->n > 0 && val->n != t->n) return v_err("table column length mismatch");
+    return NULL;
+}
 #define FSTR_FMT_MAX_FIELD 100
 static int fstr_fmt_field(const char **pp) {
     const char *p = *pp;
@@ -1431,6 +1440,8 @@ V *eval(Node *n, Env *e) {
             if(obj->t == T_DICT) {
                 v_dict_set(obj, target->sval, val);
             } else if(obj->t == T_TABLE) {
+                V *bad = table_col_check(obj, val);
+                if (bad) { v_free(obj); v_free(val); return bad; }
                 int found = -1;
                 v_list_unshare(&obj->keys);
                 v_list_unshare(&obj->vals);
@@ -1439,19 +1450,10 @@ V *eval(Node *n, Env *e) {
                        !strcmp(obj->keys->L[i]->s, target->sval)) { found=i; break; }
                 }
                 if(found >= 0) {
-                    if ((val->t==T_IVEC||val->t==T_FVEC||val->t==T_BVEC||val->t==T_CVEC||val->t==T_LIST) &&
-                        obj->n > 0 && val->n != obj->n) {
-                        v_free(obj); v_free(val);
-                        return v_err("table column length mismatch");
-                    }
                     v_free(obj->vals->L[found]);
                     obj->vals->L[found] = v_ref(val);
                 } else {
-                    if ((val->t==T_IVEC||val->t==T_FVEC||val->t==T_BVEC||val->t==T_CVEC||val->t==T_LIST) &&
-                        obj->n > 0 && val->n != obj->n) {
-                        v_free(obj); v_free(val);
-                        return v_err("table column length mismatch");
-                    }
+                    if (obj->keys->n == 0) obj->n = val->n;
                     V *k = v_str(target->sval);
                     v_list_append(obj->keys, k);
                     v_list_append(obj->vals, val);

@@ -1000,6 +1000,26 @@ V *v_deserialize(FILE *fp) {
         d.left = sb.st_size > (off_t)pos ? (int64_t)(sb.st_size - pos) : 0;
     return v_deserialize_depth(&d, 0);
 }
+/* A str as source: in double quotes, with the escapes the lexer reads back (\" \\ \n \t \r);
+   other bytes, which have no escape, are written as they are. */
+static void print_str_quoted(const char *s, FILE *fp) {
+    fputc('"', fp);
+    while (*s) {
+        size_t run = strcspn(s, "\"\\\n\t\r");     /* a run that needs no escape */
+        if (run) fwrite(s, 1, run, fp);
+        s += run;
+        if (!*s) break;
+        switch (*s) {
+        case '"': fputs("\\\"", fp); break;
+        case '\\': fputs("\\\\", fp); break;
+        case '\n': fputs("\\n", fp); break;
+        case '\t': fputs("\\t", fp); break;
+        case '\r': fputs("\\r", fp); break;
+        }
+        s++;
+    }
+    fputc('"', fp);
+}
 static void table_cell_buf(V *col, int64_t r, char *buf, size_t cap) {
     buf[0] = 0;
     if (!col || r < 0) return;
@@ -1055,7 +1075,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         break;
     }
     case T_STR:
-        if(repr_mode) fprintf(fp, "\"%s\"", v->s);
+        if(repr_mode) print_str_quoted(v->s, fp);
         else fprintf(fp, "%s", v->s);
         break;
     case T_ERR: fprintf(fp, "Error: %s", v->s); break;

@@ -193,6 +193,12 @@ String and formatted-string token text is limited to 8191 bytes, and source
 indentation is limited to 255 nested levels. Inputs beyond either limit fail
 with a lexer error instead of being truncated.
 
+Quoted string literals (`"…"`, `'…'`) read the escapes `\"`, `\'`, `\\`, `\n`,
+`\t`, `\r` and `\0` (which ends the string); any other backslash is kept as
+written.
+`repr(s)` writes a string in double quotes with `"`, `\`, newline, tab and
+carriage return escaped that way, so it reads back as the same string.
+
 ```ie
 def index_of(s, ch):
     i : 0

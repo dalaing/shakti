@@ -615,7 +615,7 @@ static V *vec_reduce_min(V *v) {
         P(v->n == 0,v_nil())
         V *m = v_ref(v->L[0]);
         for (int64_t i = 1; i < v->n; i++) {
-            V *c = vec_cmp(m, v->L[i], OP_LT);
+            V *c = vec_cmp(v->L[i], m, OP_LT);
             int lt = c->t == T_BOOL && c->j;
             v_free(c);
             if (lt) { v_free(m); m = v_ref(v->L[i]); }
@@ -659,7 +659,7 @@ static V *vec_reduce_max(V *v) {
         P(v->n == 0,v_nil())
         V *m = v_ref(v->L[0]);
         for (int64_t i = 1; i < v->n; i++) {
-            V *c = vec_cmp(m, v->L[i], OP_GT);
+            V *c = vec_cmp(v->L[i], m, OP_GT);
             int gt = c->t == T_BOOL && c->j;
             v_free(c);
             if (gt) { v_free(m); m = v_ref(v->L[i]); }

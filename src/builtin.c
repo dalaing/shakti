@@ -672,6 +672,17 @@ static V *vec_unary_int(V *v, int64_t (*fn)(int64_t)) {
     return r;
 }
 static V *vec_unary_double(V *v, double (*fn)(double)) {
+    if (v->t == T_CMAT) {
+        V *r = v_fmat(v->n, mat_cols(v));
+        int64_t ne = mat_nelem(v);
+        for (int64_t i = 0; i < ne; i++) r->F[i] = fn((double)v->B[i]);
+        return r;
+    }
+    if (v->t == T_CVEC) {
+        V *r = v_fvec(v->n);
+        for (int64_t i = 0; i < v->n; i++) r->F[i] = fn((double)v->B[i]);
+        return r;
+    }
     if (v->t == T_IMAT) {
         V *r = v_fmat(v->n, mat_cols(v));
         int64_t ne = mat_nelem(v);
@@ -841,29 +852,29 @@ static V *bi_shr(V **a, in) {
     x = (uint64_t)bi_as_i64(a[0]);
     return v_int((int64_t)(x >> (unsigned)s));
 }
+/* Math builtins: an int, a float or a char (its code) gives a float; an int, float or char vector
+ * or matrix maps item by item; an error operand passes through; anything else is refused. */
+static V *bi_math1(const char *name, V *v, double (*fn)(double)) {
+    P(bi_numvec(v) || v->t == T_CVEC || v->t == T_CMAT, vec_unary_double(v, fn))
+    P(v->t == T_INT || v->t == T_CHAR, v_float(fn((double)v->j)))
+    P(v->t == T_FLOAT, v_float(fn(v->f)))
+    P(v->t == T_ERR, v_ref(v))
+    return v_errf("%s: unsupported operand type %s", name, type_name(v->t));
+}
 #define V_MAP_FUNC(NAME, FUNC) \
 static V *bi_##NAME(V **a, in) { \
-    P(n < 1, v_float(0)) \
-    P(bi_numvec(a[0]), vec_unary_double(a[0], FUNC)) \
-    V *v = a[0]; \
-    return v_float(FUNC(v->t == T_INT ? (double)v->j : v->f)); \
-}
-#define V_SCALAR_FLOAT(NAME, FUNC) \
-static V *bi_##NAME(V **a, in) { \
-    P(n < 1, v_float(0)) \
-    V *v = a[0]; \
-    return v_float(FUNC(v->t == T_INT ? (double)v->j : v->f)); \
+    P(n < 1, v_err(#NAME "(x)")) \
+    return bi_math1(#NAME, a[0], FUNC); \
 }
 V_MAP_FUNC(sqrt, sqrt)
-V_SCALAR_FLOAT(floor, floor)
-V_SCALAR_FLOAT(ceil, ceil)
+V_MAP_FUNC(floor, floor)
+V_MAP_FUNC(ceil, ceil)
 V_MAP_FUNC(exp, exp)
 V_MAP_FUNC(log, log)
 V_MAP_FUNC(sin, sin)
 V_MAP_FUNC(cos, cos)
 V_MAP_FUNC(tan, tan)
 #undef V_MAP_FUNC
-#undef V_SCALAR_FLOAT
 static int cmp_i64(const void*a,const void*b){int64_t x=*(int64_t*)a,y=*(int64_t*)b;return(x>y)-(x<y);}
 static int cmp_f64(const void*a,const void*b){double x=*(double*)a,y=*(double*)b;int xn=x!=x,yn=y!=y;if(xn||yn)return xn-yn;return(x>y)-(x<y);}
 static int cmp_u8(const void*a,const void*b){unsigned char x=*(unsigned char*)a,y=*(unsigned char*)b;return(x>y)-(x<y);}

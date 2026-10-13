@@ -266,8 +266,11 @@ int shakti_lang_main(int argc, char **argv) {
 
     if(cmd) {
         Node *prog = parse(cmd);
-        V *r = eval(prog, global);
+        /* A program that doesn't parse is refused whole: nothing runs. */
+        int parse_err = g_error && !interactive;
+        V *r = parse_err ? NULL : eval(prog, global);
         if(g_error && g_error_val) { fprintf(stderr, "Error: %s\n", g_error_val->s); v_free(g_error_val); g_error_val=NULL; }
+        if(parse_err) { node_free(prog); env_free(global); return 1; }
         if(r && r->t == T_ERR) fprintf(stderr, "Error: %s\n", r->s);
         if(!shakti_prog_silent_last(prog) && r && r->t != T_NIL && r->t != T_ERR) {
             print_val(r, stdout, 1);

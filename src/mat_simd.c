@@ -305,45 +305,57 @@ void mat_mul_mixed(double *Cf, int64_t *Ci, const int64_t *Aj, const double *Af,
     }
 }
 
-static void fmat_binop_mm_scalar(double *r, const double *a, const double *b, int64_t ne, int op) {
+static int fmat_binop_mm_scalar(double *r, const double *a, const double *b, int64_t ne, int op) {
+    int zero = 0;
     for (int64_t i = 0; i < ne; i++) {
         double x = a[i], y = b[i];
         switch (op) {
         case 0: r[i] = x + y; break;
         case 18: r[i] = x - y; break;
         case 11: r[i] = x * y; break;
-        case 2: r[i] = y != 0 ? x / y : 0; break;
-        case 4: r[i] = y != 0 ? floor(x / y) : 0; break;
-        case 10: r[i] = y != 0 ? fmod(x, y) : 0; break;
+        case 2: zero |= y == 0; r[i] = y != 0 ? x / y : 0; break;
+        case 4: zero |= y == 0; r[i] = y != 0 ? floor(x / y) : 0; break;
+        case 10: zero |= y == 0; r[i] = y != 0 ? fmod(x, y) : 0; break;
         case 17: r[i] = pow(x, y); break;
         default: r[i] = x; break;
         }
     }
+    return zero;
 }
 
-void mat_fmat_binop_mm(double *r, const double *a, const double *b, int64_t ne, int op) {
+/* The divide kernels with a vector of divisors (the _mm and _rev ones) give 0 for an item whose
+ * divisor is zero and return 1 when there was one (/, //, %), so the caller can make it an error;
+ * for +, - and * the int ones return 1 when an item overflowed instead (imat_arith). */
+int mat_fmat_binop_mm(double *r, const double *a, const double *b, int64_t ne, int op) {
 #if defined(__aarch64__)
     if (use_simd_elems(ne) && (op == 0 || op == 18 || op == 11 || op == 2)) {
         int64_t i = 0;
+        uint64x2_t zm = vdupq_n_u64(0);
         for (; i + 2 <= ne; i += 2) {
             float64x2_t x = vld1q_f64(a + i);
             float64x2_t y = vld1q_f64(b + i);
-            vst1q_f64(r + i, fmat_binop_vec_neon(x, y, op));
+            if (op == 2) {
+                uint64x2_t iszero = vceqq_f64(y, vdupq_n_f64(0.0));
+                zm = vorrq_u64(zm, iszero);
+                vst1q_f64(r + i, vbslq_f64(iszero, vdupq_n_f64(0.0), vdivq_f64(x, y)));
+            } else
+                vst1q_f64(r + i, fmat_binop_vec_neon(x, y, op));
         }
+        int zero = (vgetq_lane_u64(zm, 0) | vgetq_lane_u64(zm, 1)) != 0;
         for (; i < ne; i++) {
             double x = a[i], y = b[i];
             switch (op) {
             case 0: r[i] = x + y; break;
             case 18: r[i] = x - y; break;
             case 11: r[i] = x * y; break;
-            case 2: r[i] = y != 0 ? x / y : 0; break;
+            case 2: zero |= y == 0; r[i] = y != 0 ? x / y : 0; break;
             default: break;
             }
         }
-        return;
+        return zero;
     }
 #endif
-    fmat_binop_mm_scalar(r, a, b, ne, op);
+    return fmat_binop_mm_scalar(r, a, b, ne, op);
 }
 
 void mat_fmat_binop_scalar(double *r, const double *a, double y, int64_t ne, int op) {
@@ -381,10 +393,12 @@ void mat_fmat_binop_scalar(double *r, const double *a, double y, int64_t ne, int
     }
 }
 
-void mat_fmat_binop_scalar_rev(double *r, double x, const double *b, int64_t ne, int op) {
+int mat_fmat_binop_scalar_rev(double *r, double x, const double *b, int64_t ne, int op) {
+    int zero = 0;
 #if defined(__aarch64__)
     if (use_simd_elems(ne) && (op == 18 || op == 2)) {
         float64x2_t vx = vdupq_n_f64(x);
+        uint64x2_t zm = vdupq_n_u64(0);
         int64_t i = 0;
         for (; i + 2 <= ne; i += 2) {
             float64x2_t y = vld1q_f64(b + i);
@@ -392,17 +406,19 @@ void mat_fmat_binop_scalar_rev(double *r, double x, const double *b, int64_t ne,
             if (op == 18) {
                 z = vsubq_f64(vx, y);
             } else {
-                uint64x2_t nonzero = veorq_u64(vceqq_f64(y, vdupq_n_f64(0.0)), vdupq_n_u64(UINT64_MAX));
-                z = vbslq_f64(nonzero, vdivq_f64(vx, y), vdupq_n_f64(0.0));
+                uint64x2_t iszero = vceqq_f64(y, vdupq_n_f64(0.0));
+                zm = vorrq_u64(zm, iszero);
+                z = vbslq_f64(iszero, vdupq_n_f64(0.0), vdivq_f64(vx, y));
             }
             vst1q_f64(r + i, z);
         }
+        zero = (vgetq_lane_u64(zm, 0) | vgetq_lane_u64(zm, 1)) != 0;
         for (; i < ne; i++) {
             double y = b[i];
             if (op == 18) r[i] = x - y;
-            else r[i] = y != 0 ? x / y : 0;
+            else { zero |= y == 0; r[i] = y != 0 ? x / y : 0; }
         }
-        return;
+        return zero;
     }
 #endif
     for (int64_t i = 0; i < ne; i++) {
@@ -411,13 +427,14 @@ void mat_fmat_binop_scalar_rev(double *r, double x, const double *b, int64_t ne,
         case 0: r[i] = x + y; break;
         case 18: r[i] = x - y; break;
         case 11: r[i] = x * y; break;
-        case 2: r[i] = y != 0 ? x / y : 0; break;
-        case 4: r[i] = y != 0 ? floor(x / y) : 0; break;
-        case 10: r[i] = y != 0 ? fmod(x, y) : 0; break;
+        case 2: zero |= y == 0; r[i] = y != 0 ? x / y : 0; break;
+        case 4: zero |= y == 0; r[i] = y != 0 ? floor(x / y) : 0; break;
+        case 10: zero |= y == 0; r[i] = y != 0 ? fmod(x, y) : 0; break;
         case 17: r[i] = pow(x, y); break;
         default: break;
         }
     }
+    return zero;
 }
 
 /* Wrapping + - * that also reports whether any element overflowed int64.
@@ -481,15 +498,16 @@ static inline __attribute__((always_inline)) int imat_arith(int64_t *r, const in
 
 int mat_imat_binop_mm(int64_t *r, const int64_t *a, const int64_t *b, int64_t ne, int op) {
     if (op == 0 || op == 18 || op == 11) return imat_arith(r, a, 0, b, 0, ne, op);
+    int zero = 0;
     for (int64_t i = 0; i < ne; i++) {
         int64_t x = a[i], y = b[i];
         switch (op) {
-        case 4: r[i] = i64_floordiv(x, y); break;
-        case 10: r[i] = i64_mod(x, y); break;
+        case 4: zero |= y == 0; r[i] = i64_floordiv(x, y); break;
+        case 10: zero |= y == 0; r[i] = i64_mod(x, y); break;
         default: r[i] = x; break;
         }
     }
-    return 0;
+    return zero;
 }
 
 int mat_imat_binop_scalar(int64_t *r, const int64_t *a, int64_t y, int64_t ne, int op) {
@@ -507,15 +525,16 @@ int mat_imat_binop_scalar(int64_t *r, const int64_t *a, int64_t y, int64_t ne, i
 
 int mat_imat_binop_scalar_rev(int64_t *r, int64_t x, const int64_t *b, int64_t ne, int op) {
     if (op == 0 || op == 18 || op == 11) return imat_arith(r, NULL, x, b, 0, ne, op);
+    int zero = 0;
     for (int64_t i = 0; i < ne; i++) {
         int64_t y = b[i];
         switch (op) {
-        case 4: r[i] = i64_floordiv(x, y); break;
-        case 10: r[i] = i64_mod(x, y); break;
+        case 4: zero |= y == 0; r[i] = i64_floordiv(x, y); break;
+        case 10: zero |= y == 0; r[i] = i64_mod(x, y); break;
         default: break;
         }
     }
-    return 0;
+    return zero;
 }
 
 static double fmat_at(const void *p, int64_t i) { return ((const double *)p)[i]; }

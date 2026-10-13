@@ -357,6 +357,8 @@ if an exponent is negative or a power overflows, the whole result is float (`[2,
 `[0.5, 0.25]`). An int result is exact, as `5 ** 27` is: `5 ** [27]` is
 `[7450580596923828125]`.
 
+A zero divisor in `/`, `//` or `%` on a vector or matrix, whether an item or the number beside it, is the same error value as for scalars (`division by zero`, `modulo by zero`).
+
 | Builtin | Meaning |
 |---------|---------|
 | `dot(a, b)` | Inner product (fused; no intermediate vector) |
@@ -409,7 +411,7 @@ shape(m)    # [rows, cols]
 | Operator | Meaning |
 |----------|---------|
 | `mmul(a, b)` | matrix multiply (`matrix[bool]` not supported) |
-| `+`, `-`, `*`, `/`, `//`, `%`, `**` | element-wise on numeric matrices |
+| `+`, `-`, `*`, `/`, `//`, `%`, `**` | element-wise on numeric matrices; a zero divisor in `/`, `//` or `%` is an error, as for scalars |
 | unary `-` | element-wise negation (int/float matrices) |
 | `=`, `!=`, `<`, `>`, `<=`, `>=` | element-wise compare → `matrix[bool]` |
 

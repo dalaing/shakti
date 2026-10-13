@@ -58,6 +58,20 @@ double to_float(V *v) {
     P(v->t==T_BOOL,(double)v->j)
     return 0;
 }
+/* / // %: a zero divisor anywhere in a vector or matrix is the scalar's error, not a 0 item. The
+ * kernels flag a zero divisor as they go; the error comes after the loop, so the operands' other
+ * errors (length, shape, type) come first. */
+static int is_div_op(int op) { return op == OP_DIV || op == OP_FLOORDIV || op == OP_MOD; }
+static V *div_by_zero(int op) { return v_err(op == OP_MOD ? "modulo by zero" : "division by zero"); }
+static int is_zero_num(V *v) {
+    return (v->t == T_INT || v->t == T_CHAR) ? v->j == 0 : v->t == T_FLOAT && v->f == 0;
+}
+/* r, or the error (r freed) when a divisor was zero */
+static V *div_result(V *r, int zero, int op) {
+    if (!zero) return r;
+    v_free(r);
+    return div_by_zero(op);
+}
 static double i64_floordiv_f(int64_t x, int64_t y) {
     if (!y) return 0;
     if (i64_pair_promotes(x, y)) return -(double)INT64_MIN;
@@ -116,6 +130,8 @@ V *mat_binop(V *a, V *b, int op) {
     if (a->t == T_CMAT || b->t == T_CMAT)
         return v_err("arithmetic not supported on matrix[char]");
     if (is_mat_t(a->t) && (b->t == T_INT || b->t == T_FLOAT || b->t == T_CHAR)) {
+        /* an int or float matrix over a zero number has no other error to give first */
+        if (is_div_op(op) && is_zero_num(b)) return div_by_zero(op);
         int64_t rows = a->n, cols = mat_cols(a), ne = rows * cols;
         if (op == OP_POW && a->t == T_IMAT && b->t != T_FLOAT)
             return i64_pow_items(a, a->J, 0, NULL, b->j);
@@ -155,6 +171,7 @@ V *mat_binop(V *a, V *b, int op) {
     if ((a->t == T_INT || a->t == T_FLOAT || a->t == T_CHAR) && is_mat_t(b->t)) {
         /* x op m is m op x when op commutes; the others are computed here, x on the left. */
         if (op == OP_SUB || op == OP_DIV || op == OP_FLOORDIV || op == OP_MOD || op == OP_POW) {
+            int zero = 0;
             int64_t rows = b->n, cols = mat_cols(b), ne = rows * cols;
             if (op == OP_POW && b->t == T_IMAT && a->t != T_FLOAT)
                 return i64_pow_items(b, NULL, a->j, b->J, 0);
@@ -162,10 +179,11 @@ V *mat_binop(V *a, V *b, int op) {
                 V *out = v_fmat(rows, cols);
                 double x = to_float(a);
                 if (b->t == T_FMAT) {
-                    mat_fmat_binop_scalar_rev(out->F, x, b->F, ne, op);
+                    zero = mat_fmat_binop_scalar_rev(out->F, x, b->F, ne, op);
                 } else {
                     for (int64_t i = 0; i < ne; i++) {
                         double yv = (double)b->J[i];
+                        zero |= is_div_op(op) && yv == 0;
                         if (op == OP_SUB) out->F[i] = x - yv;
                         else if (op == OP_DIV) out->F[i] = yv != 0 ? x / yv : 0;
                         else if (op == OP_FLOORDIV) out->F[i] = yv != 0 ? floor(x / yv) : 0;
@@ -173,19 +191,23 @@ V *mat_binop(V *a, V *b, int op) {
                         else out->F[i] = pow(x, yv);
                     }
                 }
-                return out;
+                return div_result(out, zero, op);
             }
             if (op == OP_FLOORDIV && a->t != T_FLOAT &&
                 i64_span_promotes(NULL, b->J, ne, 1, a->j, 0, 0)) {
                 V *out = v_fmat(rows, cols);
-                for (int64_t i = 0; i < ne; i++) out->F[i] = i64_floordiv_f(a->j, b->J[i]);
-                return out;
+                for (int64_t i = 0; i < ne; i++) {
+                    zero |= b->J[i] == 0;
+                    out->F[i] = i64_floordiv_f(a->j, b->J[i]);
+                }
+                return div_result(out, zero, op);
             }
             V *out = v_imat(rows, cols);
             int64_t x = a->j;
             if (mat_imat_binop_scalar_rev(out->J, x, b->J, ne, op)) {
                 v_free(out);
-                out = v_fmat(rows, cols);
+                if (is_div_op(op)) return div_by_zero(op);  /* a zero divisor */
+                out = v_fmat(rows, cols);                     /* - overflowed */
                 i64_arith_f(out->F, NULL, x, b->J, 0, ne, op);
             }
             return out;
@@ -205,14 +227,19 @@ V *mat_binop(V *a, V *b, int op) {
         i64_span_promotes(a->J, b->J, ne, 0, 0, 0, 0))
         out_t = T_FMAT;
     V *r = out_t == T_FMAT ? (V *)v_fmat(a->n, mat_cols(a)) : (V *)v_imat(a->n, mat_cols(a));
+    int zero = 0;
     if (out_t == T_FMAT && a->t == T_FMAT && b->t == T_FMAT)
-        mat_fmat_binop_mm(r->F, a->F, b->F, ne, op);
+        zero = mat_fmat_binop_mm(r->F, a->F, b->F, ne, op);
     else if (out_t == T_IMAT && a->t == T_IMAT && b->t == T_IMAT) {
         if (mat_imat_binop_mm(r->J, a->J, b->J, ne, op)) {
-            int64_t rows = a->n, cols = mat_cols(a);
-            v_free(r);
-            r = v_fmat(rows, cols);
-            i64_arith_f(r->F, a->J, 0, b->J, 0, ne, op);
+            if (is_div_op(op))
+                zero = 1;  /* a zero divisor */
+            else {         /* + - * overflowed */
+                int64_t rows = a->n, cols = mat_cols(a);
+                v_free(r);
+                r = v_fmat(rows, cols);
+                i64_arith_f(r->F, a->J, 0, b->J, 0, ne, op);
+            }
         }
     }
     else {
@@ -224,9 +251,9 @@ V *mat_binop(V *a, V *b, int op) {
                 case OP_ADD: r->F[i] = x + y; break;
                 case OP_SUB: r->F[i] = x - y; break;
                 case OP_MUL: r->F[i] = x * y; break;
-                case OP_DIV: r->F[i] = y != 0 ? x / y : 0; break;
-                case OP_FLOORDIV: r->F[i] = y != 0 ? floor(x / y) : 0; break;
-                case OP_MOD: r->F[i] = y != 0 ? fmod(x, y) : 0; break;
+                case OP_DIV: zero |= y == 0; r->F[i] = y != 0 ? x / y : 0; break;
+                case OP_FLOORDIV: zero |= y == 0; r->F[i] = y != 0 ? floor(x / y) : 0; break;
+                case OP_MOD: zero |= y == 0; r->F[i] = y != 0 ? fmod(x, y) : 0; break;
                 case OP_POW: r->F[i] = pow(x, y); break;
                 default: break;
                 }
@@ -236,14 +263,14 @@ V *mat_binop(V *a, V *b, int op) {
                 case OP_ADD: r->J[i] = x + y; break;
                 case OP_SUB: r->J[i] = x - y; break;
                 case OP_MUL: r->J[i] = x * y; break;
-                case OP_FLOORDIV: r->J[i] = i64_floordiv(x, y); break;
-                case OP_MOD: r->J[i] = i64_mod(x, y); break;
+                case OP_FLOORDIV: zero |= y == 0; r->J[i] = i64_floordiv(x, y); break;
+                case OP_MOD: zero |= y == 0; r->J[i] = i64_mod(x, y); break;
                 default: break;
                 }
             }
         }
     }
-    return r;
+    return div_result(r, zero, op);
 }
 static int is_arith_vec(int t) {
     return t == T_IVEC || t == T_FVEC || t == T_CVEC;
@@ -273,40 +300,43 @@ V *vec_binop(V *a, V *b, int op) {
         }
         const int64_t *aj = a->J, *bj = b->J;
         int64_t *rj = r->J;
+        int zero = 0;
         switch (op) {
         case OP_FLOORDIV:
             if (i64_span_promotes(aj, bj, n, 0, 0, 0, 0)) {
                 V *fr = v_fvec(n);
-                for (int64_t i = 0; i < n; i++) fr->F[i] = i64_floordiv_f(aj[i], bj[i]);
+                for (int64_t i = 0; i < n; i++) { zero |= bj[i] == 0; fr->F[i] = i64_floordiv_f(aj[i], bj[i]); }
                 v_free(r);
-                return fr;
+                return div_result(fr, zero, op);
             }
-            for (int64_t i = 0; i < n; i++) rj[i] = i64_floordiv(aj[i], bj[i]);
+            for (int64_t i = 0; i < n; i++) { zero |= bj[i] == 0; rj[i] = i64_floordiv(aj[i], bj[i]); }
             break;
         case OP_MOD:
-            for (int64_t i = 0; i < n; i++) rj[i] = i64_mod(aj[i], bj[i]);
+            for (int64_t i = 0; i < n; i++) { zero |= bj[i] == 0; rj[i] = i64_mod(aj[i], bj[i]); }
             break;
         default: break;
         }
-        return r;
+        return div_result(r, zero, op);
     }
     if (a->t == T_CVEC && b->t == T_CVEC && op != OP_DIV && op != OP_POW) {
         int64_t n = a->n;
         V *r = v_cvec(n);
         const unsigned char *ac = a->B, *bc = b->B;
         unsigned char *rc = r->B;
+        int zero = 0;
         switch (op) {
         case OP_ADD: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] + bc[i]; break;
         case OP_SUB: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] - bc[i]; break;
         case OP_MUL: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] * bc[i]; break;
-        case OP_FLOORDIV: for (int64_t i = 0; i < n; i++) rc[i] = bc[i] ? ac[i] / bc[i] : 0; break;
-        case OP_MOD: for (int64_t i = 0; i < n; i++) rc[i] = bc[i] ? ac[i] % bc[i] : 0; break;
+        case OP_FLOORDIV: for (int64_t i = 0; i < n; i++) { zero |= !bc[i]; rc[i] = bc[i] ? ac[i] / bc[i] : 0; } break;
+        case OP_MOD: for (int64_t i = 0; i < n; i++) { zero |= !bc[i]; rc[i] = bc[i] ? ac[i] % bc[i] : 0; } break;
         default: break;
         }
-        return r;
+        return div_result(r, zero, op);
     }
     if (a->t == T_IVEC && b->t == T_INT && op != OP_DIV && op != OP_POW) {
         int64_t n = a->n, y = b->j;
+        if (!y && is_div_op(op)) return div_by_zero(op);
         V *r = v_ivec(n);
         if (op == OP_ADD || op == OP_SUB || op == OP_MUL) {
             if (mat_imat_binop_scalar(r->J, a->J, y, n, op)) {
@@ -337,6 +367,7 @@ V *vec_binop(V *a, V *b, int op) {
     }
     if (a->t == T_CVEC && (b->t == T_INT || b->t == T_CHAR) && op != OP_DIV && op != OP_POW) {
         int64_t n = a->n, y = b->j;
+        if (!y && is_div_op(op)) return div_by_zero(op);
         V *r = v_cvec(n);
         const unsigned char *ac = a->B;
         unsigned char *rc = r->B;
@@ -363,37 +394,39 @@ V *vec_binop(V *a, V *b, int op) {
         }
         const int64_t *bj = b->J;
         int64_t *rj = r->J;
+        int zero = 0;
         switch (op) {
         case OP_FLOORDIV:
             if (i64_span_promotes(NULL, bj, n, 1, x, 0, 0)) {
                 V *fr = v_fvec(n);
-                for (int64_t i = 0; i < n; i++) fr->F[i] = i64_floordiv_f(x, bj[i]);
+                for (int64_t i = 0; i < n; i++) { zero |= bj[i] == 0; fr->F[i] = i64_floordiv_f(x, bj[i]); }
                 v_free(r);
-                return fr;
+                return div_result(fr, zero, op);
             }
-            for (int64_t i = 0; i < n; i++) rj[i] = i64_floordiv(x, bj[i]);
+            for (int64_t i = 0; i < n; i++) { zero |= bj[i] == 0; rj[i] = i64_floordiv(x, bj[i]); }
             break;
         case OP_MOD:
-            for (int64_t i = 0; i < n; i++) rj[i] = i64_mod(x, bj[i]);
+            for (int64_t i = 0; i < n; i++) { zero |= bj[i] == 0; rj[i] = i64_mod(x, bj[i]); }
             break;
         default: break;
         }
-        return r;
+        return div_result(r, zero, op);
     }
     if ((a->t == T_INT || a->t == T_CHAR) && b->t == T_CVEC && op != OP_DIV && op != OP_POW) {
         int64_t n = b->n, x = a->j;
         V *r = v_cvec(n);
         const unsigned char *bc = b->B;
         unsigned char *rc = r->B;
+        int zero = 0;
         switch (op) {
         case OP_ADD: for (int64_t i = 0; i < n; i++) rc[i] = (uint64_t)x + bc[i]; break;
         case OP_SUB: for (int64_t i = 0; i < n; i++) rc[i] = (uint64_t)x - bc[i]; break;
         case OP_MUL: for (int64_t i = 0; i < n; i++) rc[i] = (uint64_t)x * bc[i]; break;
-        case OP_FLOORDIV: for (int64_t i = 0; i < n; i++) rc[i] = bc[i] ? x / bc[i] : 0; break;
-        case OP_MOD: for (int64_t i = 0; i < n; i++) rc[i] = bc[i] ? x % bc[i] : 0; break;
+        case OP_FLOORDIV: for (int64_t i = 0; i < n; i++) { zero |= !bc[i]; rc[i] = bc[i] ? x / bc[i] : 0; } break;
+        case OP_MOD: for (int64_t i = 0; i < n; i++) { zero |= !bc[i]; rc[i] = bc[i] ? x % bc[i] : 0; } break;
         default: break;
         }
-        return r;
+        return div_result(r, zero, op);
     }
     if((a->t==T_INT||a->t==T_FLOAT||a->t==T_CHAR) && (b->t==T_INT||b->t==T_FLOAT||b->t==T_CHAR)) {
         int use_int = (a->t!=T_FLOAT && b->t!=T_FLOAT && op!=OP_DIV);
@@ -475,13 +508,14 @@ V *vec_binop(V *a, V *b, int op) {
         V *r = v_fvec(n);
         if (op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV ||
             op == OP_FLOORDIV || op == OP_MOD || op == OP_POW) {
-            mat_fmat_binop_mm(r->F, a->F, b->F, n, op);
-            return r;
+            int zero = mat_fmat_binop_mm(r->F, a->F, b->F, n, op);
+            return div_result(r, zero, op);
         }
     }
     if (a->t == T_FVEC && (b->t == T_INT || b->t == T_FLOAT)) {
         int64_t n = a->n;
         double y = to_float(b);
+        if (y == 0 && is_div_op(op)) return div_by_zero(op);
         V *r = v_fvec(n);
         if (op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV ||
             op == OP_FLOORDIV || op == OP_MOD || op == OP_POW) {
@@ -495,43 +529,44 @@ V *vec_binop(V *a, V *b, int op) {
         V *r = v_fvec(n);
         if (op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV ||
             op == OP_FLOORDIV || op == OP_MOD || op == OP_POW) {
-            mat_fmat_binop_scalar_rev(r->F, x, b->F, n, op);
-            return r;
+            int zero = mat_fmat_binop_scalar_rev(r->F, x, b->F, n, op);
+            return div_result(r, zero, op);
         }
     }
     #define VEC_BIN(AT,BT,AJ,BJ) \
     if(a->t==AT && b->t==BT) { \
         int64_t n=a->n; \
-        int ui=(AT==T_IVEC&&BT==T_IVEC&&op!=OP_DIV&&op!=OP_POW); \
+        int ui=(AT==T_IVEC&&BT==T_IVEC&&op!=OP_DIV&&op!=OP_POW), zero=0; \
         if(ui){ V*r=v_ivec(n); for(int64_t i=0;i<n;i++){int64_t x=AJ[i],y=BJ[i]; \
             switch(op){case OP_ADD:r->J[i]=x+y;break;case OP_SUB:r->J[i]=x-y;break; \
-            case OP_MUL:r->J[i]=x*y;break;case OP_FLOORDIV:r->J[i]=i64_floordiv(x,y);break; \
-            case OP_MOD:r->J[i]=i64_mod(x,y);break;default:break;}} return r; } \
+            case OP_MUL:r->J[i]=x*y;break;case OP_FLOORDIV:zero|=!y;r->J[i]=i64_floordiv(x,y);break; \
+            case OP_MOD:zero|=!y;r->J[i]=i64_mod(x,y);break;default:break;}} return div_result(r,zero,op); } \
         V*r=v_fvec(n); for(int64_t i=0;i<n;i++){double x=AT==T_IVEC?(double)a->J[i]:a->F[i], \
             y=BT==T_IVEC?(double)b->J[i]:b->F[i]; \
             switch(op){case OP_ADD:r->F[i]=x+y;break;case OP_SUB:r->F[i]=x-y;break; \
-            case OP_MUL:r->F[i]=x*y;break;case OP_DIV:r->F[i]=y!=0?x/y:0;break; \
-            case OP_FLOORDIV:r->F[i]=y!=0?floor(x/y):0;break;case OP_MOD:r->F[i]=y!=0?fmod(x,y):0;break; \
-            case OP_POW:r->F[i]=pow(x,y);break;default:break;}} return r; }
+            case OP_MUL:r->F[i]=x*y;break;case OP_DIV:zero|=y==0;r->F[i]=y!=0?x/y:0;break; \
+            case OP_FLOORDIV:zero|=y==0;r->F[i]=y!=0?floor(x/y):0;break;case OP_MOD:zero|=y==0;r->F[i]=y!=0?fmod(x,y):0;break; \
+            case OP_POW:r->F[i]=pow(x,y);break;default:break;}} return div_result(r,zero,op); }
     if((a->t==T_IVEC||a->t==T_FVEC) && (b->t==T_IVEC||b->t==T_FVEC)) {
         VEC_BIN(a->t, b->t, a->J, b->J)
     }
     if((a->t==T_INT||a->t==T_FLOAT) && (b->t==T_IVEC||b->t==T_FVEC)) {
         int64_t n=b->n;
-        int ui=(a->t==T_INT&&b->t==T_IVEC&&op!=OP_DIV&&op!=OP_POW);
+        int ui=(a->t==T_INT&&b->t==T_IVEC&&op!=OP_DIV&&op!=OP_POW), zero=0;
         if(ui){ V*r=v_ivec(n); int64_t x=a->j; for(int64_t i=0;i<n;i++){int64_t y=b->J[i]; \
             switch(op){case OP_ADD:r->J[i]=x+y;break;case OP_SUB:r->J[i]=x-y;break; \
-            case OP_MUL:r->J[i]=x*y;break;case OP_FLOORDIV:r->J[i]=i64_floordiv(x,y);break; \
-            case OP_MOD:r->J[i]=i64_mod(x,y);break;default:break;}} return r; }
+            case OP_MUL:r->J[i]=x*y;break;case OP_FLOORDIV:zero|=!y;r->J[i]=i64_floordiv(x,y);break; \
+            case OP_MOD:zero|=!y;r->J[i]=i64_mod(x,y);break;default:break;}} return div_result(r,zero,op); }
         V*r=v_fvec(n); double x=to_float(a);
         for(int64_t i=0;i<n;i++){double y=b->t==T_IVEC?(double)b->J[i]:b->F[i];
             switch(op){case OP_ADD:r->F[i]=x+y;break;case OP_SUB:r->F[i]=x-y;break;
-            case OP_MUL:r->F[i]=x*y;break;case OP_DIV:r->F[i]=y!=0?x/y:0;break;
-            case OP_FLOORDIV:r->F[i]=y!=0?floor(x/y):0;break;case OP_MOD:r->F[i]=y!=0?fmod(x,y):0;break;
-            case OP_POW:r->F[i]=pow(x,y);break;default:break;}} return r;
+            case OP_MUL:r->F[i]=x*y;break;case OP_DIV:zero|=y==0;r->F[i]=y!=0?x/y:0;break;
+            case OP_FLOORDIV:zero|=y==0;r->F[i]=y!=0?floor(x/y):0;break;case OP_MOD:zero|=y==0;r->F[i]=y!=0?fmod(x,y):0;break;
+            case OP_POW:r->F[i]=pow(x,y);break;default:break;}} return div_result(r,zero,op);
     }
     if((a->t==T_IVEC||a->t==T_FVEC) && (b->t==T_INT||b->t==T_FLOAT)) {
         int64_t n=a->n;
+        if(is_div_op(op) && is_zero_num(b)) return div_by_zero(op);
         int ui=(a->t==T_IVEC&&b->t==T_INT&&op!=OP_DIV&&op!=OP_POW);
         if(ui){ V*r=v_ivec(n); int64_t y=b->j; for(int64_t i=0;i<n;i++){int64_t x=a->J[i]; \
             switch(op){case OP_ADD:r->J[i]=x+y;break;case OP_SUB:r->J[i]=x-y;break; \

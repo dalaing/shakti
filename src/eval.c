@@ -635,7 +635,7 @@ static inline void bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V *
             positional = 0;
         } else if (positional && i < nargs) {
             env_set(ce, s, args[i]);
-        } else if (fn->defaults && i < fn->defaults->n && fn->defaults->L[i]->t != T_NIL) {
+        } else if (fn->defaults && i < fn->defaults->n && fn->defaults->L[i]) {
             env_set(ce, s, fn->defaults->L[i]);
         }
     }
@@ -2031,10 +2031,10 @@ V *eval(Node *n, Env *e) {
         V *defaults = v_list(n->ch[0]->nch);
         for(int i=0; i<n->ch[0]->nch; i++) {
             params->L[i] = v_str(n->ch[0]->ch[i]->sval);
-            if(n->nch > 2 && i < n->ch[2]->nch && n->ch[2]->ch[i]->type != N_NONE) {
+            if(n->nch > 2 && i < n->ch[2]->nch && n->ch[2]->ch[i]) {
                 defaults->L[i] = eval(n->ch[2]->ch[i], e);
             } else {
-                defaults->L[i] = v_nil();
+                defaults->L[i] = NULL;   /* no default (a default of None is v_nil()) */
             }
         }
         Node *body = n->ch[1];
@@ -2055,10 +2055,10 @@ V *eval(Node *n, Env *e) {
         V *defaults = v_list(n->ch[0]->nch);
         for(int i=0; i<n->ch[0]->nch; i++) {
             params->L[i] = v_str(n->ch[0]->ch[i]->sval);
-            if(n->nch > 2 && i < n->ch[2]->nch && n->ch[2]->ch[i]->type != N_NONE) {
+            if(n->nch > 2 && i < n->ch[2]->nch && n->ch[2]->ch[i]) {
                 defaults->L[i] = eval(n->ch[2]->ch[i], e);
             } else {
-                defaults->L[i] = v_nil();
+                defaults->L[i] = NULL;   /* no default (a default of None is v_nil()) */
             }
         }
         Node *body = n->ch[1];

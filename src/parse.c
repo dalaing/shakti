@@ -301,11 +301,11 @@ static Node *parse_atom_body(Lexer *l) {
                     node_add(defaults, expr);
                     node_add(body, parse_ternary(l));
                 } else {
-                    node_add(defaults, node_new(N_NONE));
+                    node_add(defaults, NULL);   /* no default (a default of None is a None node) */
                     node_add(body, expr);
                 }
             } else {
-                node_add(defaults, node_new(N_NONE));
+                node_add(defaults, NULL);
             }
         }
         if(body->nch == 0) {
@@ -995,7 +995,7 @@ static Node *parse_def(Lexer *l) {
         if(lex_peek(l).type == T_COLON_) {
             lex_next(l); node_add(defaults, parse_expr(l));
         } else {
-            node_add(defaults, node_new(N_NONE));
+            node_add(defaults, NULL);   /* no default (a default of None is a None node) */
         }
         while(lex_peek(l).type == T_COMMA_) {
             lex_next(l);
@@ -1009,7 +1009,7 @@ static Node *parse_def(Lexer *l) {
             if(lex_peek(l).type == T_COLON_) {
                 lex_next(l); node_add(defaults, parse_expr(l));
             } else {
-                node_add(defaults, node_new(N_NONE));
+                node_add(defaults, NULL);
             }
         }
     }

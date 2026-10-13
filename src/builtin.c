@@ -580,9 +580,10 @@ static V *vec_reduce_avg(V *v) {
     v_free(s);
     return r;
 }
-/* min or max of several arguments compares them with < (min) or > (max), as in Python, and gives
- * the first extreme one itself (max(3, 9, 4) is 9); arguments that don't compare (a vector or a None
- * among them) are an error, and an error argument passes through. */
+/* min or max of several values (the arguments, or the items of a generic list) compares them with <
+ * (min) or > (max), as in Python, and gives the first extreme one itself (max(3, 9, 4) is 9); values
+ * that don't compare (an int and a str, a vector, or a None among them) are an error, and an error
+ * value passes through. */
 static V *bi_extreme(const char *fn, V **a, int64_t n, int op) {
     V *m = a[0];
     if (m->t == T_ERR) return v_ref(m);
@@ -630,14 +631,7 @@ static V *vec_reduce_min(V *v) {
     }
     if (v->t == T_LIST) {
         P(v->n == 0,v_nil())
-        V *m = v_ref(v->L[0]);
-        for (int64_t i = 1; i < v->n; i++) {
-            V *c = vec_cmp(v->L[i], m, OP_LT);
-            int lt = c->t == T_BOOL && c->j;
-            v_free(c);
-            if (lt) { v_free(m); m = v_ref(v->L[i]); }
-        }
-        return m;
+        return bi_extreme("min", v->L, v->n, OP_LT);
     }
     return v_err("min: need vector");
 }
@@ -674,14 +668,7 @@ static V *vec_reduce_max(V *v) {
     }
     if (v->t == T_LIST) {
         P(v->n == 0,v_nil())
-        V *m = v_ref(v->L[0]);
-        for (int64_t i = 1; i < v->n; i++) {
-            V *c = vec_cmp(v->L[i], m, OP_GT);
-            int gt = c->t == T_BOOL && c->j;
-            v_free(c);
-            if (gt) { v_free(m); m = v_ref(v->L[i]); }
-        }
-        return m;
+        return bi_extreme("max", v->L, v->n, OP_GT);
     }
     return v_err("max: need vector");
 }
@@ -813,17 +800,35 @@ static V *bi_avg(V **a, in) {
     P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_avg(a[0]))
     return v_float(0);
 }
+/* min or max of one argument: a vector or matrix reduces over its items, and a str over its
+ * characters, giving the least (greatest) char by code (None when empty); a scalar that orders (a bool,
+ * int, float, char, date, datetime or time) is its own min and max; an error passes through, and
+ * anything else is an error. A matrix[bool] or matrix[char] gives None. */
+static V *minmax_one(const char *fn, V *v, int op) {
+    if ((v->t >= T_IVEC && v->t <= T_LIST) || (v->t >= T_IMAT && v->t <= T_FMAT))
+        return op == OP_LT ? vec_reduce_min(v) : vec_reduce_max(v);
+    if (v->t == T_BMAT || v->t == T_CMAT) return v_nil();
+    if (v->t == T_STR) {
+        const unsigned char *s = (const unsigned char *)v->s;
+        P(!*s,v_nil())
+        unsigned char m = *s;
+        for (s++; *s; s++) if (op == OP_LT ? *s < m : *s > m) m = *s;
+        return v_char(m);
+    }
+    if (v->t == T_ERR) return v_ref(v);
+    if (v->t == T_BOOL || v->t == T_INT || v->t == T_FLOAT || v->t == T_CHAR ||
+        v->t == T_DATE || v->t == T_DATETIME || v->t == T_TIME) return v_ref(v);
+    return v_errf("%s: unsupported operand type %s", fn, type_name(v->t));
+}
 static V *bi_min(V **a, in) {
-    P(n < 1,v_nil())
+    P(n < 1,v_err("min(v)"))
     P(n > 1,bi_extreme("min", a, n, OP_LT))
-    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_min(a[0]))
-    return v_nil();
+    return minmax_one("min", a[0], OP_LT);
 }
 static V *bi_max(V **a, in) {
-    P(n < 1,v_nil())
+    P(n < 1,v_err("max(v)"))
     P(n > 1,bi_extreme("max", a, n, OP_GT))
-    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_max(a[0]))
-    return v_nil();
+    return minmax_one("max", a[0], OP_GT);
 }
 static V *bi_abs(V **a, in) {
     P(n < 1,v_int(0))

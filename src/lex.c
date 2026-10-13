@@ -136,6 +136,13 @@ static Token lex_int_literal(const char *lit, size_t n, int base) {
     return t;
 }
 
+/* A '-' before a char or blob literal is not part of it: `-0c41` is `-(0c41)`. Emit the '-' alone
+ * and leave the literal, at start, for the next token. */
+static Token lex_minus_apart(Lexer *l, size_t start) {
+    l->pos = start;
+    return make_tok(T_MINUS_);
+}
+
 int lex_peek_is_signed_literal(Lexer *l) {
     if (!l->has_peek)
         lex_peek(l);
@@ -171,15 +178,14 @@ int lex_peek_minus_is_subtraction(Lexer *l) {
 }
 /* After a '-' token: when a number literal follows it directly, read the two again as one signed
  * literal, so `1 -9223372036854775808` holds the smallest int as `-9223372036854775808` does. A
- * `0x` literal that reads as a char or list[char] on its own is read with the sign as an int, as it
- * is where the lexer takes the sign itself (`-0x8000000000000000`). */
+ * char or list[char] literal is not a number: the minus negates it, as it does where the lexer
+ * would take the sign itself. */
 int lex_next_signed_number(Lexer *l, Token *out) {
     size_t p = l->pos;
     if (l->has_peek || p == 0 || l->src[p - 1] != '-' || !lex_src_is_digit_start(l, p))
         return 0;
     Token t = lex_peek(l);
-    int hex_text = (t.type == T_CHARZ_ || t.type == T_CVECZ_) && (l->src[p + 1] | 0x20) == 'x';
-    if (t.type != T_INT_ && t.type != T_FLOAT_ && !hex_text)
+    if (t.type != T_INT_ && t.type != T_FLOAT_)
         return 0;
     l->has_peek = 0;
     l->pos = p - 1;   /* noun_pos is 0 after the '-', so the lexer takes it as the sign */
@@ -425,13 +431,14 @@ static Token lex_raw(Lexer *l) {
             Token t = {.type = T_INT_};
             size_t start = p;
             int is_float = 0;
-            if (!neg_lit && c == '0' && p + 2 < l->len && (s[p + 1] == 'c' || s[p + 1] == 'C')
+            if (c == '0' && p + 2 < l->len && (s[p + 1] == 'c' || s[p + 1] == 'C')
                 && isxdigit((unsigned char)s[p + 2])) {
                 p += 2;
                 size_t hex0 = p;
                 W(p < l->len && isxdigit((unsigned char)s[p]), p++)
                 size_t ndig = p - hex0;
                 if (ndig >= 2 && (ndig % 2) == 0 && ndig < SHAKTI_TOKEN_TEXT) {
+                    if (neg_lit) return lex_minus_apart(l, start);
                     Token ct = {.type = T_CVECZ_};
                     ct.sval = lex_intern(l, s + hex0, ndig);
                     ct.ival = (int64_t)(ndig / 2);
@@ -446,15 +453,17 @@ static Token lex_raw(Lexer *l) {
                 size_t hex0 = p;
                 W(p<l->len && isxdigit((unsigned char)s[p]),p++)
                 size_t ndig = p - hex0;
-                if (!neg_lit && ndig == 2) {
+                if (ndig == 2) {
+                    if (neg_lit) return lex_minus_apart(l, start);
                     Token ct = {.type = T_CHARZ_};
                     ct.ival = strtoll(s + start, NULL, 16);
                     ct.line = l->line;
                     l->pos = p;
                     return ct;
                 }
-                if (!neg_lit && ndig >= 4 && (ndig % 2) == 0 && ndig != 6 && ndig != 8
+                if (ndig >= 4 && (ndig % 2) == 0 && ndig != 6 && ndig != 8
                     && ndig < SHAKTI_TOKEN_TEXT) {
+                    if (neg_lit) return lex_minus_apart(l, start);
                     Token ct = {.type = T_CVECZ_};
                     ct.sval = lex_intern(l, s + hex0, ndig);
                     ct.ival = (int64_t)(ndig / 2);

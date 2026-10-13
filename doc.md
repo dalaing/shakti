@@ -184,11 +184,11 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - Integer bitwise helpers: `band(a,b)`, `bor(a,b)`, `bxor(a,b)`, `bnot(a)`,
   `shl(a,b)`, `shr(a,b)` — `shl`/`shr` are logical shifts on the low 64 bits;
   shift counts must be in `0..63`
-- `0xHH` (exactly two hex digits) is `char`; `0x1234` (even length except 6/8) is `list[char]`; `0c…` is always `list[char]`; 6/8-digit or odd `0x` is `int`
+- `0xHH` (exactly two hex digits) is `char`; `0x1234` (even length except 6/8) is `list[char]`; `0c…` is always `list[char]`; 6/8-digit or odd `0x` is `int`; a minus before a `char` or `list[char]` literal applies to it (`-0c41` is `-(0c41)`)
 - A `-` directly before an int literal's digits, where a value can start (not after a name or a
   value, where it subtracts), is part of the literal, so `-9223372036854775808` is the smallest int,
   in a list or a juxtaposed argument too (`1 -9223372036854775808`), and so is
-  `-0x8000000000000000`; an int literal out of range reads as a float
+  `-0x08000000000000000` (`0x8000000000000000` is a `list[char]`); an int literal out of range reads as a float
   (`9223372036854775808` is `9223372036854775808.0`), as int arithmetic past the range gives a
   float. So `- 9223372036854775808`, with a space, negates that float, and `x -9223372036854775808`
   subtracts it: a float, even where `x` minus 2^63 would fit an int

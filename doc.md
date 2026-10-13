@@ -370,7 +370,7 @@ A zero divisor in `/`, `//` or `%` on a vector or matrix, whether an item or the
 | `sum(v)` | Sum of elements (of an empty `list[float]` or `matrix[float]`: `0.0`; of any other empty vector or matrix: `0`); of a `list[char]` or `matrix[char]`, the sum of the codes; a bool counts as 0 or 1, so of a `list[bool]` or `matrix[bool]` it is the number of `True`s |
 | `min(v)`, `max(v)` | Least and greatest element (`None` of an empty vector or matrix); of a `list[char]` or `matrix[char]`, `min`/`max` are chars, ordered by code; of a `list[bool]` or `matrix[bool]`, `min`/`max` are bools; of a `str`, its least and greatest character (a `char`); a scalar is its own `min` and `max` (`max(5)` is `5`) |
 | `min(a, b, ...)`, `max(a, b, ...)` | Compare the arguments with `<` and `>`, as in Python: `max(3, 9, 4)` is `9`; arguments, or items of a list, that don't compare (`1` and `"a"`, or a `None`) are an error |
-| `avg(v)` | Mean of elements (`nan` of an empty vector or matrix); of a `list[char]` or `matrix[char]`, the mean of the codes; of a `list[bool]` or `matrix[bool]`, the fraction of `True`s |
+| `avg(v)` | Mean of elements (`nan` of an empty vector or matrix); of a `list[char]` or `matrix[char]`, the mean of the codes; of a `list[bool]` or `matrix[bool]`, the fraction of `True`s; of anything but a vector or matrix (`avg(5)`), an error |
 | `abs(v)` | Element-wise absolute value |
 | `sqrt(v)`, `exp`, `log`, `sin`, `cos`, `tan`, `floor`, `ceil` | Element-wise on int, float and char vectors and matrices, giving floats; an int, float or char (its code) gives a float; an error is passed through; anything else (a bool, str, list, dict, table or None) is an error |
 

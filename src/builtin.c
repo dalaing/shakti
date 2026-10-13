@@ -844,9 +844,10 @@ static V *bi_mmul(V **a, in) {
     return mat_matmul(a[0], a[1]);
 }
 static V *bi_avg(V **a, in) {
-    P(n < 1,v_float(0))
+    P(n < 1,v_err("avg(v)"))
     P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_BMAT),vec_reduce_avg(a[0]))
-    return v_float(0);
+    P(a[0]->t == T_ERR,v_ref(a[0]))
+    return v_errf("avg: unsupported operand type %s", type_name(a[0]->t));
 }
 /* min or max of one argument: a vector or matrix reduces over its items, and a str over its
  * characters, giving the least (greatest) char by code (None when empty); a scalar that orders (a bool,

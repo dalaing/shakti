@@ -452,7 +452,13 @@ k : ktable(a:1, b:2)
 - `getcwd()`, `mkdir(path)`, `getenv(name)` — `getenv` returns `None` if unset
 - `path_join`, `path_exists`, `path_isdir`, `path_isfile`, `path_basename`,
   `path_dirname`, `path_splitext`
-- `json_loads(s)`, `json_dumps(x)` — JSON subset (no comments or trailing commas)
+- `json_loads(s)`, `json_dumps(x)` — JSON subset (no comments or trailing commas).
+  `json_dumps` writes `None` as `null`, bools as `true`/`false`, floats in the
+  shortest digits that read back, a datetime as a string, vectors and matrices as
+  arrays, and a table as a dict of its columns (`table(json_loads(s))` reads it
+  back); a char, `list[char]`, `matrix[char]`, inf or nan, date, time, error,
+  function, input, subprocess, or a dict key that is not a `str` gives an error
+  value
 - `re_match`, `re_findall`, `re_sub`, `re_split` — POSIX regex on Unix/macOS
 - `argv` — script path plus remaining CLI args (set when running a script file)
 - `parse_check(src)` — syntax-only check; returns `dict(ok, error)`

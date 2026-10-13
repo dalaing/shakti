@@ -596,11 +596,103 @@ V *bi_json_loads(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("json_loads(s)"))
     return shakti_json_parse(a[0]->s, NULL);
 }
+/* JSON writer for json_dumps: json_write and json_write_float return NULL, or an error value
+   saying what has no JSON form. The depth limit is json_loads's, SHAKTI_JSON_MAX_DEPTH. */
+static void json_write_str(const char *s, FILE *fp) {
+    fputc('"', fp);
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        const unsigned char *q = p;
+        while (*q >= 0x20 && *q != '"' && *q != '\\') q++;   /* a run that needs no escape */
+        if (q > p) fwrite(p, 1, (size_t)(q - p), fp);
+        if (!*q) break;
+        switch (*q) {
+        case '"': fputs("\\\"", fp); break;
+        case '\\': fputs("\\\\", fp); break;
+        case '\b': fputs("\\b", fp); break;
+        case '\f': fputs("\\f", fp); break;
+        case '\n': fputs("\\n", fp); break;
+        case '\r': fputs("\\r", fp); break;
+        case '\t': fputs("\\t", fp); break;
+        default: fprintf(fp, "\\u%04x", *q);
+        }
+        p = q + 1;
+    }
+    fputc('"', fp);
+}
+static V *json_write_float(double d, FILE *fp) {
+    if (!isfinite(d)) return v_err("json_dumps: inf and nan have no JSON form");
+    char buf[64];
+    shakti_format_float_exact(d, buf, sizeof buf);
+    fputs(buf, fp);
+    return NULL;
+}
+static V *json_write(V *v, FILE *fp, int depth) {
+    V *bad = NULL;
+    if (!v || v->t == T_NIL) { fputs("null", fp); return NULL; }
+    /* Only arrays and objects count toward the depth limit, as in json_loads. */
+    if ((is_vec_t(v->t) || is_mat_t(v->t) || v->t == T_LIST || v->t == T_DICT || v->t == T_TABLE)
+        && depth >= SHAKTI_JSON_MAX_DEPTH)
+        return v_errf("json_dumps: nested deeper than %d", SHAKTI_JSON_MAX_DEPTH);
+    switch (v->t) {
+    case T_BOOL: fputs(v->j ? "true" : "false", fp); return NULL;
+    case T_INT: fprintf(fp, "%lld", (long long)v->j); return NULL;
+    case T_FLOAT: return json_write_float(v->f, fp);
+    case T_STR: json_write_str(v->s, fp); return NULL;
+    case T_DATETIME: {
+        char buf[32];
+        shakti_format_datetime_ms(v->j, buf, sizeof buf);
+        json_write_str(buf, fp);
+        return NULL;
+    }
+    case T_IVEC: case T_FVEC: case T_BVEC: case T_LIST:
+        fputc('[', fp);
+        for (int64_t i = 0; i < v->n && !bad; i++) {
+            if (i) fputs(", ", fp);
+            if (v->t == T_IVEC) fprintf(fp, "%lld", (long long)v->J[i]);
+            else if (v->t == T_FVEC) bad = json_write_float(v->F[i], fp);
+            else if (v->t == T_BVEC) fputs(v->B[i] ? "true" : "false", fp);
+            else bad = json_write(v->L[i], fp, depth + 1);
+        }
+        fputc(']', fp);
+        return bad;
+    case T_IMAT: case T_FMAT: case T_BMAT:
+        fputc('[', fp);
+        for (int64_t r = 0; r < v->n && !bad; r++) {
+            if (r) fputs(", ", fp);
+            V *row = v_mat_row(v, r);
+            bad = json_write(row, fp, depth + 1);
+            v_free(row);
+        }
+        fputc(']', fp);
+        return bad;
+    case T_DICT:
+    case T_TABLE:
+        /* A table is written as a dict of its columns; table(json_loads(s)) reads it back. */
+        fputc('{', fp);
+        for (int64_t i = 0; i < v->keys->n && !bad; i++) {
+            V *k = v->keys->L[i];
+            if (!k || k->t != T_STR) return v_err("json_dumps: dict key is not a str");
+            if (i) fputs(", ", fp);
+            json_write_str(k->s, fp);
+            fputs(": ", fp);
+            bad = json_write(v->vals->L[i], fp, depth + 1);
+        }
+        fputc('}', fp);
+        return bad;
+    default:
+        return v_errf("json_dumps: no JSON form for %s", type_name(v->t));
+    }
+}
 V *bi_json_dumps(V **a, in) {
     P(n < 1,v_str(""))
-    char *r = v_repr(a[0]);
-    V *o = v_str(r);
-    free(r);
+    P(a[0]->t == T_ERR,v_err(a[0]->s))
+    char *buf = NULL; size_t sz = 0;
+    FILE *fp = OPEN_MEMSTREAM(&buf, &sz);
+    V *bad = json_write(a[0], fp, 0);
+    CLOSE_MEMSTREAM(fp, &buf, &sz);
+    V *o = bad ? bad : v_str(buf ? buf : "");
+    free(buf);
     return o;
 }
 V *bi_json_load(V **a, in) {
@@ -614,6 +706,7 @@ V *bi_json_load(V **a, in) {
 V *bi_json_dump(V **a, in) {
     P(n < 2 || a[1]->t != T_STR,v_err("json_dump(obj, path)"))
     V *s = bi_json_dumps(a, 1);
+    P(s->t == T_ERR,s)
     V *p[2] = {a[1], s};
     V *r = bi_fwrite(p, 2);
     v_free(s);

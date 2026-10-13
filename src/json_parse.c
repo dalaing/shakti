@@ -5,7 +5,6 @@
 #include <ctype.h>
 #include <errno.h>
 
-#define SHAKTI_JSON_MAX_DEPTH 512
 /* Resource limits: nesting depth is already bounded above. These additionally
  * bound single-string length and per-container element count so a
  * malformed-but-flat document cannot exhaust memory. Whole-document size for

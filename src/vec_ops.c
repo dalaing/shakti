@@ -761,7 +761,8 @@ V *vec_cmp(V *a, V *b, int op) {
         return r;
     }
     if ((a->t == T_INT || a->t == T_FLOAT || a->t == T_BOOL || a->t == T_CHAR) && is_mat_t(b->t))
-        return vec_cmp(b, a, op);
+        return vec_cmp(b, a, op == OP_LT ? OP_GT : op == OP_GT ? OP_LT :   /* x < m is m > x */
+                             op == OP_LE ? OP_GE : op == OP_GE ? OP_LE : op);
     if (is_mat_t(a->t) && is_mat_t(b->t) && (op == OP_EQ || op == OP_NE)) {
         P(a->n != b->n || mat_cols(a) != mat_cols(b), v_bool(op == OP_NE))
         return v_bool(nums_equal(a, b, a->n * mat_cols(a)) == (op == OP_EQ));

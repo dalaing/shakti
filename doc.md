@@ -302,6 +302,11 @@ range(2) add@ range(3)   # length mismatch
 a @ b                    # error unless a is callable
 ```
 
+A callable that changes the size of the dict or table being walked (a new key, a new column)
+stops the walk with an error ("changed size during iteration"). One that replaces a value or a
+column of the same height doesn't stop it: the items each has yet to reach are read from the
+new value, as a list's are.
+
 Leading `@` decorates. `mmul(a, b)` multiplies matrices.
 
 ## Methods

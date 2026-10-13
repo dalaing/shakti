@@ -177,6 +177,15 @@ static int each_table_find_col(V *t, const char *name) {
         if (t->keys->L[i]->t == T_STR && !strcmp(t->keys->L[i]->s, name)) return (int)i;
     return -1;
 }
+/* fn may change the table each walks (a write through any name is shared): one
+ * whose shape changed is refused. A column's length can't change in place (append and pop refuse a column) and a
+ * column put in its place must have the table's height, so the height, the
+ * column count and the column being walked (c) are all that need checking; a
+ * column replaced at the same height is read afresh, as a list's items are. */
+static int each_table_resized(V *t, int64_t nc, int64_t nr, int64_t c) {
+    if (t->n != nr || t->keys->n != nc || t->vals->n != nc) return 1;
+    return !t->vals->L[c] || t->vals->L[c]->n != nr;
+}
 static V *each_col_get(V *col, int64_t i) {
     if (col->t == T_IVEC) return v_int(col->J[i]);
     if (col->t == T_FVEC) return v_float(col->F[i]);
@@ -235,6 +244,10 @@ static V *each_unary(V *fn, V *xs, Env *e) {
         V *vals = v_list(n);
         for (int64_t i = 0; i < n; i++) {
             V *rv = each_invoke(fn, (V*[]){xs->vals->L[i]}, 1, e);
+            if (rv && rv->t != T_ERR && !g_error && xs->n != n) {
+                v_free(rv);
+                rv = v_err("each: dict changed size during iteration");
+            }
             if (!rv || rv->t == T_ERR || g_error) {
                 for (int64_t j = 0; j < i; j++) v_free(vals->L[j]);
                 free(vals->L); free(vals);
@@ -257,6 +270,7 @@ static V *each_unary(V *fn, V *xs, Env *e) {
                 return v_err("out of memory");
             }
             for (int64_t r = 0; r < nr; r++) {
+                col = xs->vals->L[c];
                 V *el = each_col_get(col, r);
                 if (el->t == T_ERR) {
                     each_free_items(items, r);
@@ -265,6 +279,10 @@ static V *each_unary(V *fn, V *xs, Env *e) {
                 }
                 V *rv = each_invoke(fn, (V*[]){el}, 1, e);
                 v_free(el);
+                if (rv && rv->t != T_ERR && !g_error && each_table_resized(xs, nc, nr, c)) {
+                    v_free(rv);
+                    rv = v_err("each: table changed size during iteration");
+                }
                 if (!rv || rv->t == T_ERR || g_error) {
                     each_free_items(items, r);
                     v_free(new_data);
@@ -341,6 +359,10 @@ static V *each_dyadic(V *fn, V *xs, V *ys, Env *e) {
             V *vals = v_list(n);
             for (int64_t i = 0; i < n; i++) {
                 V *rv = each_invoke(fn, (V*[]){xs->vals->L[i], ys}, 2, e);
+                if (rv && rv->t != T_ERR && !g_error && xs->n != n) {
+                    v_free(rv);
+                    rv = v_err("each: dict changed size during iteration");
+                }
                 if (!rv || rv->t == T_ERR || g_error) {
                     for (int64_t j = 0; j < i; j++) v_free(vals->L[j]);
                     free(vals->L); free(vals);
@@ -360,9 +382,14 @@ static V *each_dyadic(V *fn, V *xs, V *ys, Env *e) {
                 V **items = calloc(nr ? (size_t)nr : 1, sizeof(V*));
                 if (!items) { v_free(new_data); return v_err("out of memory"); }
                 for (int64_t r = 0; r < nr; r++) {
+                    col = xs->vals->L[c];
                     V *el = each_col_get(col, r);
                     V *rv = each_invoke(fn, (V*[]){el, ys}, 2, e);
                     v_free(el);
+                    if (rv && rv->t != T_ERR && !g_error && each_table_resized(xs, nc, nr, c)) {
+                        v_free(rv);
+                        rv = v_err("each: table changed size during iteration");
+                    }
                     if (!rv || rv->t == T_ERR || g_error) {
                         each_free_items(items, r);
                         v_free(new_data);
@@ -425,6 +452,10 @@ static V *each_dyadic(V *fn, V *xs, V *ys, Env *e) {
             V *vals = v_list(n);
             for (int64_t i = 0; i < n; i++) {
                 V *rv = each_invoke(fn, (V*[]){xs, ys->vals->L[i]}, 2, e);
+                if (rv && rv->t != T_ERR && !g_error && ys->n != n) {
+                    v_free(rv);
+                    rv = v_err("each: dict changed size during iteration");
+                }
                 if (!rv || rv->t == T_ERR || g_error) {
                     for (int64_t j = 0; j < i; j++) v_free(vals->L[j]);
                     free(vals->L); free(vals);
@@ -444,9 +475,14 @@ static V *each_dyadic(V *fn, V *xs, V *ys, Env *e) {
                 V **items = calloc(nr ? (size_t)nr : 1, sizeof(V*));
                 if (!items) { v_free(new_data); return v_err("out of memory"); }
                 for (int64_t r = 0; r < nr; r++) {
+                    col = ys->vals->L[c];
                     V *el = each_col_get(col, r);
                     V *rv = each_invoke(fn, (V*[]){xs, el}, 2, e);
                     v_free(el);
+                    if (rv && rv->t != T_ERR && !g_error && each_table_resized(ys, nc, nr, c)) {
+                        v_free(rv);
+                        rv = v_err("each: table changed size during iteration");
+                    }
                     if (!rv || rv->t == T_ERR || g_error) {
                         each_free_items(items, r);
                         v_free(new_data);
@@ -510,8 +546,9 @@ static V *each_dyadic(V *fn, V *xs, V *ys, Env *e) {
     }
     if (xs->t == T_DICT && ys->t == T_DICT) {
         if (xs->n != ys->n) return v_err("each: dictionary key set mismatch");
-        V *vals = v_list(xs->n);
-        for (int64_t i = 0; i < xs->n; i++) {
+        int64_t n = xs->n;
+        V *vals = v_list(n);
+        for (int64_t i = 0; i < n; i++) {
             int j = each_dict_find_key(ys, xs->keys->L[i]);
             if (j < 0) {
                 for (int64_t k = 0; k < i; k++) v_free(vals->L[k]);
@@ -519,6 +556,10 @@ static V *each_dyadic(V *fn, V *xs, V *ys, Env *e) {
                 return v_err("each: dictionary key set mismatch");
             }
             V *rv = each_invoke(fn, (V*[]){xs->vals->L[i], ys->vals->L[j]}, 2, e);
+            if (rv && rv->t != T_ERR && !g_error && (xs->n != n || ys->n != n)) {
+                v_free(rv);
+                rv = v_err("each: dict changed size during iteration");
+            }
             if (!rv || rv->t == T_ERR || g_error) {
                 for (int64_t k = 0; k < i; k++) v_free(vals->L[k]);
                 free(vals->L); free(vals);
@@ -546,10 +587,17 @@ static V *each_dyadic(V *fn, V *xs, V *ys, Env *e) {
             V **items = calloc(nr ? (size_t)nr : 1, sizeof(V*));
             if (!items) { v_free(new_data); return v_err("out of memory"); }
             for (int64_t r = 0; r < nr; r++) {
+                colx = xs->vals->L[c];
+                coly = ys->vals->L[yc];
                 V *a = each_col_get(colx, r);
                 V *b = each_col_get(coly, r);
                 V *rv = each_invoke(fn, (V*[]){a, b}, 2, e);
                 v_free(a); v_free(b);
+                if (rv && rv->t != T_ERR && !g_error &&
+                    (each_table_resized(xs, nc, nr, c) || each_table_resized(ys, nc, nr, yc))) {
+                    v_free(rv);
+                    rv = v_err("each: table changed size during iteration");
+                }
                 if (!rv || rv->t == T_ERR || g_error) {
                     each_free_items(items, r);
                     v_free(new_data);

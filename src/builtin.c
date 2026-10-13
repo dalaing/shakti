@@ -578,6 +578,7 @@ static V *vec_reduce_sum(V *v) {
             if (e->t == T_INT) s += (double)e->j;
             else if (e->t == T_BOOL) s += e->j != 0;
             else if (e->t == T_FLOAT) { s += e->f; all_int = 0; }
+            else if (e->t == T_ERR) return v_ref(e);
             else return v_err("sum: bad list element");
         }
         return sum_double_value(s, all_int);
@@ -788,13 +789,14 @@ static V *bi_sum(V **a, in) {
     P(n < 1,v_int(0))
     if (n == 1) {
         V *v = a[0];
+        P(v->t == T_ERR,v_ref(v))
         P(v->t >= T_IVEC && v->t <= T_LIST,vec_reduce_sum(v))
         P(v->t >= T_IMAT && v->t <= T_BMAT,vec_reduce_sum(v))
         P(v->t == T_CHAR,v_int(v->j))
         P(v->t == T_FLOAT,v_float(v->f))
         P(v->t == T_INT,v_int(v->j))
         P(v->t == T_BOOL,v_int(v->j != 0))
-        return v_int(0);
+        return v_errf("sum: unsupported operand type %s", type_name(v->t));
     }
     double s = 0;
     int all_int = 1;
@@ -814,7 +816,8 @@ static V *bi_sum(V **a, in) {
             if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
             else s += (double)p->j;
             v_free(p);
-        } else return v_err("sum: bad arg");
+        } else if (a[i]->t == T_ERR) return v_ref(a[i]);
+        else return v_errf("sum: unsupported operand type %s", type_name(a[i]->t));
     }
     return sum_double_value(s, all_int);
 }

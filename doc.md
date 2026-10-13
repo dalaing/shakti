@@ -183,6 +183,9 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - `==` is not supported
 - `_` separates digits in a decimal number, as in Python: `1_000`, `0.000_1`, `1e1_0`; it must sit
   between two digits (`1_`, `1__0`, `1_.5` are errors)
+- `None`, `False`, zero (including `char(0)` and the zero date, time and datetime), `""`,
+  empty containers (list, matrix, dict, table) and error values are false in `if`, `while`,
+  `not`, `and`/`or`, `bool()`, `any()` and `all()`
 - Integer bitwise helpers: `band(a,b)`, `bor(a,b)`, `bxor(a,b)`, `bnot(a)`,
   `shl(a,b)`, `shr(a,b)` — `shl`/`shr` are logical shifts on the low 64 bits;
   shift counts must be in `0..63`

@@ -14,6 +14,7 @@ int is_truthy(V *v) {
     case T_STR:  return v->s[0] != 0;
     case T_IVEC: case T_FVEC: case T_BVEC: case T_CVEC: case T_LIST: return v->n > 0;
     case T_IMAT: case T_FMAT: case T_BMAT: case T_CMAT: return v->n > 0 && mat_cols(v) > 0;
+    case T_DICT: case T_TABLE: return v->n > 0;   /* entries, rows */
     case T_DATETIME: return v->j != 0;
     case T_DATE: return v->j != 0;
     case T_TIME: return v->j != 0;

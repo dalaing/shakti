@@ -48,6 +48,7 @@ extern V *bi_dict(V**,int nargs,V**,V**,int nkw);
 extern V *bi_ktable(V**,int nargs,V**,V**,int nkw);
 extern V *bi_set(V**,in);
 extern V *vec_cmp(V*,V*,int);
+extern int is_truthy(V *v);
 extern V *bi_talk_listen(V**,in);
 extern V *bi_talk_set_locale(V**,in);
 extern V *bi_talk_set_model(V**,in);
@@ -507,10 +508,7 @@ static V *bi_list(V**a,in){
         return v_err("cannot convert to list");
     return v_err("cannot convert to list");}
 static V *bi_bool(V**a,in){
-    P(n<1,v_bool(0))V*v=a[0];
-    P(v->t==T_BOOL,v_bool(v->j))P(v->t==T_INT,v_bool(v->j!=0))P(v->t==T_CHAR,v_bool(v->j!=0))
-    P(v->t==T_FLOAT,v_bool(v->f!=0))P(v->t==T_STR,v_bool(v->s[0]!=0))
-    P(v->t==T_NIL,v_bool(0))return v_bool(1);}
+    P(n<1,v_bool(0))return v_bool(is_truthy(a[0]));}   /* the truth `if` uses */
 static int bi_numvec(V *v) { return v->t == T_IVEC || v->t == T_FVEC || v->t == T_IMAT || v->t == T_FMAT; }
 static int64_t mat_nelem(V *v) { return v->n * mat_cols(v); }
 /* Exact int64 sum; promotes to float on overflow like scalar +. Split halves keep the loop vectorizable. */

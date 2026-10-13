@@ -368,7 +368,7 @@ A zero divisor in `/`, `//` or `%` on a vector or matrix, whether an item or the
 |---------|---------|
 | `dot(a, b)` | Inner product (fused; no intermediate vector) |
 | `sum(v)` | Sum of elements |
-| `min(v)`, `max(v)`, `avg(v)` | Reducers |
+| `min(v)`, `max(v)`, `avg(v)` | Reducers (`min(a, b, ...)` and `max(a, b, ...)` compare their arguments with `<` and `>`, as in Python: `max(3, 9, 4)` is `9`) |
 | `abs(v)` | Element-wise absolute value |
 | `sqrt(v)`, `exp`, `log`, `sin`, `cos`, `tan`, `floor`, `ceil` | Element-wise on int, float and char vectors and matrices, giving floats; an int, float or char (its code) gives a float; an error is passed through; anything else (a bool, str, list, dict, table or None) is an error |
 

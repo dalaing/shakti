@@ -580,6 +580,23 @@ static V *vec_reduce_avg(V *v) {
     v_free(s);
     return r;
 }
+/* min or max of several arguments compares them with < (min) or > (max), as in Python, and gives
+ * the first extreme one itself (max(3, 9, 4) is 9); arguments that don't compare (a vector or a None
+ * among them) are an error, and an error argument passes through. */
+static V *bi_extreme(const char *fn, V **a, int64_t n, int op) {
+    V *m = a[0];
+    if (m->t == T_ERR) return v_ref(m);
+    for (int64_t i = 1; i < n; i++) {
+        if (a[i]->t == T_ERR) return v_ref(a[i]);
+        V *c = vec_cmp(a[i], m, op);
+        /* None compares False either way, so it would win or lose by its place: refuse it */
+        int win = c->t == T_BOOL && c->j, ok = c->t == T_BOOL && m->t != T_NIL && a[i]->t != T_NIL;
+        v_free(c);
+        if (!ok) return v_errf("%s: cannot compare %s and %s", fn, type_name(m->t), type_name(a[i]->t));
+        if (win) m = a[i];
+    }
+    return v_ref(m);
+}
 static V *vec_reduce_min(V *v) {
     if (v->t == T_IMAT) {
         P(v->n == 0 || mat_cols(v) == 0,v_nil())
@@ -798,22 +815,14 @@ static V *bi_avg(V **a, in) {
 }
 static V *bi_min(V **a, in) {
     P(n < 1,v_nil())
+    P(n > 1,bi_extreme("min", a, n, OP_LT))
     P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_min(a[0]))
-    if (n == 2) {
-        double x = a[0]->t == T_INT ? (double)a[0]->j : a[0]->f;
-        double y = a[1]->t == T_INT ? (double)a[1]->j : a[1]->f;
-        return x < y ? v_float(x) : v_float(y);
-    }
     return v_nil();
 }
 static V *bi_max(V **a, in) {
     P(n < 1,v_nil())
+    P(n > 1,bi_extreme("max", a, n, OP_GT))
     P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_max(a[0]))
-    if (n == 2) {
-        double x = a[0]->t == T_INT ? (double)a[0]->j : a[0]->f;
-        double y = a[1]->t == T_INT ? (double)a[1]->j : a[1]->f;
-        return x > y ? v_float(x) : v_float(y);
-    }
     return v_nil();
 }
 static V *bi_abs(V **a, in) {

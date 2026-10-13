@@ -192,6 +192,8 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - `int(x)` of a float truncates toward zero; a NaN, an infinity or a float outside the int range
   (`int(1e19)`) is an error value
 - `parse_check(src)` returns `dict(ok, error)` — syntax only, no eval
+- `assert e` and `assert e, msg` are statements: the whole expression is asserted
+  (`assert [1] = [2]` fails); `assert(e, msg)` works too
 
 String and formatted-string token text is limited to 8191 bytes, and source
 indentation is limited to 255 nested levels. Inputs beyond either limit fail

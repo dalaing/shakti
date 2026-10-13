@@ -9,7 +9,7 @@ static const char IE_CARD_TEXT[] =
     "\n"
     "stmt   x: e · def f(a, b:2): · return e · import m\n"
     "       if e: / elif / else: · while e: · for x in e:\n"
-    "       @deco · class C: · try/except/finally\n"
+    "       @deco · class C: · try/except/finally · assert e, msg\n"
     "\n"
     "expr   lit name e.f e[i] e[a:b] f(…) f@ xs  xs f@ ys\n"
     "       + - * / // % ** · = != < > <= >= · and or not\n"

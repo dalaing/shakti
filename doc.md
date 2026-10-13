@@ -367,7 +367,7 @@ A zero divisor in `/`, `//` or `%` on a vector or matrix, whether an item or the
 | Builtin | Meaning |
 |---------|---------|
 | `dot(a, b)` | Inner product (fused; no intermediate vector) |
-| `sum(v)` | Sum of elements; of a `list[char]` or `matrix[char]`, the sum of the codes |
+| `sum(v)` | Sum of elements; of a `list[char]` or `matrix[char]`, the sum of the codes; a bool counts as 0 or 1, so of a `list[bool]` or `matrix[bool]` it is the number of `True`s |
 | `min(v)`, `max(v)` | Least and greatest element; of a `list[char]` or `matrix[char]`, `min`/`max` are chars, ordered by code; of a `str`, its least and greatest character (a `char`); a scalar is its own `min` and `max` (`max(5)` is `5`) |
 | `min(a, b, ...)`, `max(a, b, ...)` | Compare the arguments with `<` and `>`, as in Python: `max(3, 9, 4)` is `9`; arguments, or items of a list, that don't compare (`1` and `"a"`, or a `None`) are an error |
 | `avg(v)` | Mean of elements; of a `list[char]` or `matrix[char]`, the mean of the codes |

@@ -563,12 +563,20 @@ static V *vec_reduce_sum(V *v) {
         for (int64_t i = 0; i < ne; i++) s += v->B[i];
         return v_int(s);
     }
+    if (v->t == T_BVEC || v->t == T_BMAT) {
+        /* the count of Trues: a bool counts as 0 or 1, as in Python */
+        int64_t s = 0;
+        int64_t ne = v->t == T_BMAT ? mat_nelem(v) : v->n;
+        for (int64_t i = 0; i < ne; i++) s += v->B[i] != 0;
+        return v_int(s);
+    }
     if (v->t == T_LIST) {
         double s = 0;
         int all_int = 1;
         for (int64_t i = 0; i < v->n; i++) {
             V *e = v->L[i];
             if (e->t == T_INT) s += (double)e->j;
+            else if (e->t == T_BOOL) s += e->j != 0;
             else if (e->t == T_FLOAT) { s += e->f; all_int = 0; }
             else return v_err("sum: bad list element");
         }
@@ -767,16 +775,18 @@ static V *bi_sum(V **a, in) {
     if (n == 1) {
         V *v = a[0];
         P(v->t >= T_IVEC && v->t <= T_LIST,vec_reduce_sum(v))
-        P((v->t >= T_IMAT && v->t <= T_FMAT) || v->t == T_CMAT,vec_reduce_sum(v))
+        P(v->t >= T_IMAT && v->t <= T_BMAT,vec_reduce_sum(v))
         P(v->t == T_CHAR,v_int(v->j))
         P(v->t == T_FLOAT,v_float(v->f))
         P(v->t == T_INT,v_int(v->j))
+        P(v->t == T_BOOL,v_int(v->j != 0))
         return v_int(0);
     }
     double s = 0;
     int all_int = 1;
     for (int i = 0; i < n; i++) {
         if (a[i]->t == T_INT || a[i]->t == T_CHAR) s += (double)a[i]->j;
+        else if (a[i]->t == T_BOOL) s += a[i]->j != 0;
         else if (a[i]->t == T_FLOAT) { s += a[i]->f; all_int = 0; }
         else if (a[i]->t >= T_IVEC && a[i]->t <= T_LIST) {
             V *p = vec_reduce_sum(a[i]);
@@ -784,7 +794,7 @@ static V *bi_sum(V **a, in) {
             if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
             else s += (double)p->j;
             v_free(p);
-        } else if ((a[i]->t >= T_IMAT && a[i]->t <= T_FMAT) || a[i]->t == T_CMAT) {
+        } else if (a[i]->t >= T_IMAT && a[i]->t <= T_BMAT) {
             V *p = vec_reduce_sum(a[i]);
             P(p->t == T_ERR,p)
             if (p->t == T_FLOAT) { s += p->f; all_int = 0; }

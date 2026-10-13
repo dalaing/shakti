@@ -352,6 +352,10 @@ print(len(xs))                # 5
 ## Vectors
 
 `range(n)` builds an `ivec` `[0, 1, …, n - 1]`. Element-wise `+`, `-`, `*`, `/`, `//`, `%` work on matching-length `ivec` / `fvec` pairs (and scalar broadcast).
+`**` of ints is an int, as `2 ** 3` is `8`, for vectors and matrices too (`[2, 3] ** 2` is `[4, 9]`);
+if an exponent is negative or a power overflows, the whole result is float (`[2, 4] ** -1` is
+`[0.5, 0.25]`). An int result is exact, as `5 ** 27` is: `5 ** [27]` is
+`[7450580596923828125]`.
 
 | Builtin | Meaning |
 |---------|---------|

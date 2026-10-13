@@ -78,6 +78,37 @@ static void i64_arith_f(double *r, const int64_t *a, int64_t xa, const int64_t *
         r[i] = op == OP_ADD ? x + y : op == OP_SUB ? x - y : x * y;
     }
 }
+/* Exact integer power via squaring. Sets *z = x ** y and returns 1 when y >= 0 and the power fits
+ * an int; otherwise returns 0 and the caller falls back to float, so we never emit a rounded
+ * integer (pow() on doubles loses precision above 2^53, e.g. 5**27). */
+static int i64_pow(int64_t x, int64_t y, int64_t *z) {
+    int64_t base = x, exp = y, acc = 1;
+    if (y < 0) return 0;
+    while (exp > 0) {
+        if ((exp & 1) && __builtin_mul_overflow(acc, base, &acc)) return 0;
+        exp >>= 1;
+        if (exp && __builtin_mul_overflow(base, base, &base)) return 0;
+    }
+    *z = acc;
+    return 1;
+}
+/* Int ** int item by item, as for two ints: an int vector or matrix shaped like `like` while every
+ * power is exact, else (a negative exponent or an overflow) the whole result is float, each item
+ * the float of its power. xs/ys are the operands' items (NULL: the scalar x/y). */
+static V *i64_pow_items(V *like, const int64_t *xs, int64_t x, const int64_t *ys, int64_t y) {
+    int mat = is_mat_t(like->t);
+    int64_t ne = mat ? like->n * mat_cols(like) : like->n, i = 0, z;
+    V *r = mat ? v_imat(like->n, mat_cols(like)) : v_ivec(like->n);
+    while (i < ne && i64_pow(xs ? xs[i] : x, ys ? ys[i] : y, &r->J[i])) i++;
+    if (i == ne) return r;
+    v_free(r);
+    r = mat ? v_fmat(like->n, mat_cols(like)) : v_fvec(like->n);
+    for (i = 0; i < ne; i++) {
+        int64_t a = xs ? xs[i] : x, b = ys ? ys[i] : y;
+        r->F[i] = i64_pow(a, b, &z) ? (double)z : pow((double)a, (double)b);
+    }
+    return r;
+}
 V *mat_binop(V *a, V *b, int op) {
     if (!is_mat_t(a->t) && !is_mat_t(b->t)) return NULL;
     if (a->t == T_BMAT || b->t == T_BMAT)
@@ -86,8 +117,10 @@ V *mat_binop(V *a, V *b, int op) {
         return v_err("arithmetic not supported on matrix[char]");
     if (is_mat_t(a->t) && (b->t == T_INT || b->t == T_FLOAT || b->t == T_CHAR)) {
         int64_t rows = a->n, cols = mat_cols(a), ne = rows * cols;
-        /* / and ** are float, as for two matrices and for vectors; the int kernel does neither. */
-        int out_t = (a->t == T_FMAT || b->t == T_FLOAT || op == OP_DIV || op == OP_POW) ? T_FMAT : T_IMAT;
+        if (op == OP_POW && a->t == T_IMAT && b->t != T_FLOAT)
+            return i64_pow_items(a, a->J, 0, NULL, b->j);
+        /* / is float, as for two matrices and for vectors; the int kernel does not divide. */
+        int out_t = (a->t == T_FMAT || b->t == T_FLOAT || op == OP_DIV) ? T_FMAT : T_IMAT;
         if (out_t == T_IMAT && op == OP_FLOORDIV && a->t == T_IMAT &&
             i64_span_promotes(a->J, NULL, ne, 0, 0, 1, b->j))
             out_t = T_FMAT;
@@ -123,7 +156,9 @@ V *mat_binop(V *a, V *b, int op) {
         /* x op m is m op x when op commutes; the others are computed here, x on the left. */
         if (op == OP_SUB || op == OP_DIV || op == OP_FLOORDIV || op == OP_MOD || op == OP_POW) {
             int64_t rows = b->n, cols = mat_cols(b), ne = rows * cols;
-            if (b->t == T_FMAT || a->t == T_FLOAT || op == OP_DIV || op == OP_POW) {
+            if (op == OP_POW && b->t == T_IMAT && a->t != T_FLOAT)
+                return i64_pow_items(b, NULL, a->j, b->J, 0);
+            if (b->t == T_FMAT || a->t == T_FLOAT || op == OP_DIV) {
                 V *out = v_fmat(rows, cols);
                 double x = to_float(a);
                 if (b->t == T_FMAT) {
@@ -161,9 +196,11 @@ V *mat_binop(V *a, V *b, int op) {
         return v_errf("unsupported operand types for op %d: %s and %s", op, type_name(a->t), type_name(b->t));
     if (a->n != b->n || mat_cols(a) != mat_cols(b))
         return v_err("matrix shape mismatch");
+    if (op == OP_POW && a->t == T_IMAT && b->t == T_IMAT)
+        return i64_pow_items(a, a->J, 0, b->J, 0);
     int64_t ne = a->n * mat_cols(a);
     int out_t = (a->t == T_FMAT || b->t == T_FMAT) ? T_FMAT : T_IMAT;
-    if (op == OP_DIV || op == OP_POW) out_t = T_FMAT;
+    if (op == OP_DIV) out_t = T_FMAT;
     if (out_t == T_IMAT && op == OP_FLOORDIV &&
         i64_span_promotes(a->J, b->J, ne, 0, 0, 0, 0))
         out_t = T_FMAT;
@@ -219,6 +256,10 @@ V *vec_binop(V *a, V *b, int op) {
     /* Scalars broadcast. Two vectors must be the same length. */
     if (is_arith_vec(a->t) && is_arith_vec(b->t) && a->n != b->n)
         return v_err("length mismatch");
+    if (op == OP_POW && (a->t == T_IVEC || b->t == T_IVEC) &&
+        (a->t == T_IVEC || a->t == T_INT) && (b->t == T_IVEC || b->t == T_INT))
+        return i64_pow_items(a->t == T_IVEC ? a : b, a->t == T_IVEC ? a->J : NULL, a->t == T_INT ? a->j : 0,
+                             b->t == T_IVEC ? b->J : NULL, b->t == T_INT ? b->j : 0);
     if (a->t == T_IVEC && b->t == T_IVEC && op != OP_DIV && op != OP_POW) {
         int64_t n = a->n;
         V *r = v_ivec(n);
@@ -384,20 +425,8 @@ V *vec_binop(V *a, V *b, int op) {
                 if(x==INT64_MIN && y==-1) return v_int(0);
                 return v_int(x%y);
             case OP_POW: {
-                /* Exact integer power via squaring; overflow falls back to
-                 * float so we never emit a rounded integer (pow() on doubles
-                 * loses precision above 2^53, e.g. 5**27). */
-                if(y >= 0) {
-                    int64_t base=x, exp=y, acc=1; int overflow=0;
-                    while(exp > 0) {
-                        if(exp & 1) {
-                            if(__builtin_mul_overflow(acc, base, &acc)) { overflow=1; break; }
-                        }
-                        exp >>= 1;
-                        if(exp && __builtin_mul_overflow(base, base, &base)) { overflow=1; break; }
-                    }
-                    if(!overflow) return v_int(acc);
-                }
+                int64_t z;
+                if(i64_pow(x, y, &z)) return v_int(z);
                 return v_float(pow((double)x, (double)y));
             }
             default: break;

@@ -529,6 +529,7 @@ V *vec_binop(V *a, V *b, int op) {
     return v_errf("unsupported operand types for op %d: %s and %s", op, type_name(a->t), type_name(b->t));
     #undef VEC_BIN
 }
+static V *vec_cmp_rest(V *a, V *b, int op);
 V *vec_cmp(V *a, V *b, int op) {
     if((a->t==T_INT||a->t==T_FLOAT||a->t==T_BOOL||a->t==T_CHAR) && (b->t==T_INT||b->t==T_FLOAT||b->t==T_BOOL||b->t==T_CHAR)) {
         double x = a->t==T_BOOL?(double)a->j:to_float(a);
@@ -656,10 +657,10 @@ V *vec_cmp(V *a, V *b, int op) {
         }
         return r;
     }
-    if((a->t==T_IVEC||a->t==T_FVEC||a->t==T_CVEC) && (b->t==T_INT||b->t==T_FLOAT||b->t==T_CHAR)) {
+    if(is_vec_t(a->t) && (b->t==T_INT||b->t==T_FLOAT||b->t==T_CHAR||b->t==T_BOOL)) {
         int64_t n=a->n; V *r=v_bvec(n); double y=to_float(b);
         for(int64_t i=0;i<n;i++) {
-            double x = a->t==T_IVEC?(double)a->J[i]:a->t==T_CVEC?(double)a->B[i]:a->F[i];
+            double x = a->t==T_IVEC?(double)a->J[i]:a->t==T_FVEC?a->F[i]:(double)a->B[i];
             switch(op) {
             case OP_EQ: r->B[i]=(x==y); break; case OP_NE: r->B[i]=(x!=y); break;
             case OP_LT: r->B[i]=(x<y); break;  case OP_GT: r->B[i]=(x>y); break;
@@ -669,10 +670,10 @@ V *vec_cmp(V *a, V *b, int op) {
         }
         return r;
     }
-    if((a->t==T_INT||a->t==T_FLOAT||a->t==T_CHAR) && (b->t==T_IVEC||b->t==T_FVEC||b->t==T_CVEC)) {
+    if((a->t==T_INT||a->t==T_FLOAT||a->t==T_CHAR||a->t==T_BOOL) && is_vec_t(b->t)) {
         int64_t n=b->n; V *r=v_bvec(n); double x=to_float(a);
         for(int64_t i=0;i<n;i++) {
-            double y = b->t==T_IVEC?(double)b->J[i]:b->t==T_CVEC?(double)b->B[i]:b->F[i];
+            double y = b->t==T_IVEC?(double)b->J[i]:b->t==T_FVEC?b->F[i]:(double)b->B[i];
             switch(op) {
             case OP_EQ: r->B[i]=(x==y); break; case OP_NE: r->B[i]=(x!=y); break;
             case OP_LT: r->B[i]=(x<y); break;  case OP_GT: r->B[i]=(x>y); break;
@@ -682,52 +683,14 @@ V *vec_cmp(V *a, V *b, int op) {
         }
         return r;
     }
-    if((a->t==T_IVEC||a->t==T_FVEC||a->t==T_CVEC) && (b->t==T_IVEC||b->t==T_FVEC||b->t==T_CVEC) && (op==OP_EQ||op==OP_NE)) {
+    if(is_vec_t(a->t) && is_vec_t(b->t) && (op==OP_EQ||op==OP_NE)) {
         P(a->n != b->n,v_bool(op==OP_NE))
         for(int64_t i=0;i<a->n;i++) {
-            double x = a->t==T_IVEC?(double)a->J[i]:a->t==T_CVEC?(double)a->B[i]:a->F[i];
-            double y = b->t==T_IVEC?(double)b->J[i]:b->t==T_CVEC?(double)b->B[i]:b->F[i];
+            double x = a->t==T_IVEC?(double)a->J[i]:a->t==T_FVEC?a->F[i]:(double)a->B[i];
+            double y = b->t==T_IVEC?(double)b->J[i]:b->t==T_FVEC?b->F[i]:(double)b->B[i];
             P(x != y,v_bool(op==OP_NE))
         }
         return v_bool(op==OP_EQ);
-    }
-    if(a->t==T_LIST && (b->t==T_LIST||b->t==T_IVEC||b->t==T_FVEC||b->t==T_CVEC) && (op==OP_EQ||op==OP_NE)) {
-        P(a->n != b->n,v_bool(op==OP_NE))
-        for(int64_t i=0;i<a->n;i++) {
-            V *belem;
-            if(b->t==T_LIST) belem = b->L[i];
-            else if(b->t==T_IVEC) belem = v_int(b->J[i]);
-            else if(b->t==T_CVEC) belem = v_char(b->B[i]);
-            else belem = v_float(b->F[i]);
-            V *c = vec_cmp(a->L[i], belem, OP_EQ);
-            int eq = c->t==T_BOOL && c->j;
-            v_free(c); if(b->t != T_LIST) v_free(belem);
-            P(!eq,v_bool(op==OP_NE))
-        }
-        return v_bool(op==OP_EQ);
-    }
-    if((a->t==T_IVEC||a->t==T_FVEC||a->t==T_CVEC) && b->t==T_LIST && (op==OP_EQ||op==OP_NE)) {
-        return vec_cmp(b, a, op);
-    }
-    if(a->t==T_LIST && b->t==T_STR) {
-        int64_t n = a->n;
-        V *r = v_bvec(n);
-        for(int64_t i = 0; i < n; i++) {
-            V *c = vec_cmp(a->L[i], b, op);
-            r->B[i] = (c->t == T_BOOL && c->j) ? 1 : 0;
-            v_free(c);
-        }
-        return r;
-    }
-    if(a->t==T_STR && b->t==T_LIST) {
-        int64_t n = b->n;
-        V *r = v_bvec(n);
-        for(int64_t i = 0; i < n; i++) {
-            V *c = vec_cmp(a, b->L[i], op);
-            r->B[i] = (c->t == T_BOOL && c->j) ? 1 : 0;
-            v_free(c);
-        }
-        return r;
     }
     if(a->t==T_DICT && b->t==T_DICT && (op==OP_EQ||op==OP_NE)) {
         P(a->n != b->n,v_bool(op==OP_NE))
@@ -813,6 +776,126 @@ V *vec_cmp(V *a, V *b, int op) {
             }
         }
         return r;
+    }
+    return vec_cmp_rest(a, b, op);
+}
+static int is_seq_t(int t) { return is_vec_t(t) || t == T_LIST || is_mat_t(t); }
+static int is_single_t(int t) {
+    return t == T_BOOL || t == T_INT || t == T_FLOAT || t == T_CHAR || t == T_STR
+        || t == T_DATE || t == T_DATETIME || t == T_TIME;
+}
+static int cmp_true(V *a, V *b, int op) {
+    V *c = vec_cmp(a, b, op);
+    int t = c->t == T_BOOL && c->j;
+    v_free(c);
+    return t;
+}
+static V *cmp_err(V *s, V *x, int s_left) {
+    V *a = s_left ? s : x, *b = s_left ? x : s;
+    return v_errf("cannot compare types %s and %s", type_name(a->t), type_name(b->t));
+}
+/* A list s against a single value x, item by item, keeping the shape (s_left: s is the left
+ * operand); a vector or matrix against a single value takes vec_cmp's own paths or
+ * cmp_unlike, so s is always a list. An item that is itself a list, vector or matrix
+ * compares with x item by item in turn and keeps that result: the result is then a list
+ * holding that result for that item and bools for the rest
+ * ([[1, 2], 3] < 5 is [[True, True], True]). An item that does not compare with x (a str
+ * against an int) is unequal: False under =, True under !=; under <, >, <=, >= the whole
+ * comparison is that item's error. An item that is an error value makes the comparison
+ * that error under all six operators. */
+static V *cmp_items(V *s, V *x, int s_left, int op) {
+    int ne = op == OP_NE, ordering = op != OP_EQ && op != OP_NE;
+    V *r = v_bvec(s->n);   /* becomes a generic list once an item's result is a list */
+    for (int64_t i = 0; i < s->n; i++) {
+        V *item = col_get(s, i);
+        if (item->t == T_ERR) { v_free(r); return item; }
+        V *c = s_left ? vec_cmp(item, x, op) : vec_cmp(x, item, op);
+        if (c->t == T_ERR && is_seq_t(item->t)) {   /* an error item inside this one */
+            v_free(item); v_free(r);
+            return c;
+        }
+        if (c->t != T_BOOL && is_seq_t(c->t)) {
+            if (r->t != T_LIST) {
+                V *l = v_list(s->n);
+                for (int64_t j = 0; j < i; j++) l->L[j] = v_bool(r->B[j]);
+                v_free(r);
+                r = l;
+            }
+            r->L[i] = c;
+            v_free(item);
+            continue;
+        }
+        int t;
+        if (c->t == T_BOOL) t = c->j != 0;
+        else if (!ordering) t = ne;
+        else {
+            if (c->t != T_ERR) { v_free(c); c = cmp_err(item, x, s_left); }
+            v_free(item); v_free(r);
+            return c;
+        }
+        if (r->t == T_LIST) r->L[i] = v_bool(t); else r->B[i] = (uint8_t)t;
+        v_free(c); v_free(item);
+    }
+    return r;
+}
+static int is_unlike_t(int t) { return t == T_STR || t == T_DATE || t == T_DATETIME || t == T_TIME; }
+/* A vector or matrix s against a str, date, datetime or time x, which none of its items
+ * compares with: what cmp_items would give, without building an error for each item. All
+ * False under =, all True under !=; under <, >, <=, >= the error the first item gives
+ * (none when s is empty). */
+static V *cmp_unlike(V *s, V *x, int s_left, int op) {
+    int mat = is_mat_t(s->t);
+    int64_t cols = mat ? mat_cols(s) : 1, n = s->n * cols;
+    if (op != OP_EQ && op != OP_NE && n > 0) {
+        int t = s->t == T_IVEC || s->t == T_IMAT ? T_INT : s->t == T_FVEC || s->t == T_FMAT ? T_FLOAT
+              : s->t == T_CVEC || s->t == T_CMAT ? T_CHAR : T_BOOL;
+        return v_errf("cannot compare types %s and %s", type_name(s_left ? t : x->t),
+                      type_name(s_left ? x->t : t));
+    }
+    V *r = mat ? v_bmat(s->n, cols) : v_bvec(s->n);
+    if (n > 0) memset(r->B, op == OP_NE, (size_t)n);
+    return r;
+}
+static int whole_eq(V *a, V *b) {
+    if (is_seq_t(a->t) && is_seq_t(b->t)) {
+        P(a->n != b->n, 0)
+        for (int64_t i = 0; i < a->n; i++) {   /* a generic list's items as they are */
+            V *x = a->t == T_LIST ? a->L[i] : col_get(a, i);
+            V *y = b->t == T_LIST ? b->L[i] : col_get(b, i);
+            int t = cmp_true(x, y, OP_EQ);
+            if (a->t != T_LIST) v_free(x);
+            if (b->t != T_LIST) v_free(y);
+            P(!t, 0)
+        }
+        return 1;
+    }
+    if (a->t == T_TABLE && b->t == T_TABLE) {
+        P(a->n != b->n || a->keys->n != b->keys->n, 0)
+        for (int64_t i = 0; i < a->keys->n; i++) {
+            P(!cmp_true(a->keys->L[i], b->keys->L[i], OP_EQ), 0)
+            P(!cmp_true(a->vals->L[i], b->vals->L[i], OP_EQ), 0)
+        }
+        return 1;
+    }
+    if (a->t == T_FN && b->t == T_FN && a->n == -1 && b->n == -1)   /* builtins, by name */
+        return !strcmp(a->s, b->s);
+    return a == b;
+}
+/* What the fast paths in vec_cmp leave. A sequence (vector, list, matrix) against a single
+ * value compares item by item (cmp_items; cmp_unlike gives the same result at once for a
+ * vector or matrix against a str, date, datetime or time). Under = and != two sequences,
+ * two tables, two functions (the same function; builtins by name), or a value against a
+ * container or function of another kind compare as whole values. Two single values that
+ * vec_cmp does not compare, and ordering of anything else, stay an error. */
+static V *vec_cmp_rest(V *a, V *b, int op) {
+    if ((is_vec_t(a->t) || is_mat_t(a->t)) && is_unlike_t(b->t)) return cmp_unlike(a, b, 1, op);
+    if (is_unlike_t(a->t) && (is_vec_t(b->t) || is_mat_t(b->t))) return cmp_unlike(b, a, 0, op);
+    if (is_seq_t(a->t) && is_single_t(b->t)) return cmp_items(a, b, 1, op);
+    if (is_single_t(a->t) && is_seq_t(b->t)) return cmp_items(b, a, 0, op);
+    if ((op == OP_EQ || op == OP_NE) && a->t != T_ERR && b->t != T_ERR
+        && !(is_single_t(a->t) && is_single_t(b->t))) {
+        int eq = whole_eq(a, b);
+        return v_bool(op == OP_EQ ? eq : !eq);
     }
     return v_errf("cannot compare types %s and %s", type_name(a->t), type_name(b->t));
 }

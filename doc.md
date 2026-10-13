@@ -179,6 +179,31 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 
 - **Bind** with `:` — `x: 1`, `a, b: (1, 2)`, `def f(n:2):`, `table(a:[1])`
 - **Compare** with `=` — `if x = 1:`, `while i < len(s):`
+  - A list, vector or matrix against a single value (a number, `bool`, `char`, `str`,
+    `date`, `datetime` or `time`) compares element-wise under all six operators, keeping
+    the shape: `[1, "a"] = 1` is `[True, False]`. An element that is itself a list,
+    vector or matrix compares element-wise in turn and keeps that result: `[[1, 2], 3] < 5`
+    is `[[True, True], True]`. An element that does not compare with the value (a `str`
+    against an `int`) is unequal (`False` under `=`, `True` under `!=`) and makes `<`,
+    `>`, `<=`, `>=` an error. An element that is an error value makes the comparison that
+    error under all six operators: `map(lambda i: 1 / i, [0, 1]) = 1` is the division error
+    (a list literal holding an error value is that error itself). `None` is not
+    compared element-wise: `[1, None] = None` is `False`, a whole-value comparison.
+  - `=` and `!=` compare two lists, vectors or matrices, two tables (column names and
+    columns), two functions (the same function; builtins by name) or two subprocess or
+    input handles (the same handle) as whole values, giving one `bool`; a value against a
+    container or function of another kind is unequal (an error value stays an error:
+    `1/0 = [1]` is the division error), and so are two lists holding an error value
+    (with `xs : map(lambda i: 1 / i, [0])`, `xs = xs` is `False`).
+  - So a `where` clause or `t[mask]` on a `list` column holding a nested list gets a
+    `list` from `=`, not a `list[bool]`, and `where` refuses it
+    (`where: need boolean mask`), as does `t[mask]`
+    (`cannot index type table with type list`); on a `list` column of mixed types it
+    filters by these rules: with `v` `[1, "a", 3]`, `where v = 1` keeps the first row and
+    `where v != "a"` the first and third.
+  - A condition counts a `list[bool]` as true when it is not empty, whatever its items,
+    so where `v` can be a non-empty list or vector, `if v = "":` is taken (`v = ""` is a
+    list of `False`); test the type first: `if type(v) = "str" and v = "":`.
 - Dict literals and slices keep `:` — `{k: v}`, `a[1:3]`
 - `==` is not supported
 - Integer bitwise helpers: `band(a,b)`, `bor(a,b)`, `bxor(a,b)`, `bnot(a)`,
@@ -396,7 +421,8 @@ shape(m)    # [rows, cols]
 | `mmul(a, b)` | matrix multiply (`matrix[bool]` not supported) |
 | `+`, `-`, `*`, `/`, `//`, `%`, `**` | element-wise on numeric matrices |
 | unary `-` | element-wise negation (int/float matrices) |
-| `=`, `!=`, `<`, `>`, `<=`, `>=` | element-wise compare → `matrix[bool]` |
+| `=`, `!=` | two matrices: one `bool` (whole values); a matrix and a single value: element-wise → `matrix[bool]` |
+| `<`, `>`, `<=`, `>=` | element-wise compare → `matrix[bool]` |
 
 Expression `@` is each. Leading `@` decorates. `mmul` multiplies matrices.
 

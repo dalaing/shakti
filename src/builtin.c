@@ -510,8 +510,8 @@ static V *bi_bool(V**a,in){
     P(v->t==T_NIL,v_bool(0))return v_bool(1);}
 static int bi_numvec(V *v) { return v->t == T_IVEC || v->t == T_FVEC || v->t == T_IMAT || v->t == T_FMAT; }
 static int64_t mat_nelem(V *v) { return v->n * mat_cols(v); }
-/* Exact int64 sum; promotes to float on overflow like scalar +. Split halves keep the loop vectorizable. */
-static V *i64_sum_value(const int64_t *p, int64_t n) {
+/* Exact int64 sum, as a 128-bit total. Split halves keep the loop vectorizable. */
+static __int128 i64_sum_wide(const int64_t *p, int64_t n) {
     __int128 t = 0;
     for (int64_t off = 0; off < n; off += (int64_t)1 << 31) {
         int64_t m = n - off < ((int64_t)1 << 31) ? n - off : ((int64_t)1 << 31);
@@ -523,12 +523,50 @@ static V *i64_sum_value(const int64_t *p, int64_t n) {
         }
         t += (__int128)hi * ((int64_t)1 << 32) + (__int128)lo;
     }
+    return t;
+}
+/* An exact int total as a value: an int if it fits, else the float, as scalar + promotes. */
+static V *i128_value(__int128 t) {
     if (t >= INT64_MIN && t <= INT64_MAX) return v_int((int64_t)t);
     return v_float((double)t);
 }
-static V *sum_double_value(double s, int all_int) {
-    if (all_int && s >= -9223372036854775808.0 && s < 9223372036854775808.0) return v_int((int64_t)s);
-    return v_float(s);
+/* Exact int64 sum; promotes to float on overflow like scalar +. */
+static V *i64_sum_value(const int64_t *p, int64_t n) {
+    return i128_value(i64_sum_wide(p, n));
+}
+/* Add the items of a vector, matrix or list to a sum kept two ways: in float, in order (*s), and
+ * exactly while every item is an int (*t, *all_int); an error value, or NULL. A list or vector
+ * adds its own float sum to *s. */
+static V *sum_add(V *v, double *s, __int128 *t, int *all_int) {
+    if (v->t == T_IVEC || v->t == T_IMAT) {
+        __int128 w = i64_sum_wide(v->J, v->t == T_IMAT ? mat_nelem(v) : v->n);
+        *t += w;
+        *s += (double)w;
+    } else if (v->t == T_FVEC || v->t == T_FMAT) {
+        *s += shakti_sum_f64(v->F, v->t == T_FMAT ? mat_nelem(v) : v->n);
+        *all_int = 0;
+    } else if (v->t == T_LIST) {
+        /* The list's own float sum (ls, added to *s as a vector's is) and its exact int total (lt),
+         * kept in locals so the loop holds them in registers. */
+        V *const *L = v->L;
+        int64_t len = v->n;
+        __int128 lt = 0;
+        double ls = 0;
+        int ints = 1;
+        for (int64_t i = 0; i < len; i++) {
+            const V *e = L[i];
+            if (e->t == T_INT) { ls += (double)e->j; lt += e->j; }
+            else if (e->t == T_FLOAT) { ls += e->f; ints = 0; }
+            else return v_err("sum: bad list element");
+        }
+        *t += lt;
+        *s += ls;
+        if (!ints) *all_int = 0;
+    } else return v_err("sum: need vector");
+    return NULL;
+}
+static V *sum_result(double s, __int128 t, int all_int) {
+    return all_int ? i128_value(t) : v_float(s);
 }
 static V *vec_reduce_sum(V *v) {
     if (v->t == T_IMAT)
@@ -543,14 +581,10 @@ static V *vec_reduce_sum(V *v) {
         return v_float(shakti_sum_f64(v->F, v->n));
     if (v->t == T_LIST) {
         double s = 0;
+        __int128 t = 0;
         int all_int = 1;
-        for (int64_t i = 0; i < v->n; i++) {
-            V *e = v->L[i];
-            if (e->t == T_INT) s += (double)e->j;
-            else if (e->t == T_FLOAT) { s += e->f; all_int = 0; }
-            else return v_err("sum: bad list element");
-        }
-        return sum_double_value(s, all_int);
+        V *err = sum_add(v, &s, &t, &all_int);
+        return err ? err : sum_result(s, t, all_int);
     }
     return v_err("sum: need vector");
 }
@@ -653,22 +687,27 @@ static V *vec_reduce_max(V *v) {
     }
     return v_err("max: need vector");
 }
-static V *vec_unary_int(V *v, int64_t (*fn)(int64_t)) {
-    if (v->t == T_IMAT) {
-        V *r = v_imat(v->n, mat_cols(v));
-        int64_t ne = mat_nelem(v);
-        for (int64_t i = 0; i < ne; i++) r->J[i] = fn(v->J[i]);
-        return r;
-    }
-    P(v->t != T_IVEC, v_err("need int vector"))
-    V *r = v_ivec(v->n);
+static int64_t iabs64(int64_t x) { return x < 0 ? (int64_t)(0 - (uint64_t)x) : x; }
+/* abs of an int vector or matrix; as for a scalar, if an element is INT64_MIN (whose abs is not an
+ * int64) the whole result is float. */
+static V *vec_abs_int(V *v) {
+    int mat = v->t == T_IMAT;
+    int64_t ne = mat ? mat_nelem(v) : v->n, ov = 0;
+    V *r = mat ? v_imat(v->n, mat_cols(v)) : v_ivec(v->n);
+    const int64_t *x = v->J;
+    int64_t *y = r->J;
 #ifdef _OPENMP
-    if (v->n >= ISL_OMP_VEC_MIN)
-        #pragma omp parallel for
-        for (int64_t i = 0; i < v->n; i++) r->J[i] = fn(v->J[i]);
-    else
+    #pragma omp parallel for reduction(|:ov) if (ne >= ISL_OMP_VEC_MIN)
 #endif
-        for (int64_t i = 0; i < v->n; i++) r->J[i] = fn(v->J[i]);
+    for (int64_t i = 0; i < ne; i++) {
+        int64_t z = iabs64(x[i]);
+        ov |= z;
+        y[i] = z;
+    }
+    if (ov >= 0) return r;   /* only abs(INT64_MIN) wraps, to a negative */
+    v_free(r);
+    r = mat ? v_fmat(v->n, mat_cols(v)) : v_fvec(v->n);
+    for (int64_t i = 0; i < ne; i++) r->F[i] = fabs((double)x[i]);
     return r;
 }
 static V *vec_unary_double(V *v, double (*fn)(double)) {
@@ -708,7 +747,6 @@ static V *vec_unary_double(V *v, double (*fn)(double)) {
     }
     return v_err("need numeric vector");
 }
-static int64_t iabs64(int64_t x) { return x < 0 ? (int64_t)(0 - (uint64_t)x) : x; }
 static V *bi_sum(V **a, in) {
     P(n < 1,v_int(0))
     if (n == 1) {
@@ -720,25 +758,17 @@ static V *bi_sum(V **a, in) {
         return v_int(0);
     }
     double s = 0;
+    __int128 t = 0;
     int all_int = 1;
     for (int i = 0; i < n; i++) {
-        if (a[i]->t == T_INT) s += (double)a[i]->j;
+        if (a[i]->t == T_INT) { s += (double)a[i]->j; t += a[i]->j; }
         else if (a[i]->t == T_FLOAT) { s += a[i]->f; all_int = 0; }
-        else if (a[i]->t >= T_IVEC && a[i]->t <= T_LIST) {
-            V *p = vec_reduce_sum(a[i]);
-            P(p->t == T_ERR,p)
-            if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
-            else s += (double)p->j;
-            v_free(p);
-        } else if (a[i]->t >= T_IMAT && a[i]->t <= T_FMAT) {
-            V *p = vec_reduce_sum(a[i]);
-            P(p->t == T_ERR,p)
-            if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
-            else s += (double)p->j;
-            v_free(p);
+        else if ((a[i]->t >= T_IVEC && a[i]->t <= T_LIST) || (a[i]->t >= T_IMAT && a[i]->t <= T_FMAT)) {
+            V *err = sum_add(a[i], &s, &t, &all_int);
+            P(err,err)
         } else return v_err("sum: bad arg");
     }
-    return sum_double_value(s, all_int);
+    return sum_result(s, t, all_int);
 }
 static V *bi_dot(V **a, in) {
     P(n < 2, v_err("dot(x, y)"))
@@ -792,7 +822,7 @@ static V *bi_max(V **a, in) {
 }
 static V *bi_abs(V **a, in) {
     P(n < 1,v_err("abs(x)"))
-    P(a[0]->t == T_IVEC || a[0]->t == T_IMAT,vec_unary_int(a[0], iabs64))
+    P(a[0]->t == T_IVEC || a[0]->t == T_IMAT,vec_abs_int(a[0]))
     P(a[0]->t == T_FVEC || a[0]->t == T_FMAT,vec_unary_double(a[0], fabs))
     V *v = a[0];
     P(v->t == T_INT && v->j == INT64_MIN,v_float(-(double)INT64_MIN))

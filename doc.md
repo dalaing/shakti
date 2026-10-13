@@ -359,6 +359,13 @@ print(dot(a, b))       # prefer this on large vectors
 print(sum(a * b))      # same math; allocates a * b first
 ```
 
+Int overflow promotes to float, as it does for scalars (`9223372036854775807 + 1` is a float):
+when an element of an int `+`, `-`, `*`, unary `-` or `abs` overflows, the whole result is an
+`fvec` (or `matrix[float]`). An int `sum` is exact: an int when the total fits, whatever the
+order of the items, and otherwise the float of the total. That holds for an `ivec` or
+`matrix[int]`, a plain `list` of ints (from `json_loads`, say) and several int arguments alike
+(`sum(9007199254740992, 1)` is `9007199254740993`); a sum with a float in it adds in float.
+
 `.` selects attributes or columns. `dot(a, b)` is inner product.
 `mmul(a, b)` is matrix multiply. Leading `@` decorates; expression `@` is each.
 

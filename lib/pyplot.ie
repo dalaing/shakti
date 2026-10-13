@@ -90,7 +90,9 @@ def _parse_color(c):
         return _COLORS[c]
     if len(c) > 0:
         if c[0] = "#":
-            return int("0x" + c[1:])
+            n : int("0x" + c[1:])
+            if type(n) != "error":
+                return n
     return _COLORS["C0"]
 
 def _next_color():

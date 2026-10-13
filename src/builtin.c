@@ -446,18 +446,32 @@ static V *bi_type(V**a,in){
     }
     return v_str(n > 0 ? type_name(a[0]->t) : "NoneType");
 }
+/* A number read from a string must use the whole string (surrounding whitespace aside). */
+static int str_num_end_ok(const char *s, const char *end) {
+    if (end == s) return 0;
+    W(isspace((unsigned char)*end),end++)
+    return *end == 0;
+}
+static V *str_to_int(const char *s){
+    char *end;int64_t x=strtoll(s,&end,0);
+    P(!str_num_end_ok(s,end),v_errf("invalid literal for int(): '%.64s'",s))
+    return v_int(x);}
+static V *str_to_float(const char *s){
+    char *end;double x=strtod(s,&end);
+    P(!str_num_end_ok(s,end),v_errf("could not convert string to float: '%.64s'",s))
+    return v_float(x);}
 static V *bi_int(V**a,in){
     P(n<1,v_int(0))V*v=a[0];
     P(v->t==T_INT,v_int(v->j))P(v->t==T_CHAR,v_int(v->j))
     if(v->t==T_FLOAT){ /* truncates toward zero; one no int holds (NaN, an infinity, beyond +-2^63) is refused */
         P(isnan(v->f),v_err("int: NaN is not an int"))P(!(v->f>=-0x1p63&&v->f<0x1p63),v_err("int: float out of int range"))
         return v_int((int64_t)v->f);}
-    P(v->t==T_BOOL,v_int(v->j))P(v->t==T_STR,v_int(strtoll(v->s,NULL,0)))
+    P(v->t==T_BOOL,v_int(v->j))P(v->t==T_STR,str_to_int(v->s))
     return v_err("cannot convert to int");}
 static V *bi_float(V**a,in){
     P(n<1,v_float(0))V*v=a[0];
     P(v->t==T_FLOAT,v_float(v->f))P(v->t==T_INT,v_float((double)v->j))P(v->t==T_CHAR,v_float((double)v->j))
-    P(v->t==T_BOOL,v_float(v->j))P(v->t==T_STR,v_float(strtod(v->s,NULL)))
+    P(v->t==T_BOOL,v_float(v->j))P(v->t==T_STR,str_to_float(v->s))
     return v_err("cannot convert to float");}
 static V *bi_str(V**a,in,Env*e){
     P(n<1,v_str(""))

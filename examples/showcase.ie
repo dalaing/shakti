@@ -31,6 +31,8 @@ def scene_secs():
     if s = None:
         return 5.0
     n : float(s)
+    if type(n) = "error":
+        return 5.0
     if n < 1.0:
         return 1.0
     return n

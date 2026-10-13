@@ -48,6 +48,7 @@ extern V *bi_dict(V**,int nargs,V**,V**,int nkw);
 extern V *bi_ktable(V**,int nargs,V**,V**,int nkw);
 extern V *bi_set(V**,in);
 extern V *vec_cmp(V*,V*,int);
+extern int is_truthy(V *v);
 extern V *bi_talk_listen(V**,in);
 extern V *bi_talk_set_locale(V**,in);
 extern V *bi_talk_set_model(V**,in);
@@ -2717,10 +2718,7 @@ V *builtin_call(const char *name,V **args,int nargs,V **kwn,V **kwv,int nkw,Env 
     }
     if(!strcmp(name,"assert")){
         P(nargs<1,v_err("assert(condition[, message])"))
-        V*cond=args[0];int ok=0;
-        if(cond->t==T_BOOL)ok=cond->j;else if(cond->t==T_INT)ok=cond->j!=0;
-        else if(cond->t==T_FLOAT)ok=cond->f!=0;else if(cond->t==T_STR)ok=cond->s[0]!=0;
-        else if(cond->t==T_NIL || cond->t==T_ERR)ok=0;else ok=1;
+        int ok=is_truthy(args[0]);   /* the truth `if` uses */
         if(!ok){
             const char *msg=nargs>1&&args[1]->t==T_STR?args[1]->s:"assertion failed";
             fprintf(stderr,"AssertionError: %s\n",msg);exit(1);}

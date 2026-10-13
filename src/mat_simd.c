@@ -76,6 +76,19 @@ static void mat_cmp_bmat_scalar_loop(unsigned char *r, int64_t i, int64_t ne,
         r[i] = mat_cmp_elem(x_at(a, i), y_at(b, i), op) ? 1 : 0;
 }
 
+/* Int matrices compare as ints: through doubles, ints above 2^53 would round together. */
+static inline int mat_cmp_elem_i64(int64_t x, int64_t y, int op) {
+    switch (op) {
+    case 3: return x == y;
+    case 12: return x != y;
+    case 9: return x < y;
+    case 6: return x > y;
+    case 8: return x <= y;
+    case 5: return x >= y;
+    default: return 0;
+    }
+}
+
 #if defined(__aarch64__)
 
 static inline float64x2_t load_i64_as_pd_neon(const int64_t *p) {
@@ -91,6 +104,18 @@ static inline uint64x2_t cmp_mask_neon(float64x2_t vx, float64x2_t vy, int op) {
     case 8: return vcleq_f64(vx, vy);
     case 5: return vcgeq_f64(vx, vy);
     default: return vceqq_f64(vx, vy);
+    }
+}
+
+static inline uint64x2_t cmp_mask_s64_neon(int64x2_t vx, int64x2_t vy, int op) {
+    switch (op) {
+    case 3: return vceqq_s64(vx, vy);
+    case 12: return veorq_u64(vceqq_s64(vx, vy), vdupq_n_u64(UINT64_MAX));
+    case 9: return vcltq_s64(vx, vy);
+    case 6: return vcgtq_s64(vx, vy);
+    case 8: return vcleq_s64(vx, vy);
+    case 5: return vcgeq_s64(vx, vy);
+    default: return vceqq_s64(vx, vy);
     }
 }
 
@@ -495,7 +520,6 @@ int mat_imat_binop_scalar_rev(int64_t *r, int64_t x, const int64_t *b, int64_t n
 
 static double fmat_at(const void *p, int64_t i) { return ((const double *)p)[i]; }
 static double fmat_y_at(const void *p, int64_t i) { (void)i; return *(const double *)p; }
-static double imat_at(const void *p, int64_t i) { return (double)((const int64_t *)p)[i]; }
 
 void mat_fmat_cmp_bmat_scalar(unsigned char *r, const double *a, double y, int64_t ne, int op) {
 #if defined(__aarch64__)
@@ -524,31 +548,29 @@ void mat_fmat_cmp_bmat_mm(unsigned char *r, const double *a, const double *b, in
     mat_cmp_bmat_scalar_loop(r, 0, ne, fmat_at, fmat_at, a, b, op);
 }
 
-void mat_imat_cmp_bmat_scalar(unsigned char *r, const int64_t *a, double y, int64_t ne, int op) {
+void mat_imat_cmp_bmat_scalar(unsigned char *r, const int64_t *a, int64_t y, int64_t ne, int op) {
+    int64_t i = 0;
 #if defined(__aarch64__)
     if (use_simd_elems(ne)) {
-        float64x2_t vy = vdupq_n_f64(y);
-        int64_t i = 0;
+        int64x2_t vy = vdupq_n_s64(y);
         for (; i + 2 <= ne; i += 2)
-            store_mask2(r, i, cmp_mask_neon(load_i64_as_pd_neon(a + i), vy, op));
-        mat_cmp_bmat_scalar_loop(r, i, ne, imat_at, fmat_y_at, a, &y, op);
-        return;
+            store_mask2(r, i, cmp_mask_s64_neon(vld1q_s64(a + i), vy, op));
     }
 #endif
-    mat_cmp_bmat_scalar_loop(r, 0, ne, imat_at, fmat_y_at, a, &y, op);
+    for (; i < ne; i++)
+        r[i] = mat_cmp_elem_i64(a[i], y, op) ? 1 : 0;
 }
 
 void mat_imat_cmp_bmat_mm(unsigned char *r, const int64_t *a, const int64_t *b, int64_t ne, int op) {
+    int64_t i = 0;
 #if defined(__aarch64__)
     if (use_simd_elems(ne)) {
-        int64_t i = 0;
         for (; i + 2 <= ne; i += 2)
-            store_mask2(r, i, cmp_mask_neon(load_i64_as_pd_neon(a + i), load_i64_as_pd_neon(b + i), op));
-        mat_cmp_bmat_scalar_loop(r, i, ne, imat_at, imat_at, a, b, op);
-        return;
+            store_mask2(r, i, cmp_mask_s64_neon(vld1q_s64(a + i), vld1q_s64(b + i), op));
     }
 #endif
-    mat_cmp_bmat_scalar_loop(r, 0, ne, imat_at, imat_at, a, b, op);
+    for (; i < ne; i++)
+        r[i] = mat_cmp_elem_i64(a[i], b[i], op) ? 1 : 0;
 }
 
 void mat_filter_fmat_rows(double *dst, const double *src, const unsigned char *mask,

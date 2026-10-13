@@ -1822,6 +1822,15 @@ V *eval(Node *n, Env *e) {
             free(args); free(kwnames); free(kwvals);
             return result;
         }
+        if(fn && fn->t == T_FN && fn->n == -1) {
+            /* a builtin held in a variable (w: len): call it as the builtin */
+            V *r = builtin_call(fn->s, args, nargs, kwnames, kwvals, nkw, e);
+            v_free(fn);
+            for(int i=0;i<nargs;i++) v_free(args[i]);
+            for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
+            free(args); free(kwnames); free(kwvals);
+            return r;
+        }
         if(!fn || fn->t != T_FN) {
             if(fn) v_free(fn);
             for(int i=0;i<nargs;i++) v_free(args[i]);

@@ -652,6 +652,13 @@ static V *vec_reduce_min(V *v) {
         for (int64_t i = 1; i < ne; i++) if (v->B[i] < m) m = v->B[i];
         return v_char(m);
     }
+    if (v->t == T_BVEC || v->t == T_BMAT) {
+        /* False < True: min is whether all are True */
+        int64_t ne = v->t == T_BMAT ? mat_nelem(v) : v->n;
+        P(ne == 0,v_nil())
+        for (int64_t i = 0; i < ne; i++) if (!v->B[i]) return v_bool(0);
+        return v_bool(1);
+    }
     if (v->t == T_LIST) {
         P(v->n == 0,v_nil())
         return bi_extreme("min", v->L, v->n, OP_LT);
@@ -696,6 +703,13 @@ static V *vec_reduce_max(V *v) {
         unsigned char m = v->B[0];
         for (int64_t i = 1; i < ne; i++) if (v->B[i] > m) m = v->B[i];
         return v_char(m);
+    }
+    if (v->t == T_BVEC || v->t == T_BMAT) {
+        /* False < True: max is whether any is True */
+        int64_t ne = v->t == T_BMAT ? mat_nelem(v) : v->n;
+        P(ne == 0,v_nil())
+        for (int64_t i = 0; i < ne; i++) if (v->B[i]) return v_bool(1);
+        return v_bool(0);
     }
     if (v->t == T_LIST) {
         P(v->n == 0,v_nil())
@@ -831,17 +845,16 @@ static V *bi_mmul(V **a, in) {
 }
 static V *bi_avg(V **a, in) {
     P(n < 1,v_float(0))
-    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT) || a[0]->t == T_CMAT,vec_reduce_avg(a[0]))
+    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_BMAT),vec_reduce_avg(a[0]))
     return v_float(0);
 }
 /* min or max of one argument: a vector or matrix reduces over its items, and a str over its
  * characters, giving the least (greatest) char by code (None when empty); a scalar that orders (a bool,
  * int, float, char, date, datetime or time) is its own min and max; an error passes through, and
- * anything else is an error. A matrix[bool] gives None. */
+ * anything else is an error. */
 static V *minmax_one(const char *fn, V *v, int op) {
-    if ((v->t >= T_IVEC && v->t <= T_LIST) || (v->t >= T_IMAT && v->t <= T_FMAT) || v->t == T_CMAT)
+    if ((v->t >= T_IVEC && v->t <= T_LIST) || (v->t >= T_IMAT && v->t <= T_BMAT))
         return op == OP_LT ? vec_reduce_min(v) : vec_reduce_max(v);
-    if (v->t == T_BMAT) return v_nil();
     if (v->t == T_STR) {
         const unsigned char *s = (const unsigned char *)v->s;
         P(!*s,v_nil())

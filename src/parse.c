@@ -500,7 +500,8 @@ static Node *parse_postfix(Lexer *l) {
             node_add(call, n);
             /* Juxta assert takes a full expression so `assert a = b` is
              * assert(a = b), not (assert a) = b. Other callees stay atoms
-             * so K-style `f x+y` remains (f x)+y. */
+             * so K-style `f x+y` remains (f x)+y. At the start of a
+             * statement, `assert e` is the statement form (parse_stmt). */
             if (n->type == N_NAME && n->sval && !strcmp(n->sval, "assert")) {
                 node_add(call, parse_nested_expr(l));
                 if (lex_peek(l).type == T_COMMA_) {
@@ -1160,6 +1161,47 @@ static Node *parse_decorated(Lexer *l) {
     return target;
 }
 
+/* At the start of a statement, `assert` followed by an expression is the
+ * statement form. Not when it is a call form, `assert(...)` or `assert[...]`
+ * closing its statement (each takes a message as a second argument), nor
+ * `assert@ xs`, `assert.f`, nor when `assert` stands alone or is bound
+ * (`assert : v`, `assert += v`). */
+static int probe_assert_stmt(Lexer *probe) {
+    lex_next(probe);
+    int t = lex_peek(probe).type;
+    if (t == T_NEWLINE_ || t == T_SEMI_ || t == T_EOF_ || t == T_DEDENT_ ||
+        t == T_COLON_ || t == T_COMMA_ || t == T_PLUSEQ_ || t == T_MINUSEQ_ ||
+        t == T_STAREQ_ || t == T_SLASHEQ_ || t == T_AT_ || t == T_DOT_) return 0;
+    if (t != T_LPAREN_ && t != T_LBRACKET_) return 1;
+    if (!probe_balanced(probe, t, t == T_LPAREN_ ? T_RPAREN_ : T_RBRACKET_))
+        return 1;
+    t = lex_peek(probe).type;
+    return !(t == T_NEWLINE_ || t == T_SEMI_ || t == T_EOF_ || t == T_DEDENT_);
+}
+static int peek_assert_probe(Lexer *l) {
+    LexMark mark = lex_mark(l);
+    Lexer probe = *l;
+    int r = probe_assert_stmt(&probe);
+    lex_release(&probe, mark);
+    return r;
+}
+
+/* The probe lexes tokens the parser lexes again, so an unexpected character
+ * it meets is left for the parser to report, once. */
+static int peek_assert_stmt(Lexer *l) {
+    int count = g_parse_error_count, quiet = g_parse_quiet;
+    char msg[sizeof g_parse_err_msg], first[sizeof g_parse_err_first];
+    memcpy(msg, g_parse_err_msg, sizeof msg);
+    memcpy(first, g_parse_err_first, sizeof first);
+    g_parse_quiet = 1;
+    int r = peek_assert_probe(l);
+    g_parse_quiet = quiet;
+    g_parse_error_count = count;
+    memcpy(g_parse_err_msg, msg, sizeof msg);
+    memcpy(g_parse_err_first, first, sizeof first);
+    return r;
+}
+
 static Node *parse_stmt(Lexer *l) {
     W(lex_peek(l).type == T_NEWLINE_ || lex_peek(l).type == T_SEMI_,lex_next(l))
     Token pk = lex_peek(l);
@@ -1249,6 +1291,21 @@ static Node *parse_stmt(Lexer *l) {
             n->sval = joined;
         })
         W(lex_peek(l).type == T_NEWLINE_,lex_next(l))
+        return n;
+    }
+    if(pk.type == T_NAME_ && !strcmp(pk.sval, "assert") && peek_assert_stmt(l)) {
+        /* assert e[, msg] takes whole expressions, so `assert [1] = [2]`,
+         * `assert (a) = b` and `assert -x < 0` assert what they say. */
+        lex_next(l);
+        Node *n = node_new(N_CALL);
+        Node *fn = node_new(N_NAME); fn->sval = strdup("assert");
+        node_add(n, fn);
+        node_add(n, parse_expr(l));
+        if(lex_peek(l).type == T_COMMA_) {
+            lex_next(l);
+            node_add(n, parse_expr(l));
+        }
+        W(lex_peek(l).type == T_NEWLINE_ || lex_peek(l).type == T_SEMI_,lex_next(l))
         return n;
     }
     Node *expr = parse_expr(l);

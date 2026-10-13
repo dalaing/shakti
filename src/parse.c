@@ -7,6 +7,11 @@ static int  g_parse_quiet = 0;
 static int  g_parse_q_call_hint = 0;
 static char g_parse_err_msg[256] = "";
 static char g_parse_err_first[256] = "";
+/* The lexer parse() is reading, and whether the first parse error came after
+ * it failed (a limit such as token length or nesting depth), so the error
+ * reported is whichever came first. */
+static const Lexer *g_parse_lexer = NULL;
+static int  g_parse_first_after_lex = 0;
 
 static int src_has_semi_in_parens(const char *s) {
     int d = 0;
@@ -51,13 +56,16 @@ static int src_has_table_lbrack(const char *s) {
 int shakti_parse_errors(void) { return g_parse_error_count; }
 void parse_fail(const char *fmt, ...) {
     va_list ap;
-    g_parse_error_count++;
+    /* Only the first error is reported: later ones mostly follow from it. */
+    if (++g_parse_error_count > 1) return;
+    /* After the lexer has failed, its error is the one reported. */
+    g_parse_first_after_lex = g_parse_lexer && g_parse_lexer->failed;
     va_start(ap, fmt);
-    vsnprintf(g_parse_err_msg, sizeof g_parse_err_msg, fmt, ap);
+    vsnprintf(g_parse_err_first, sizeof g_parse_err_first, fmt, ap);
     va_end(ap);
-    if (g_parse_error_count == 1)
-        snprintf(g_parse_err_first, sizeof g_parse_err_first, "%s", g_parse_err_msg);
-    if (!g_parse_quiet && !g_parse_q_call_hint) fprintf(stderr, "%s\n", g_parse_err_msg);
+    snprintf(g_parse_err_msg, sizeof g_parse_err_msg, "%s", g_parse_err_first);
+    if (!g_parse_quiet && !g_parse_q_call_hint && !g_parse_first_after_lex)
+        fprintf(stderr, "%s\n", g_parse_err_msg);
 }
 
 static Node *parse_power(Lexer *l);
@@ -106,7 +114,7 @@ static int probe_each_verb_at(Lexer *probe) {
     }
     return lex_peek(probe).type == T_AT_;
 }
-static int peek_each_verb_at(Lexer *l) {
+static int peek_each_verb_probe(Lexer *l) {
     int t = lex_peek(l).type;
     if (t != T_NAME_ && t != T_LPAREN_) return 0;
     LexMark mark = lex_mark(l);
@@ -116,10 +124,28 @@ static int peek_each_verb_at(Lexer *l) {
     return r;
 }
 
+/* The probe lexes tokens the parser lexes again, so an unexpected character
+ * it meets is left for the parser to report, once and in order. */
+static int peek_each_verb_at(Lexer *l) {
+    int count = g_parse_error_count, quiet = g_parse_quiet;
+    int after_lex = g_parse_first_after_lex;
+    char msg[sizeof g_parse_err_msg], first[sizeof g_parse_err_first];
+    memcpy(msg, g_parse_err_msg, sizeof msg);
+    memcpy(first, g_parse_err_first, sizeof first);
+    g_parse_quiet = 1;
+    int r = peek_each_verb_probe(l);
+    g_parse_quiet = quiet;
+    g_parse_error_count = count;
+    g_parse_first_after_lex = after_lex;
+    memcpy(g_parse_err_msg, msg, sizeof msg);
+    memcpy(g_parse_err_first, first, sizeof first);
+    return r;
+}
+
 static Node *parse_each_verb(Lexer *l) {
     Node *n = parse_power(l);
     if (!is_each_callable_node(n)) {
-        fprintf(stderr, "parse error: expected callable before '@' (use f@ xs or xs f@ ys)\n");
+        parse_fail("parse error: expected callable before '@' (use f@ xs or xs f@ ys)");
         node_free(n);
         return node_new(N_NONE);
     }
@@ -554,8 +580,7 @@ static Node *parse_each(Lexer *l) {
     if (lex_peek(l).type == T_AT_) {
         lex_next(l);
         if (!is_each_callable_node(n)) {
-            fprintf(stderr,
-                "parse error: expected callable before '@' (use f@ xs, xs f@ ys, or mmul)\n");
+            parse_fail("parse error: expected callable before '@' (use f@ xs, xs f@ ys, or mmul)");
             node_free(n);
             n = node_new(N_NONE);
         }
@@ -603,7 +628,7 @@ static Node *parse_cmp(Lexer *l) {
             node_add(r, n); node_add(r, parse_add(l));
             return r;
         }
-        fprintf(stderr, "parse error: expected 'in' after 'not'\n");
+        parse_fail("parse error: expected 'in' after 'not'");
         return n;
     }
     if(pk.type==T_EQ_||pk.type==T_NE_||pk.type==T_LT_||pk.type==T_GT_||
@@ -711,7 +736,7 @@ static Node *parse_by_cols(Lexer *l) {
             lex_next(l);
             /* Trailing comma before from/where/newline is a syntax error. */
             if (lex_peek(l).type != T_NAME_) {
-                fprintf(stderr, "parse error: trailing comma in by clause\n");
+                parse_fail("parse error: trailing comma in by clause");
                 node_free(n);
                 return NULL;
             }
@@ -744,7 +769,7 @@ static Node *parse_query(Lexer *l) {
                lex_peek(l).type != T_NEWLINE_ && lex_peek(l).type != T_EOF_) {
             if (lex_peek(l).type == T_BY_) {
                 if (kw.type != T_SELECT_) {
-                    fprintf(stderr, "parse error: by is only supported on select\n");
+                    parse_fail("parse error: by is only supported on select");
                     node_free(n); node_free(cols); node_free(by); node_free(from); node_free(where);
                     return node_new(N_NONE);
                 }
@@ -801,7 +826,7 @@ static Node *parse_create_table(Lexer *l) {
     lex_next(l);
     Token kwt = lex_next(l);
     if(kwt.type != T_NAME_ || strcmp(kwt.sval, "table")) {
-        fprintf(stderr, "parse error: expected 'table' after create\n");
+        parse_fail("parse error: expected 'table' after create");
     }
     Token name = lex_next(l);
     Node *n = node_new(N_CREATE_TABLE);
@@ -1133,7 +1158,7 @@ static Node *parse_decorated(Lexer *l) {
     }
     Node *target = parse_stmt(l);
     if(!target) {
-        fprintf(stderr, "parse error: decorator with no target definition\n");
+        parse_fail("parse error: decorator with no target definition");
         return node_new(N_NONE);
     }
     /* def / class: keep the binding, then rebind name = dec-chain(name). */
@@ -1155,8 +1180,7 @@ static Node *parse_decorated(Lexer *l) {
         target->ch[1] = apply_decorators(decos, ndec, target->ch[1]);
         return target;
     }
-    fprintf(stderr,
-        "parse error: decorators must precede a def, class, or name assignment\n");
+    parse_fail("parse error: decorators must precede a def, class, or name assignment");
     return target;
 }
 
@@ -1353,6 +1377,8 @@ Node *parse(const char *src) {
     g_parse_error_count = 0;
     g_parse_err_msg[0] = 0;
     g_parse_err_first[0] = 0;
+    g_parse_lexer = &l;
+    g_parse_first_after_lex = 0;
     g_parse_q_call_hint = src_has_semi_in_parens(src) || src_has_table_lbrack(src);
     Node *prog = node_new(N_BLOCK);
     W(lex_peek(&l).type != T_EOF_ && !l.failed,{
@@ -1364,10 +1390,13 @@ Node *parse(const char *src) {
         Node *s = parse_stmt(&l);
         if(s) node_add(prog, s);
     })
-    if (g_parse_error_count > 0 && g_parse_q_call_hint) {
-        /* Keep unexpected-character (and similar) as the reported error.
-         * Prefer table() kwargs hint when table([…] is present. */
-        if (!strstr(g_parse_err_first, "unexpected character")) {
+    if (g_parse_error_count > 0 && g_parse_q_call_hint && !g_parse_first_after_lex) {
+        /* Only a generic first error (an unexpected or mismatched token)
+         * is replaced by the hint; unexpected-character and the specific
+         * messages stay. Prefer table() kwargs hint when table([…] is
+         * present. */
+        if (strstr(g_parse_err_first, "unexpected token") ||
+            strstr(g_parse_err_first, ", got ")) {
             if (src_has_table_lbrack(src))
                 snprintf(g_parse_err_msg, sizeof g_parse_err_msg,
                          "parse error: table() takes name:col kwargs, not []. Try: table(a:1 2, b:3 4)");
@@ -1382,9 +1411,12 @@ Node *parse(const char *src) {
     }
     if(!l.failed && g_parse_error_count == 0 && tree_too_deep(prog, SHAKTI_EXPR_MAX_DEPTH))
         lex_fail(&l, "expression nesting too deep");
-    if(l.failed && !g_error) {
+    g_parse_lexer = NULL;
+    if(l.failed && !g_error && (!g_parse_error_count || g_parse_first_after_lex)) {
         g_error = 1;
         g_error_val = v_errf("parse: %s", l.error[0] ? l.error : "invalid input");
+        /* parse_check() reports what the error value holds */
+        snprintf(g_parse_err_msg, sizeof g_parse_err_msg, "%s", g_error_val->s);
     }
     lex_free(&l);
     if(g_parse_error_count > 0 && !g_error) {

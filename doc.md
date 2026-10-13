@@ -145,6 +145,10 @@ shakti
 
 Unknown flags exit with status 2. A silent leading `run` argument is accepted for Android launchers only.
 
+A script or `-c` program that doesn't parse is refused whole: its first parse
+error is printed, nothing runs, and the exit status is 1 (with `-i`, `-c` reports
+it and enters the REPL). The REPL reports a line that doesn't parse and goes on.
+
 Script files must end in `.ie`.
 
 ### REPL

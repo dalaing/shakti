@@ -22,7 +22,9 @@ def close():
     synth_close()
 
 def alive():
-    return synth_alive()
+    # 0 when synth_alive is missing from this build
+    r : synth_alive()
+    return 0 if type(r) = "error" else r
 
 def tick():
     synth_tick()

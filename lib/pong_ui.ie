@@ -91,7 +91,7 @@ def draw_terminal_picker(skin, open):
     out : out + "  +------------------------+\n"
     if open = 0:
         out : out + "  | " + pong_skins.name(skin)
-        pad : 22 + (-len(pong_skins.name(skin)))
+        pad : 20 - len(pong_skins.name(skin))
         i : 0
         while i < pad:
             out : out + " "
@@ -105,7 +105,7 @@ def draw_terminal_picker(skin, open):
             if i = skin:
                 mark : "> "
             out : out + "  | " + mark + nm
-            pad2 : 20 + (-len(nm))
+            pad2 : 19 - len(nm)
             j : 0
             while j < pad2:
                 out : out + " "

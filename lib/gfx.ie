@@ -10,7 +10,9 @@ def close():
     gfx_close()
 
 def alive():
-    return gfx_alive()
+    # 0 when gfx_alive is missing from this build
+    r : gfx_alive()
+    return 0 if type(r) = "error" else r
 
 def tick():
     gfx_tick()
@@ -19,7 +21,9 @@ def sync_keys():
     gfx_sync_keys()
 
 def available():
-    return gfx_available()
+    # 0 when gfx_available is missing from this build
+    r : gfx_available()
+    return 0 if type(r) = "error" else r
 
 def clear(color):
     gfx_clear(color)

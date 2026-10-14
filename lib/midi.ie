@@ -20,10 +20,14 @@ def close():
     return midi_close()
 
 def alive():
-    return midi_alive()
+    # 0 when midi_alive is missing from this build
+    r : midi_alive()
+    return 0 if type(r) = "error" else r
 
 def backend():
-    return midi_backend()
+    # "none" when midi_backend is missing from this build
+    r : midi_backend()
+    return "none" if type(r) = "error" else r
 
 def list():
     return midi_list()

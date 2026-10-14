@@ -77,6 +77,8 @@ def status(resp):
     return resp["status"]
 
 def ok(resp):
+    if type(resp) = "error":   # the request failed
+        return False
     s : resp["status"]
     return s >= 200 and s < 300
 

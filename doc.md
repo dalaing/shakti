@@ -767,8 +767,8 @@ Module `lib/gfx.ie`.
 |------|---------|
 | `gfx.open([title])` | Open the window; returns an error value on failure |
 | `gfx.close()` | Close the window |
-| `gfx.alive()` | `1` while the window is open |
-| `gfx.available()` | `1` when built with a GUI backend |
+| `gfx.alive()` | `1` while the window is open, `0` otherwise |
+| `gfx.available()` | `1` when built with a GUI backend, `0` otherwise |
 | `gfx.tick()` | Poll events, present if dirty, sleep ~16 ms (`SHAKTI_GFX_NO_SLEEP=1` disables) |
 | `gfx.sync_keys()` | Refresh GUI-owned key state into the input hub |
 | `gfx.clear(color)` | Fill the full design buffer with `0xRRGGBB` |
@@ -1181,7 +1181,7 @@ resp2 : rest.post_json("https://api.example.com/items", {"name": "alpha"})
 | `rest.put_hld(url, obj[, codec, level])` | PUT `application/x-hld` |
 | `rest.request(method, url[, body, content_type, headers])` | Generic request; `headers` is a dict; body may be `str` or `list[char]` |
 | `rest.status(resp)` | HTTP status code |
-| `rest.ok(resp)` | `True` when status is 2xx |
+| `rest.ok(resp)` | `True` when status is 2xx; `False` when `resp` is an error value (the request failed) |
 | `rest.json(resp)` | Parsed body (JSON object/list or string) |
 | `rest.iefs(resp)` | Decoded IEFS body |
 | `rest.hld(resp)` | Decoded HLD body |

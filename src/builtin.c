@@ -1549,6 +1549,26 @@ static V *bi_zip(V**a,in){
             else if(a[j]->t==T_BVEC)u->L[j]=v_bool(a[j]->B[i]!=0);
             else if(a[j]->t==T_LIST)u->L[j]=v_ref(a[j]->L[i]);else u->L[j]=v_nil();}
         r->L[i]=u;}return r;}
+static int is_seq_t(int t) {
+    return t==T_STR||t==T_LIST||t==T_IVEC||t==T_FVEC||t==T_CVEC||t==T_BVEC;
+}
+static int64_t seq_n(V *v) {
+    if (!v) return 0;
+    if (v->t==T_STR) return v->s ? (int64_t)strlen(v->s) : 0;
+    return v->n;
+}
+static V *seq_elem(V *v, int64_t i) {
+    char b[2];
+    switch (v->t) {
+    case T_IVEC: return v_int(v->J[i]);
+    case T_FVEC: return v_float(v->F[i]);
+    case T_CVEC: return v_char(v->B[i]);
+    case T_BVEC: return v_bool(v->B[i] != 0);
+    case T_LIST: return v->L[i] ? v_ref(v->L[i]) : v_nil();
+    case T_STR: b[0]=v->s[i]; b[1]=0; return v_str(b);
+    default: return v_nil();
+    }
+}
 static V *bi_enumerate(V**a,in){
     P(n<1,v_list(0))V*v=a[0];int64_t cnt=v->t==T_STR?(int64_t)strlen(v->s):v->n;
     V*r=v_list(cnt);
@@ -1581,8 +1601,8 @@ static V *bi_map(V**a,in,Env*e){
     if(fn->n==-1) {
         for(int64_t i=0;i<cnt;++i){
             if(iter->t!=T_STR&&i>=iter->n){r->n=i;break;}
-            V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
-            else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
+            V*item;if(is_mat_t(iter->t))item=v_mat_row(iter,i);
+            else if(is_seq_t(iter->t))item=seq_elem(iter,i);
             else item=v_nil();
             V*rv=builtin_call(fn->s,&item,1,NULL,NULL,0,e);
             v_free(item);
@@ -1592,8 +1612,8 @@ static V *bi_map(V**a,in,Env*e){
     } else {
         for(int64_t i=0;i<cnt;i++){
             if(iter->t!=T_STR&&i>=iter->n){r->n=i;break;}
-            V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
-            else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
+            V*item;if(is_mat_t(iter->t))item=v_mat_row(iter,i);
+            else if(is_seq_t(iter->t))item=seq_elem(iter,i);
             else item=v_nil();
             Env*ce=env_new(fn->closure);if(fn->params->n>0)env_set(ce,fn->params->L[0]->s,item);v_free(item);
             if(fn->j<0||fn->j>=fn_ast_n){env_free(ce);v_free(r);return v_err("map: bad function");}
@@ -1611,8 +1631,8 @@ static V *bi_filter(V**a,in,Env*e){
     if(fn->n==-1) {
         for(int64_t i=0;i<cnt;++i){
             if(iter->t!=T_STR&&i>=iter->n)break;
-            V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
-            else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
+            V*item;if(is_mat_t(iter->t))item=v_mat_row(iter,i);
+            else if(is_seq_t(iter->t))item=seq_elem(iter,i);
             else item=v_nil();
             V*rv=builtin_call(fn->s,&item,1,NULL,NULL,0,e);
             if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
@@ -1623,8 +1643,8 @@ static V *bi_filter(V**a,in,Env*e){
     } else {
         for(int64_t i=0;i<cnt;i++){
             if(iter->t!=T_STR&&i>=iter->n)break;
-            V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
-            else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
+            V*item;if(is_mat_t(iter->t))item=v_mat_row(iter,i);
+            else if(is_seq_t(iter->t))item=seq_elem(iter,i);
             else item=v_nil();
             Env*ce=env_new(fn->closure);if(fn->params->n>0)env_set(ce,fn->params->L[0]->s,item);
             if(fn->j<0||fn->j>=fn_ast_n){v_free(item);env_free(ce);free(tmp);return v_err("filter: bad function");}
@@ -1768,26 +1788,6 @@ static V *bi_tail(V**a,in){
             else nd->L[j]=v_ref(col);})
         V*r=v_table(v->keys,nd);v_free(nd);return r;}
     return v_nil();}
-static int is_seq_t(int t) {
-    return t==T_STR||t==T_LIST||t==T_IVEC||t==T_FVEC||t==T_CVEC||t==T_BVEC;
-}
-static int64_t seq_n(V *v) {
-    if (!v) return 0;
-    if (v->t==T_STR) return v->s ? (int64_t)strlen(v->s) : 0;
-    return v->n;
-}
-static V *seq_elem(V *v, int64_t i) {
-    char b[2];
-    switch (v->t) {
-    case T_IVEC: return v_int(v->J[i]);
-    case T_FVEC: return v_float(v->F[i]);
-    case T_CVEC: return v_char(v->B[i]);
-    case T_BVEC: return v_bool(v->B[i] != 0);
-    case T_LIST: return v->L[i] ? v_ref(v->L[i]) : v_nil();
-    case T_STR: b[0]=v->s[i]; b[1]=0; return v_str(b);
-    default: return v_nil();
-    }
-}
 static V *seq_span(V *v, int64_t start, int64_t count) {
     int64_t n = seq_n(v);
     if (start < 0) start = 0;

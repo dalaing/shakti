@@ -2,6 +2,7 @@
  * wasm_host.c — Shakti in the browser: boot site/main.ie, tick, gfx blit, synth PCM, REPL eval.
  */
 #include "shakti.h"
+#include "ie_card.h"
 #include "shakti_internal.h"
 #include "gfx.h"
 #include "synth_platform.h"
@@ -206,9 +207,7 @@ static char *wasm_repl_cmd(const char *line) {
     if (strcmp(line, "\\v") == 0) return wasm_repl_vars(0);
     if (strcmp(line, "\\w") == 0) return wasm_repl_vars(1);
     if (strcmp(line, "\\d") == 0 || strcmp(line, "\\help") == 0 || strcmp(line, "help") == 0) {
-        char *doc = slurp_file("/shakti/IE.txt");
-        if (doc) return doc;
-        return strdup("Cannot open IE.txt");
+        return strdup(IE_CARD_TEXT);
     }
     if (line[0] == '\\') {
         char *msg;

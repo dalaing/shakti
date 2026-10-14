@@ -155,7 +155,7 @@ Start with `./.build/shakti` (or `-i` after `--command`). Banner line:
 
 | Input | Effect |
 |-------|--------|
-| `\d` / `\help` / `help` | Print the fixed-width grammar card from [`IE.txt`](IE.txt); full prose remains in this doc. `.ie` vs python3: [`IE-python.txt`](IE-python.txt) (not loaded by `\d`) |
+| `\d` / `\help` / `help` | Print the fixed-width grammar card (built into the binary; same text as the removed `IE.txt`); full prose remains in this doc. |
 | `\v` | User-defined names and values (not imports, `argv`, or `__` internals) |
 | `\w` | User-defined names only |
 | `\q` | Process exit status `0` |
@@ -464,7 +464,7 @@ k : ktable(a:1, b:2)
 
 - REPL: `\q` or `\q N` — terminate the process with integer status (default `0`). Invalid `\q` args print `usage: \q [N]` and stay in the REPL.
 - Soft leave: type `quit` or `exit` to leave the REPL loop without forcing a non-zero status.
-- Other meta-commands: `\d` / `\help` / `help` (grammar card [`IE.txt`](IE.txt)), `\v` (vars), `\w` (names). See [REPL](#repl) under the CLI section.
+- Other meta-commands: `\d` / `\help` / `help` (built-in grammar card), `\v` (vars), `\w` (names). See [REPL](#repl) under the CLI section.
 
 ## Tables from files
 
@@ -1139,11 +1139,11 @@ See [examples index](#examples-index). IPC-specific:
 
 # REST module
 
-HTTP **client** (via `curl` on `PATH`) and a minimal in-process **HTTP/1.1 server** (TCP) after `import rest`.
+HTTP **client** (via `curl`) and a minimal in-process **HTTP/1.1 server** (TCP) after `import rest`.
 
 ## Requirements
 
-- **Client:** `curl` on `PATH`
+- **Client:** `curl`, discovered at `SHAKTI_CURL` (absolute path) or `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/bin` (not via `PATH`), run with `-q` and a minimal environment.
 - **Server:** available on Linux and macOS standalone builds (not WASM)
 
 Optional bearer token for client requests:

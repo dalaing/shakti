@@ -1,4 +1,5 @@
 /* shakti/src/repl.c — interactive loop, highlighting, docs */
+#include "ie_card.h"
 #include "shakti_internal.h"
 #include "input.h"
 #include <errno.h>
@@ -422,6 +423,11 @@ static FILE *repl_open_doc(const char *name) {
 static void repl_print_hl_doc(const char *name) {
     FILE *f = repl_open_doc(name);
     if (!f) {
+        if (name && !strcmp(name, "IE.txt")) {
+            fputs(IE_CARD_TEXT, stdout);
+            fflush(stdout);
+            return;
+        }
         fprintf(stderr,
             "Cannot open %s (set SHAKTI_DOC to a path whose basename is %s)\n",
             name, name);

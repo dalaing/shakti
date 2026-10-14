@@ -1,4 +1,4 @@
-import subprocess
-
-p : subprocess.Popen("ls -al", shell:True)
-print(p.wait())
+# Subprocess / sh demo — works without the still-broken lib/subprocess.ie.
+print("cwd:", sh("pwd"))
+print("files:")
+print(sh("ls -la"))

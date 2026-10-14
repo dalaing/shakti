@@ -1,5 +1,6 @@
 # shakti
 
+[Website](https://shakti.com) · [Try shakti in your browser](https://shakti.com/?try)
 [Discord](https://discord.gg/PkKwUk9Tf) · [tree-sitter grammar](https://github.com/avillega/tree-sitter-shakti) (unofficial)
 
 Small interpreted language (0.15.0) with vectors, matrices, tables, decorators,
@@ -7,59 +8,22 @@ each (`f@`), table joins (`,` / `union` / `outer`), asof helpers, and optional S
 graph, IPC, REST, gfx, pyplot, jupyter, synth, input, MIDI, PDF, DSP, Sonic Pi,
 and IEFS modules.
 
-<img src="assets/shakti_showcase.gif" alt="Shakti gfx showcase: movie, stem, pyplot, pong" width="800">
+## binaries
 
-## grammar
+Prebuilt stripped binaries (refreshed on releases; refresh the slot with
+`make dist` to ship your own):
 
-- **Bind** with `:` — `x : 1`, `def f(n:2):`
-- **Compare** with `=` — `if x = 1:`
-- `==` is not supported
-- Leading `@` decorates; expression `@` is each; matrix multiply is `mmul(a, b)`
-- `0xHH` (exactly two hex digits) is `char`; `0x1234` (even hex except 6/8) is `list[char]`; `0c…` is always `list[char]`; 6/8-digit `0x` is `int`
-- Asof helpers: `asof_sort` / `asof_bin` — see
-  [doc.md](doc.md#asof-join-helpers)
-- `.ie` vs python3 (one page): [IE-python.txt](IE-python.txt)
+- [Linux / WSL (x86_64)](https://raw.githubusercontent.com/fshakti/shakti/main/build/linux-x86_64/shakti)
+- [macOS (Apple Silicon, arm64)](https://raw.githubusercontent.com/fshakti/shakti/main/build/darwin-arm64/shakti)
 
-```ie
-values : [1, -2, 3]
+Download, make executable (`chmod +x shakti`), then `SHAKTI_LIB=$PWD/lib ./shakti`.
+The WSL binary is the Linux x86_64 build.
 
-def square(x):
-    return x * x
+## syntax card
 
-for value in abs@ values:
-    if value > 1:
-        print(square(value))
-```
-
-## build
-
-```bash
-# Linux: sudo apt-get install -y libx11-dev libasound2-dev libexpat1-dev
-# macOS: brew install libomp expat
-make build          # default: same as `make` / `make all`
-make prod           # strip release binary under .build/; refresh ./shakti symlink
-make dist           # copy stripped binary to build/<os>-<arch>/shakti
-make install        # optional: ~/.local/bin/shakti → this tree's .build/shakti
-export SHAKTI_LIB=$PWD/lib
-```
-
-`make prod-speed` enables `-O3` plus host CPU tuning (`-mcpu=native` on
-arm64 / Apple Silicon, including M5; `-march=x86-64-v2` on x86-64).
-For a redistributable arm64 binary, use `SHAKTI_PORTABLE_CPU=1` (`-mcpu=apple-m4`;
-current Xcode clang does not yet accept `-mcpu=apple-m5`).
-`make prod-size` optimizes for size.
-Default `make` / `make prod` enables link-time optimization (`-flto` /
-`-flto=auto`) so the split language units (`src/lex.c`, `src/parse.c`,
-`src/eval.c`, …) still inline across translation units.
-`make clean` removes `.build/` and the `./shakti` symlink; it does not delete
-`build/`. `make dist` copies the stripped host binary to
-`build/<os>-<arch>/shakti` (for example `build/linux-x86_64/shakti`). That slot
-is the committed prebuilt; `make prod` / `make build` do not update it. Point
-`SHAKTI_LIB` at this tree's `lib/` when running a prebuilt.
-The linked binary lives at `.build/shakti`; `make build` also creates `./shakti` →
-`.build/shakti` so a workspace directory on `PATH` finds `shakti`.
-
-Optional build flags (default on unless noted): `SHAKTI_GFX`, `SHAKTI_SYNTH`, `SHAKTI_DSP`, `SHAKTI_STEM`, `SHAKTI_SONICPI`, `SHAKTI_PDF`, `SHAKTI_MIDI`, `SHAKTI_IEFS`, `SHAKTI_IPC`, `SHAKTI_TALK` (macOS default on).
+Quick overview of the grammar below. The full one-page reference is built
+into the binary (`\d` / `\help` / `help` in the REPL); `.ie` vs Python
+differences are noted in `doc.md`.
 
 ## run
 
@@ -77,9 +41,6 @@ shakti
 | `-b` | `--banner` | Force banner |
 | `-c <code>` | `--command <code>` | Eval string |
 | `-i` | `--interactive` | REPL after command |
-| | `--parse-dump` | AST dump |
-| | `--parse-profile` | Parse microbench |
-| | `--parse-profile-iters <n>` | Iterations |
 | | `--` | End options |
 
 Unknown flags exit with status 2. Script files must end in `.ie`.
@@ -103,34 +64,6 @@ CSV/TSV `load` buffers normal files; set `SHAKTI_CSV_MAX_BYTES` to stream larger
 
 Fast numeric work belongs on large vectors / `dot` / `mmul` / `make prod-speed` —
 scalar `for`/`while` micros stay in the AST interpreter (`src/eval.c`).
-
-## security
-
-Shakti trusts the `.ie` programs it runs. A script can read/write files, use the
-network, and spawn `subprocess()` / `sh(cmd)` — treat untrusted input like an
-untrusted shell script, and use OS isolation (containers, bwrap) for hostile code.
-
-- `SHAKTI_SAFE=1` disables process execution and network, and confines file
-  access to `SHAKTI_FS_ROOT` (default: working directory). `SHAKTI_ALLOW_NET=1`
-  re-enables network; `SHAKTI_ALLOW_EXEC=0` disables only process execution.
-- `import` searches the script's directory, then the stdlib next to the binary,
-  then `SHAKTI_LIB` — not the current directory (except in the REPL / `-c`).
-- `load(dir)` never runs a directory's `./run` helper unless `exec:True` is passed.
-- In-memory decodes are capped at 1 GiB (`SHAKTI_MAX_DECODE`); parser nesting,
-  call depth (`SHAKTI_CALL_MAX_DEPTH`, default 3000) and f-string widths are capped.
-- Loopback REST/WebSocket servers reject non-local `Host` / `Origin`. Tokens:
-  `SHAKTI_REST_SERVER_TOKEN`, `SHAKTI_REST_CLIENT_TOKEN`, `SHAKTI_IPC_TOKEN`.
-- Non-loopback `rest.listen` / `ipc.listen` / `server_serve` require
-  `SHAKTI_REST_ALLOW_PUBLIC=1` (+ token) / `SHAKTI_IPC_ALLOW_PUBLIC=1` (+ token) /
-  `SHAKTI_SERVE_ALLOW_PUBLIC=1` (+ TLS).
-
-Full list of settings: [doc.md#security](doc.md#security).
-
-**`examples/example.ie` is a merged copy-paste catalog** — do **not** run the whole file as one program.
-It concatenates interactive demos (`gfx`, `synth`, `input`, …). Running it end-to-end
-hits an open-window busy loop (`while gfx.alive(): gfx.tick()` with no sleep) and will
-spin until the window is closed. Copy one section into its own `.ie`.
-For automation, set `SHAKTI_GFX_SKIP=1` where demos support it.
 
 ## modules
 
@@ -161,6 +94,16 @@ Demo games (gfx; need `SHAKTI_GFX=1`): [`import pong`](lib/pong.ie) then `pong.r
 ```
 
 Merged copy-paste sections also live in [`examples/example.ie`](examples/example.ie) (`pyplot_demo.ie`, `jupyter_demo.ie`, …) — copy a section out; do not run the whole file. Use `SHAKTI_GFX_SKIP=1` to skip gfx windows in pyplot/jupyter demos.
+
+## games / demos
+
+Launch with gfx (`SHAKTI_GFX=1`):
+- `chess`: `import chess; chess.run()` · terminal `chess.run_terminal()`
+- `draughts`: `import draughts; draughts.run()`
+- `pong`: `import pong; pong.run()` · terminal `pong.run_terminal()`
+- Timed showcase (movie/stem/pyplot/pong): `examples/showcase.ie`
+
+See `examples/pong_bench.ie` for throughput.
 
 ## license
 

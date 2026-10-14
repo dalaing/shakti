@@ -38,7 +38,6 @@ LDFLAGS := -s MODULARIZE=1 \
 	-s EXPORTED_RUNTIME_METHODS=['ccall','cwrap','HEAPU8','HEAPU32','HEAPF32','UTF8ToString','stringToUTF8'] \
 	-s EXPORTED_FUNCTIONS='[$(EXPORTS)]' \
 	--preload-file $(ROOT)/lib@/shakti/lib \
-	--preload-file $(ROOT)/IE.txt@/shakti/IE.txt
 
 ifneq ($(SITE),)
   LDFLAGS += --preload-file $(SITE)/site@/site
@@ -57,7 +56,7 @@ $(DIST)/shakti.js:
 	@echo 'SITE is required (directory containing site/main.ie). Example: make -C web SITE=/path/to/tree' >&2
 	@exit 1
 else
-$(DIST)/shakti.js: $(SRCS) $(BUILD)/shakti_version.h Makefile $(SITE)/site/main.ie $(ROOT)/IE.txt
+$(DIST)/shakti.js: $(SRCS) $(BUILD)/shakti_version.h Makefile $(SITE)/site/main.ie
 	@mkdir -p $(DIST)
 	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDFLAGS)
 endif

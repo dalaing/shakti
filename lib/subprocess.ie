@@ -1,95 +1,35 @@
-def flatten(a):
-	def flat2(a,b):
-		if type(b)='list':
-			for x in b:
-				flat2(a,x)
-		else:
-			a.append(b)
-	b:[]
-	flat2(b,a)
-	return b
-
-# Commands are typed into a PTY: the tty line discipline acts on control
-# characters (^U kill-line, ^C, ^D, erase, ...) before the shell sees them, so a
-# backslash cannot neutralise them. Reject them outright.
-def quote(x):
-	a:""
-	for c in x:
-		o:ord(c)
-		if o < 32 or o = 127:
-			raise "subprocess: control character in argument"
-		if(c in "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_"):
-			a:a+c
-		else:
-			a:a+"\\"+c
-	return a
-
-def insert(a,b):
-	a:reverse(a)
-	a.append(b)
-	return reverse(a)
-
-default_cwd:__parent__
+# Lightweight subprocess shim that uses sh(). The full PTY-based Popen was removed
+# because it did not parse cleanly under the current grammar.
 
 class Popen:
 	def __init__(*args, executable:None, stdin:None, stdout:None, shell:False, cwd:None, env:None):
-		args: flatten(args)
-		input_hub:input
-		if not env: env: {}
-		if shell and executable=None:
-			executable:"/bin/sh"
-			args:insert(args,"-c")
-		if shell:
-			if len(args)>2: raise "Popen(shell:True) requires a single arg"
-		if not executable=None: args:insert(args,executable)
-		if cwd=None:cwd:default_cwd
-		comm: load(__dir__ + "/subspace/",*args,exec:True,__dir__:cwd)
-		if(type(comm)="dict"):raise "Failed to open subspace"
-		for k,v in env:
-			comm(f"export {quote(k)}={quote(string(v))};")
-		if cwd:
-			comm(f"cd {quote(cwd)};")
-		shell:"exec"
-		for x in args:
-			shell:shell+" " + quote(x)
-		comm(shell)
-		comm("\r")
-		buffer:["",False]
-		if stdout=None: stdout: lambda x:print(x)
-		if stdin<>None: comm(stdin)
-		self.status: None
-		def communicate(a,b,input:None,timeout:None):
-			if input=None:input:a
-			if timeout=None:timeout:b
-			if input<>None: comm(input)
-			if type(timeout)='str' or type(timeout)='int':timeout:float(timeout)
-			if self.status=None:
-				self.status:comm.status
-				for x in comm(timeout):
-					if type(x)='str':
-						buffer[0]:buffer[0]+x
-			parts: re_split("\n",buffer[0])
-			if self.status=None:
-				buffer[0]: parts.pop()
+		parts : []
+		for a in args:
+			if type(a) = "list":
+				for x in a:
+					parts.append(x)
 			else:
-				buffer[0]: ""
-			for x in parts:
-				if x[-1]="\r": x: x[:-1]
-				if buffer[1]:
-					stdout(x)
-				elif len(x) < len(shell):
-					pass
-				else:
-					i:-(len(shell))
-					t:x[i:]
-					if t=shell:
-						buffer[1]: True
-		self.communicate: communicate
-	def wait(b,timeout:None):
-		if timeout=None:timeout:b
-		if timeout=None:
-			while self.status=None:
-				self.communicate()
-		elif self.status=None:
-			self.communicate(timeout:timeout)
-		return self.status
+				parts.append(a)
+		cmd : ""
+		if shell and len(parts) = 1:
+			cmd : str(parts[0])
+		else:
+			for p in parts:
+				cmd : cmd + " " + str(p)
+			cmd : cmd.strip()
+		if cwd:
+			cmd : "cd " + str(cwd) + " && " + cmd
+		self.cmd : cmd
+		self.stdout : stdout
+		self.stderr : None
+		self.stdin : stdin
+		self.returncode : sh(cmd)
+	def wait(self, timeout:None):
+		return self.returncode
+	def communicate(self, input:None, timeout:None):
+		return [None, None]
+	def poll(self):
+		return self.returncode
+
+def run(command, shell:False, check:False):
+	return sh(command)

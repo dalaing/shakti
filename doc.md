@@ -446,6 +446,8 @@ t : table(a:1 2; b:3 4)
 k : ktable(a:1, b:2)
 ```
 
+Each column of `table(...)` (named arguments or a dict) is a vector, list or matrix, and all have the same length, the table's row count. Anything else (a scalar, a string, a dict, a table, None) or columns of different lengths is an error value.
+
 ## I/O and JSON
 
 - `read(path)`, `write(path, text)`, `readlines(path)`

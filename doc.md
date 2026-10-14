@@ -182,7 +182,9 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - Dict literals and slices keep `:` — `{k: v}`, `a[1:3]`
 - `==` is not supported
 - Integer bitwise helpers: `band(a,b)`, `bor(a,b)`, `bxor(a,b)`, `bnot(a)`,
-  `shl(a,b)`, `shr(a,b)` — `shl`/`shr` are logical shifts on the low 64 bits;
+  `shl(a,b)`, `shr(a,b)`, on ints, chars (their codes), bools and floats (truncated; NaN or
+  out of int range is an error); an error operand is passed through, and anything else is an error.
+  `shl`/`shr` are logical shifts on the low 64 bits;
   shift counts must be in `0..63`
 - `0xHH` (exactly two hex digits) is `char`; `0x1234` (even length except 6/8) is `list[char]`; `0c…` is always `list[char]`; 6/8-digit or odd `0x` is `int`
 - `char(n)` builds a `char` from an int (distinct from `chr`, which returns a
@@ -348,7 +350,7 @@ print(len(xs))                # 5
 | `dot(a, b)` | Inner product (fused; no intermediate vector) |
 | `sum(v)` | Sum of elements |
 | `min(v)`, `max(v)`, `avg(v)` | Reducers |
-| `abs(v)` | Element-wise absolute value |
+| `abs(v)` | Element-wise absolute value, of ints, floats, their vectors and matrices; a char gives its code; an error is passed through; anything else is an error |
 
 ```ie
 a : range(1000000)

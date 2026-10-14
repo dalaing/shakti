@@ -791,56 +791,68 @@ static V *bi_max(V **a, in) {
     return v_nil();
 }
 static V *bi_abs(V **a, in) {
-    P(n < 1,v_int(0))
+    P(n < 1,v_err("abs(x)"))
     P(a[0]->t == T_IVEC || a[0]->t == T_IMAT,vec_unary_int(a[0], iabs64))
     P(a[0]->t == T_FVEC || a[0]->t == T_FMAT,vec_unary_double(a[0], fabs))
     V *v = a[0];
     P(v->t == T_INT && v->j == INT64_MIN,v_float(-(double)INT64_MIN))
     P(v->t == T_INT,v_int(v->j < 0 ? -v->j : v->j))
     P(v->t == T_FLOAT,v_float(fabs(v->f)))
-    return v_int(0);
+    P(v->t == T_CHAR,v_int(v->j))
+    P(v->t == T_ERR,v_ref(v))
+    return v_errf("abs: unsupported operand type %s", type_name(v->t));
 }
-/* Integer bitwise helpers (logical shifts on uint64 bits). */
-static int64_t bi_as_i64(V *v) {
-    if (v->t == T_INT) return v->j;
-    if (v->t == T_FLOAT) return (int64_t)v->f;
-    if (v->t == T_BOOL) return v->j ? 1 : 0;
-    return 0;
+/* Integer bitwise helpers (logical shifts on uint64 bits). An int, a char (its code), a bool or a
+ * float that truncates into int64; anything else is refused, an error operand passed through. */
+static V *bi_as_i64(const char *fn, V *v, int64_t *out) {
+    if (v->t == T_INT || v->t == T_CHAR) { *out = v->j; return NULL; }
+    if (v->t == T_BOOL) { *out = v->j ? 1 : 0; return NULL; }
+    if (v->t == T_FLOAT && v->f >= -0x1p63 && v->f < 0x1p63) { *out = (int64_t)v->f; return NULL; }
+    if (v->t == T_FLOAT && isnan(v->f)) return v_errf("%s: NaN is not an int", fn);
+    if (v->t == T_FLOAT) return v_errf("%s: float out of int range", fn);
+    if (v->t == T_ERR) return v_ref(v);
+    return v_errf("%s: unsupported operand type %s", fn, type_name(v->t));
 }
+#define BI_AS_I64(fn, v, x) do { V *e_ = bi_as_i64(fn, v, &(x)); if (e_) return e_; } while (0)
 static V *bi_band(V **a, in) {
+    int64_t x, y;
     P(n < 2, v_err("band(a, b)"))
-    return v_int(bi_as_i64(a[0]) & bi_as_i64(a[1]));
+    BI_AS_I64("band", a[0], x); BI_AS_I64("band", a[1], y);
+    return v_int(x & y);
 }
 static V *bi_bor(V **a, in) {
+    int64_t x, y;
     P(n < 2, v_err("bor(a, b)"))
-    return v_int(bi_as_i64(a[0]) | bi_as_i64(a[1]));
+    BI_AS_I64("bor", a[0], x); BI_AS_I64("bor", a[1], y);
+    return v_int(x | y);
 }
 static V *bi_bxor(V **a, in) {
+    int64_t x, y;
     P(n < 2, v_err("bxor(a, b)"))
-    return v_int(bi_as_i64(a[0]) ^ bi_as_i64(a[1]));
+    BI_AS_I64("bxor", a[0], x); BI_AS_I64("bxor", a[1], y);
+    return v_int(x ^ y);
 }
 static V *bi_bnot(V **a, in) {
+    int64_t x;
     P(n < 1, v_err("bnot(a)"))
-    return v_int(~bi_as_i64(a[0]));
+    BI_AS_I64("bnot", a[0], x);
+    return v_int(~x);
 }
 static V *bi_shl(V **a, in) {
-    uint64_t x;
-    int64_t s;
+    int64_t x, s;
     P(n < 2, v_err("shl(a, b)"))
-    s = bi_as_i64(a[1]);
+    BI_AS_I64("shl", a[0], x); BI_AS_I64("shl", a[1], s);
     P(s < 0 || s >= 64, v_err("shl: shift out of range"))
-    x = (uint64_t)bi_as_i64(a[0]);
-    return v_int((int64_t)(x << (unsigned)s));
+    return v_int((int64_t)((uint64_t)x << (unsigned)s));
 }
 static V *bi_shr(V **a, in) {
-    uint64_t x;
-    int64_t s;
+    int64_t x, s;
     P(n < 2, v_err("shr(a, b)"))
-    s = bi_as_i64(a[1]);
+    BI_AS_I64("shr", a[0], x); BI_AS_I64("shr", a[1], s);
     P(s < 0 || s >= 64, v_err("shr: shift out of range"))
-    x = (uint64_t)bi_as_i64(a[0]);
-    return v_int((int64_t)(x >> (unsigned)s));
+    return v_int((int64_t)((uint64_t)x >> (unsigned)s));
 }
+#undef BI_AS_I64
 #define V_MAP_FUNC(NAME, FUNC) \
 static V *bi_##NAME(V **a, in) { \
     P(n < 1, v_float(0)) \

@@ -652,11 +652,30 @@ V *bi_sorted(V **a, in, V **kwn, V **kwv, int nkw, Env *e) {
     qsort(r->L, (size_t)r->n, sizeof(V *), cmp_vptr);
     return r;
 }
+/* any(xs) and all(xs) of one list or vector test its items, as Python's do; with several
+   arguments, or one that isn't a list or vector, they test the arguments. */
+static int any_all_items(V **a, in) { return n == 1 && (a[0]->t == T_LIST || is_vec_t(a[0]->t)); }
+static int item_truthy(V *v, int64_t i) {
+    switch (v->t) {
+    case T_IVEC: return v->J[i] != 0;
+    case T_FVEC: return v->F[i] != 0.0;
+    case T_BVEC: case T_CVEC: return v->B[i] != 0;
+    default: return is_truthy(v->L[i]);
+    }
+}
 V *bi_any(V **a, in) {
+    if (any_all_items(a, n)) {
+        for (int64_t j = 0; j < a[0]->n; j++) P(item_truthy(a[0], j),v_bool(1))
+        return v_bool(0);
+    }
     i(n,{P(is_truthy(a[i]),v_bool(1))})
     return v_bool(0);
 }
 V *bi_all(V **a, in) {
+    if (any_all_items(a, n)) {
+        for (int64_t j = 0; j < a[0]->n; j++) P(!item_truthy(a[0], j),v_bool(0))
+        return v_bool(1);
+    }
     i(n,{P(!is_truthy(a[i]),v_bool(0))})
     return v_bool(1);
 }

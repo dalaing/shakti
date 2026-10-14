@@ -949,7 +949,7 @@ static int try_dense_ivec_group(V *tbl, V **bcols, int nby, ColSpec *specs, int 
     }
     int64_t product = 1;
     for (int b = 0; b < nby; b++) {
-        if (mins[b] < 0) return 0;
+        if (mins[b] < 0 || maxs[b] >= SQL_DENSE_CAP) return 0;
         dims[b] = maxs[b] + 1;
         if (dims[b] <= 0) return 0;
         if (product > SQL_DENSE_CAP / dims[b]) return 0;
@@ -1106,7 +1106,7 @@ static int try_radix_ivec_group(V *tbl, V **bcols, int nby, ColSpec *specs, int 
     int can_pack = 1;
     uint64_t product = 1;
     for (int b = 0; b < nby; b++) {
-        if (mins[b] < 0 || mins[b] == INT64_MAX) {
+        if (mins[b] < 0 || mins[b] == INT64_MAX || maxs[b] - mins[b] == INT64_MAX) {
             can_pack = 0;
             break;
         }

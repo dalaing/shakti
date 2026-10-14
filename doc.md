@@ -151,6 +151,10 @@ it and enters the REPL). The REPL reports a line that doesn't parse and goes on.
 
 Script files must end in `.ie`.
 
+An uncaught error while a script or `-c` program runs (a `raise`, or an error the
+program ends on) ends it with status 1; with `-i`, `-c` reports it and enters the
+REPL. A failed `assert` ends the process with status 1, `-i` or not.
+
 ### REPL
 
 Start with `./.build/shakti` (or `-i` after `--command`). Banner line:

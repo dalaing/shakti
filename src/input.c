@@ -631,12 +631,27 @@ V *input_stream_next(V *stream) {
     return v_nil();
 }
 
+/* drop the key down and key up queued right behind a typed byte's character event (decode_vt_byte
+   and tty_drain queue the three together; Enter's key code differs from its character's, its text
+   does not), so a stream, input(ms) or wait does not see a key the line editor has read */
+static void q_drop_keys_of(const InputEvent *ch) {
+    for (int kind = EV_KEY_DOWN; kind <= EV_KEY_UP; kind++) {
+        if (q_empty()) return;
+        const InputEvent *n = &g_in.q[g_in.qh];
+        if (n->kind != kind || strcmp(n->utf8, ch->utf8) != 0) return;
+        g_in.qh = (g_in.qh + 1) % INPUT_QCAP;
+    }
+}
+
 int input_hub_read_char(char *out) {
     input_hub_init();
     InputEvent ev;
+    /* a typed byte queues a character event and its key down and up (for input(2)): the line
+       editor takes the character event only, so each character is typed once */
     while (q_pop(&ev)) {
-        if (ev.utf8[0]) {
+        if (ev.kind == EV_CHAR && ev.utf8[0]) {
             *out = ev.utf8[0];
+            q_drop_keys_of(&ev);
             return 1;
         }
     }
@@ -645,9 +660,13 @@ int input_hub_read_char(char *out) {
     unsigned char pending[PENDING_MAX];
     int pn = 0;
     decode_vt_byte(c, pending, &pn);
-    if (q_pop(&ev)) {
-        *out = ev.utf8[0] ? ev.utf8[0] : (char)c;
-        return 1;
+    /* keys a window sent while we waited are ahead of this byte's events: pass over them too */
+    while (q_pop(&ev)) {
+        if (ev.kind == EV_CHAR && ev.utf8[0]) {
+            *out = ev.utf8[0];
+            q_drop_keys_of(&ev);
+            return 1;
+        }
     }
     *out = (char)c;
     return 1;

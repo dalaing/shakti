@@ -1325,19 +1325,7 @@ V *eval(Node *n, Env *e) {
             V *idx = eval(target->ch[1], e);
             if (!idx || idx->t == T_ERR) { v_free(obj); v_free(val); return idx ? idx : v_err("bad assignment index"); }
             if(obj->t==T_DICT) {
-                if(idx->t==T_STR) {
-                    v_dict_set(obj, idx->s, val);
-                } else if(idx->t==T_INT) {
-                    int64_t i = idx->j;
-                    if(i<0) i+=obj->n;
-                    if(i>=0 && i<obj->n && obj->vals) {
-                        v_list_unshare(&obj->vals);
-                        if (i < obj->vals->n) {
-                            v_free(obj->vals->L[i]);
-                            obj->vals->L[i] = v_ref(val);
-                        }
-                    }
-                }
+                v_dict_set_key(obj, idx, val);
                 v_free(obj); v_free(idx); v_free(val);
                 return v_nil();
             }
@@ -1458,12 +1446,13 @@ V *eval(Node *n, Env *e) {
             V *obj = eval(target->ch[0], e);
             V *idx = eval(target->ch[1], e);
             V *delta = eval(n->ch[1], e);
-            if(obj->t==T_DICT && idx->t==T_STR) {
-                V *cur = v_dict_get(obj, idx->s);
-                if(cur) {
-                    V *newval = vec_binop(cur, delta, n->op);
-                    v_dict_set(obj, idx->s, newval);
-                    v_free(newval);
+            if(obj->t==T_DICT) {
+                int64_t i = v_dict_index(obj, idx);
+                if(i >= 0) {
+                    V *newval = vec_binop(obj->vals->L[i], delta, n->op);
+                    v_list_unshare(&obj->vals);
+                    v_free(obj->vals->L[i]);
+                    obj->vals->L[i] = newval;
                 }
             }
             v_free(obj); v_free(idx); v_free(delta);

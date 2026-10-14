@@ -56,6 +56,9 @@ uint32_t hash_u64(uint64_t x);
    for a key of any other kind, which v_dict_index finds by comparing it with each key by `=`. */
 #define DICT_UNHASHED (-2)
 int64_t v_dict_hashed_index(V *d, V *k);
+/* Append the pair k: val to d, keeping its hash table in step; k is not in d already. Like
+   v_dict_set, it first unshares d's keys and vals, so another dict sharing them is unchanged. */
+void v_dict_push(V *d, V *k, V *val);
 
 V *v_alloc(int t);
 V *try_promote_matrix(V **elems, int nch);

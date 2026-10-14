@@ -425,6 +425,8 @@ V *v_dict_get(V *d, const char *key);
 int64_t v_dict_index(V *d, V *k);
 /* The value under key k (borrowed), or NULL: a string key matches by text, any other by `=`. */
 V *v_dict_find(V *d, V *k);
+/* Set key k to val, matching k as v_dict_find does; a new key is added at the end. */
+void v_dict_set_key(V *d, V *k, V *val);
 int env_save(Env *e, const char *path);
 int env_load(Env *e, const char *path);
 int shakti_parse_datetime_ms(const char *s, int64_t *out_ms);

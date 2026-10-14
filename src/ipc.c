@@ -8,6 +8,9 @@
 #include "shakti_internal.h"
 
 #include <netdb.h>
+#if !defined(_WIN32)
+#include <sys/file.h>
+#endif
 
 #define IPC_AUTH_MAGIC "SHKA1"
 #define IPC_AUTH_MAGIC_LEN 5u
@@ -171,6 +174,7 @@ int ipc_alloc(void) {
             g_handles[i].in_use = 1;
             g_handles[i].fd = -1;
             g_handles[i].reply_fd = -1;
+            g_handles[i].lock_fd = -1;
             g_handles[i].next_corr = ipc_rand_corr_seed();
             if (g_handles[i].next_corr == 0) g_handles[i].next_corr = 1;
             return i;
@@ -222,6 +226,51 @@ int ipc_inbox_take(IpcInbox *box, int want_corr, uint32_t corr,
     return -1;
 }
 
+#if !defined(_WIN32)
+/* The lock file beside a listener's socket: <dir>/shakti-<port>.lock for <dir>/shakti-<port>.sock. */
+static int uds_lock_path(const char *sock_path, char *out, size_t cap) {
+    size_t n = strlen(sock_path);
+    if (n < 5 || n >= cap || strcmp(sock_path + n - 5, ".sock") != 0) return -1;
+    memcpy(out, sock_path, n - 5);
+    memcpy(out + n - 5, ".lock", 6);
+    return 0;
+}
+
+/* Whether the file at lock_path is still the one lock_fd has open (a /tmp cleaner may have removed
+   it, and another listen made a new one). */
+static int uds_holds(const char *lock_path, int lock_fd) {
+    struct stat fd_st, path_st;
+    return fstat(lock_fd, &fd_st) == 0 && lstat(lock_path, &path_st) == 0
+           && fd_st.st_dev == path_st.st_dev && fd_st.st_ino == path_st.st_ino;
+}
+
+/* Release a listener's lock: while the lock file at the path is still the one held, remove the
+   socket file (if this listen bound it) and then the lock file; close the lock in any case. A new
+   listener binds only once it holds a lock, so while ours is at the path the socket is ours. Once
+   it has been removed, both paths may be another listener's and are left: a socket left behind
+   refuses the next listen's connect, and is replaced then. */
+static void uds_unlock(const char *sock_path, int lock_fd, int bound) {
+    char lock_path[108];
+    if (lock_fd < 0) return;
+    if (uds_lock_path(sock_path, lock_path, sizeof lock_path) == 0 && uds_holds(lock_path, lock_fd)) {
+        if (bound) unlink(sock_path);
+        unlink(lock_path);
+    }
+    close(lock_fd);
+}
+#endif
+
+/* Close down a Unix listener's socket and lock files (uds_unlock). A no-op on Windows, which has
+   no Unix listeners. */
+static void uds_release(const char *sock_path, int lock_fd) {
+#if defined(_WIN32)
+    (void)sock_path;
+    (void)lock_fd;
+#else
+    uds_unlock(sock_path, lock_fd, 1);
+#endif
+}
+
 void ipc_free_handle(int h) {
     IpcHandle *s = &g_handles[h];
     if (!s->in_use) return;
@@ -233,8 +282,10 @@ void ipc_free_handle(int h) {
         close(s->reply_fd);
         s->reply_fd = -1;
     }
-    if (s->kind == IPC_KIND_SOCK_LISTEN && s->uds_path[0])
-        unlink(s->uds_path);
+    if (s->kind == IPC_KIND_SOCK_LISTEN && s->uds_path[0]) {
+        uds_release(s->uds_path, s->lock_fd);
+        s->lock_fd = -1;
+    }
 #if (defined(__linux__) || defined(__APPLE__)) && !defined(SHAKTI_WASM)
     if (s->kind == IPC_KIND_SHM_CHAN && s->shm_ptr) {
         if (s->shm_bcast && s->shm_side >= 0) {
@@ -567,49 +618,155 @@ static int sock_listen_tcp(const char *host, int port, char *err, size_t err_cap
     return s;
 }
 
-static int sock_listen_uds(int port, char *path_out, char *err, size_t err_cap) {
+#if !defined(_WIN32)
+/* Take a listener's lock: an exclusive flock on its lock file, held while the listener is open.
+   The system drops it when the process ends, however it ends. Returns the lock's fd; -1 with *busy
+   set if another listener holds it; -1 with err set if the lock file can't be opened or locked. */
+static int uds_lock(const char *lock_path, int *busy, char *err, size_t err_cap) {
+    *busy = 0;
+    for (int tries = 0; tries < 8; tries++) {
+        int fd = open(lock_path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd < 0 && errno == EEXIST) {
+            fd = open(lock_path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+            if (fd < 0 && errno == ENOENT) continue; /* removed since: make it */
+        }
+        if (fd < 0) {
+            snprintf(err, err_cap, "ipc: uds lock %s: %s", lock_path, strerror(errno));
+            return -1;
+        }
+        if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+            int e = errno;
+            close(fd);
+            if (e == EINTR) continue;
+            if (e == EWOULDBLOCK) {
+                *busy = 1;
+                return -1;
+            }
+            snprintf(err, err_cap, "ipc: uds lock %s: %s", lock_path, strerror(e));
+            return -1;
+        }
+        /* A listener closing between our open and flock removes the file it held; a lock on a
+           removed file guards nothing, so open the path again. */
+        if (uds_holds(lock_path, fd)) return fd;
+        close(fd);
+    }
+    snprintf(err, err_cap, "ipc: uds lock %s: removed while locking", lock_path);
+    return -1;
+}
+
+/* Whether a listener is accepting on the Unix socket at addr: 1 unless a connect that doesn't wait
+   is refused or finds no file (0). The connection, if made, is closed at once, and stays queued at
+   that listener until it accepts. -1 with errno set if there is no socket to ask with. On macOS a
+   listener whose queue is full refuses too, and is taken for one that has gone (Linux says
+   EAGAIN, in use); asked often enough while it doesn't accept, these connections fill it. */
+static int uds_probe(const struct sockaddr_un *addr) {
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0) return -1;
+    ipc_set_cloexec(s);
+    if (sock_set_block(s, 0) != 0) {
+        int e = errno;
+        close(s);
+        errno = e;
+        return -1;
+    }
+    int r = connect(s, (const struct sockaddr *)addr, sizeof *addr);
+    int e = errno;
+    close(s);
+    return r == 0 || (e != ECONNREFUSED && e != ENOENT);
+}
+#endif
+
+/* Listen on the Unix socket for port. The port is in use while another listener holds the lock
+   file beside its socket, as a bound TCP port is; nothing connects to that listener to find out.
+   Holding the lock, a socket at the path is asked (uds_probe), and the port is in use unless that
+   is refused: a listener that holds a lock never gets asked, so this reaches only a socket left by
+   a listener that has gone (refused), or a live listener that holds no lock (another program, an
+   older shakti, or one whose lock file a /tmp cleaner removed), or, if a cleaner removes a lock
+   file during another listen, one bound but not yet listening. Anything at the path that is not a
+   socket (a regular file, a directory, a symlink) is an error, and left alone. On success
+   *lock_out is the lock's fd, held until the listener is closed. */
+static int sock_listen_uds(int port, char *path_out, int *lock_out, char *err, size_t err_cap) {
+    *lock_out = -1;
 #if defined(_WIN32)
     (void)port;
     (void)path_out;
     snprintf(err, err_cap, "ipc: uds not supported on this platform");
     return -1;
 #else
+    char lock_path[108];
     if (ipc_uds_path(port, path_out, 108) != 0) {
         snprintf(err, err_cap, "ipc: uds path too long or socket dir unsafe");
         return -1;
     }
-    unlink(path_out);
-    int s = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (s < 0) {
-        snprintf(err, err_cap, "ipc: uds socket: %s", strerror(errno));
+    if (uds_lock_path(path_out, lock_path, sizeof lock_path) != 0) {
+        snprintf(err, err_cap, "ipc: uds path too long");
         return -1;
     }
-    ipc_set_cloexec(s);
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof addr);
     addr.sun_family = AF_UNIX;
     if (ipc_copy_cstr(addr.sun_path, sizeof addr.sun_path, path_out) != 0) {
         snprintf(err, err_cap, "ipc: uds path too long");
-        close(s);
         return -1;
     }
+    int busy;
+    int lock = uds_lock(lock_path, &busy, err, err_cap);
+    if (lock < 0) {
+        if (busy) snprintf(err, err_cap, "ipc: uds bind: %s", strerror(EADDRINUSE));
+        return -1;
+    }
+    struct stat path_st;
+    if (lstat(path_out, &path_st) == 0) {
+        if (!S_ISSOCK(path_st.st_mode)) {
+            snprintf(err, err_cap, "ipc: %s exists and is not a socket", path_out);
+            uds_unlock(path_out, lock, 0);
+            return -1;
+        }
+        int live = uds_probe(&addr);
+        if (live != 0) {
+            if (live > 0)
+                snprintf(err, err_cap, "ipc: uds bind: %s", strerror(EADDRINUSE));
+            else
+                snprintf(err, err_cap, "ipc: uds socket: %s", strerror(errno));
+            uds_unlock(path_out, lock, 0);
+            return -1;
+        }
+        if (unlink(path_out) != 0 && errno != ENOENT) {
+            snprintf(err, err_cap, "ipc: uds unlink %s: %s", path_out, strerror(errno));
+            uds_unlock(path_out, lock, 0);
+            return -1;
+        }
+    } else if (errno != ENOENT) {
+        snprintf(err, err_cap, "ipc: uds %s: %s", path_out, strerror(errno));
+        uds_unlock(path_out, lock, 0);
+        return -1;
+    }
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0) {
+        snprintf(err, err_cap, "ipc: uds socket: %s", strerror(errno));
+        uds_unlock(path_out, lock, 0);
+        return -1;
+    }
+    ipc_set_cloexec(s);
     if (bind(s, (struct sockaddr *)&addr, sizeof addr) < 0) {
         snprintf(err, err_cap, "ipc: uds bind: %s", strerror(errno));
         close(s);
+        uds_unlock(path_out, lock, 0);
         return -1;
     }
     if (chmod(path_out, 0700) != 0) {
         snprintf(err, err_cap, "ipc: uds chmod: %s", strerror(errno));
         close(s);
-        unlink(path_out);
+        uds_release(path_out, lock);
         return -1;
     }
     if (listen(s, 16) < 0) {
         snprintf(err, err_cap, "ipc: uds listen: %s", strerror(errno));
         close(s);
-        unlink(path_out);
+        uds_release(path_out, lock);
         return -1;
     }
+    *lock_out = lock;
     return s;
 #endif
 }
@@ -1139,10 +1296,11 @@ V *bi_ipc_listen(V **a, int n) {
 #endif
 
     int fd = -1;
+    int lock_fd = -1;
     char uds_path[108];
     uds_path[0] = 0;
     if (tr == IPC_TR_UDS)
-        fd = sock_listen_uds(port, uds_path, err, sizeof err);
+        fd = sock_listen_uds(port, uds_path, &lock_fd, err, sizeof err);
     else
         fd = sock_listen_tcp(host, port, err, sizeof err);
     if (fd < 0) return v_err(err[0] ? err : "ipc_listen failed");
@@ -1150,16 +1308,17 @@ V *bi_ipc_listen(V **a, int n) {
     int h = ipc_alloc();
     if (h < 0) {
         close(fd);
-        if (uds_path[0]) unlink(uds_path);
+        uds_release(uds_path, lock_fd);
         return v_err("ipc_listen: no handles");
     }
     g_handles[h].kind = IPC_KIND_SOCK_LISTEN;
     g_handles[h].fd = fd;
     if (uds_path[0] && ipc_copy_cstr(g_handles[h].uds_path, sizeof g_handles[h].uds_path, uds_path) != 0) {
         ipc_free_handle(h);
-        unlink(uds_path);
+        uds_release(uds_path, lock_fd);
         return v_err("ipc_listen: uds path too long");
     }
+    g_handles[h].lock_fd = lock_fd;
     return v_int(h);
 }
 

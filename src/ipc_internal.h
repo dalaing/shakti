@@ -147,6 +147,7 @@ typedef struct {
     int fd;
     int nonblock;
     char uds_path[108];
+    int lock_fd;              /* a Unix listener's flock on its lock file, or -1 */
     IpcRxBuf rx;
     IpcInbox inbox;
     IpcInbox async_q;

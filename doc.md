@@ -636,6 +636,9 @@ j : t join u on id
 
 `by col1, col2` groups and sorts ascending. There is no separate `group by` / `order by` clause.
 
+A group's `sum` of an int column is an int, added as `sum` adds a `list[int]`: exact past 2^53,
+wrapping on overflow. Of a float column it is a float. `avg` is a float, and `count` an int.
+
 See also [syntax and builtins](#syntax-and-builtins) for tables, `load("file.csv")`, and matrix types.
 
 ---

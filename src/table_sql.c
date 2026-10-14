@@ -352,6 +352,7 @@ typedef struct {
     V **by_cell;
     V *name_val[64];
     double sum[64];
+    int64_t isum[64];   /* sum of an int column (sum_is_int) */
     double minv[64];
     double maxv[64];
     int have_mm[64];
@@ -420,6 +421,13 @@ static int gh_resize(GhTab *t);
 static inline int agg_needs_sum(int kind) {
     return kind == COL_SUM || kind == COL_AVG;
 }
+/* sum of an int column is an int, added as ints (as sum of a list[int] is); avg stays a float. */
+static inline int sum_is_int(int kind, int col_t) {
+    return kind == COL_SUM && col_t == T_IVEC;
+}
+static inline int64_t int_add(int64_t a, int64_t b) {
+    return (int64_t)((uint64_t)a + (uint64_t)b);   /* wraps, as sum of a list[int] does */
+}
 static inline int agg_needs_min(int kind) {
     return kind == COL_MIN;
 }
@@ -462,7 +470,9 @@ static int gh_slot_init_aggs(GhSlot *s, V *tbl, const int *by_idx, int nby,
             last_col = col;
             last_x = x;
             int kind = specs[sp].kind;
-            if (agg_needs_sum(kind)) {
+            if (col && sum_is_int(kind, col->t)) {
+                s->isum[sp] = col->J[row];
+            } else if (agg_needs_sum(kind)) {
                 s->sum[sp] = x;
             } else if (agg_needs_min(kind)) {
                 s->minv[sp] = x;
@@ -498,7 +508,9 @@ static void gh_slot_accum(GhSlot *s, int64_t row,
         last_col = col;
         last_x = x;
         int kind = specs[sp].kind;
-        if (agg_needs_sum(kind)) {
+        if (col && sum_is_int(kind, col_t[sp])) {
+            s->isum[sp] = int_add(s->isum[sp], col->J[row]);
+        } else if (agg_needs_sum(kind)) {
             s->sum[sp] += x;
         } else if (agg_needs_min(kind) && x < s->minv[sp]) {
             s->minv[sp] = x;
@@ -624,6 +636,7 @@ static void gh_merge_slot(GhTab *dst, GhSlot *src, ColSpec *specs, int nspecs) {
                 int kind = specs[sp].kind;
                 if (agg_needs_sum(kind)) {
                     d->sum[sp] += src->sum[sp];
+                    d->isum[sp] = int_add(d->isum[sp], src->isum[sp]);
                 } else if (src->have_mm[sp]) {
                     if (!d->have_mm[sp]) {
                         if (agg_needs_min(kind)) d->minv[sp] = src->minv[sp];
@@ -726,7 +739,8 @@ static inline double row_measure(V *col, int ct, int64_t row) {
 static inline void dense_accum_row(int key_val, int64_t row, int64_t *s_nrows, int64_t *s_name_row,
                             int *nactive, ColSpec *specs, int n_agg,
                             const int *agg_sp, V **sp_col, const int *col_t,
-                            double **s_sum, double **s_minv, double **s_maxv, int **s_have_mm) {
+                            double **s_sum, int64_t **s_isum, double **s_minv, double **s_maxv,
+                            int **s_have_mm) {
     if (s_nrows[key_val] == 0) {
         s_name_row[key_val] = row;
         (*nactive)++;
@@ -741,7 +755,9 @@ static inline void dense_accum_row(int key_val, int64_t row, int64_t *s_nrows, i
         last_col = col;
         last_x = x;
         int kind = specs[sp].kind;
-        if (agg_needs_sum(kind)) {
+        if (s_isum[k]) {
+            s_isum[k][key_val] = int_add(s_isum[k][key_val], col->J[row]);
+        } else if (agg_needs_sum(kind)) {
             s_sum[k][key_val] += x;
         } else if (!s_have_mm[k][key_val]) {
             if (agg_needs_min(kind)) s_minv[k][key_val] = x;
@@ -757,7 +773,8 @@ static inline void dense_accum_row(int key_val, int64_t row, int64_t *s_nrows, i
 static int dense_to_slots(GhTab *tab, int slots_cap, int nby, const int64_t *dims,
                            int64_t *s_nrows, int64_t *s_name_row, V *tbl, const int *name_idx, int nspecs,
                            int nactive, ColSpec *specs, int n_agg, const int *agg_sp,
-                           double **s_sum, double **s_minv, double **s_maxv, int **s_have_mm) {
+                           double **s_sum, int64_t **s_isum, double **s_minv, double **s_maxv,
+                           int **s_have_mm) {
     tab->nslots = 0;
     tab->slots = NULL;
     tab->map = NULL;
@@ -809,7 +826,9 @@ static int dense_to_slots(GhTab *tab, int slots_cap, int nby, const int64_t *dim
         for (int k = 0; k < n_agg; k++) {
             int sp = agg_sp[k];
             int kind = specs[sp].kind;
-            if (agg_needs_sum(kind)) {
+            if (s_isum[k]) {
+                s->isum[sp] = s_isum[k][i];
+            } else if (agg_needs_sum(kind)) {
                 s->sum[sp] = s_sum[k][i];
             } else {
                 if (agg_needs_min(kind)) s->minv[sp] = s_minv[k][i];
@@ -884,6 +903,12 @@ static int run_reduce_into_slot(GhSlot *s, V **bcols, int nby, int64_t *idx, int
         int need_max = agg_needs_max(kind);
         double sum = 0, mn = 0, mx = 0;
         int have = 0;
+        if (col && sum_is_int(kind, ct)) {
+            int64_t isum = 0;
+            for (int64_t i = 0; i < len; i++) isum = int_add(isum, col->J[idx[start + i]]);
+            s->isum[sp] = isum;
+            continue;
+        }
         /* Contiguous gather + SIMD reduce for large float runs. */
         int fast = 0;
         if (col && ct == T_FVEC && len >= 64) {
@@ -966,20 +991,23 @@ static int try_dense_ivec_group(V *tbl, V **bcols, int nby, ColSpec *specs, int 
     int n_agg = 0;
     prep_agg_cols(tbl, specs, nspecs, sp_col, col_t, name_idx, agg_sp, &n_agg);
     double *s_sum[64] = {0}, *s_minv[64] = {0}, *s_maxv[64] = {0};
+    int64_t *s_isum[64] = {0};
     int *s_have_mm[64] = {0};
     for (int k = 0; k < n_agg; k++) {
         int kind = specs[agg_sp[k]].kind;
-        if (agg_needs_sum(kind)) {
+        if (sum_is_int(kind, col_t[agg_sp[k]])) {
+            s_isum[k] = calloc((size_t)slots_cap, sizeof(int64_t));
+        } else if (agg_needs_sum(kind)) {
             s_sum[k] = calloc((size_t)slots_cap, sizeof(double));
         } else {
             if (agg_needs_min(kind)) s_minv[k] = malloc((size_t)slots_cap * sizeof(double));
             else s_maxv[k] = malloc((size_t)slots_cap * sizeof(double));
             s_have_mm[k] = calloc((size_t)slots_cap, sizeof(int));
         }
-        if ((agg_needs_sum(kind) && !s_sum[k]) ||
+        if ((agg_needs_sum(kind) && !s_sum[k] && !s_isum[k]) ||
             (!agg_needs_sum(kind) && ((!s_minv[k] && !s_maxv[k]) || !s_have_mm[k]))) {
             for (int j = 0; j <= k; j++) {
-                free(s_sum[j]); free(s_minv[j]); free(s_maxv[j]); free(s_have_mm[j]);
+                free(s_sum[j]); free(s_isum[j]); free(s_minv[j]); free(s_maxv[j]); free(s_have_mm[j]);
             }
             free(s_nrows);
             free(s_name_row);
@@ -1004,7 +1032,18 @@ static int try_dense_ivec_group(V *tbl, V **bcols, int nby, ColSpec *specs, int 
             int kind = specs[sp].kind;
             V *col = sp_col[sp];
             int ct = col_t[sp];
-            if (agg_needs_sum(kind)) {
+            if (s_isum[0]) {
+                int64_t *isum = s_isum[0];
+                for (int64_t r = 0; r < nr; r++) {
+                    if (MB && !MB[r]) continue;
+                    int key_val = (int)k0[r];
+                    if (s_nrows[key_val]++ == 0) {
+                        s_name_row[key_val] = r;
+                        nactive++;
+                    }
+                    isum[key_val] = int_add(isum[key_val], col->J[r]);
+                }
+            } else if (agg_needs_sum(kind)) {
                 double *sum = s_sum[0];
                 for (int64_t r = 0; r < nr; r++) {
                     if (MB && !MB[r]) continue;
@@ -1049,7 +1088,7 @@ static int try_dense_ivec_group(V *tbl, V **bcols, int nby, ColSpec *specs, int 
                 if (MB && !MB[r]) continue;
                 int key_val = (int)k0[r];
                 dense_accum_row(key_val, r, s_nrows, s_name_row, &nactive, specs,
-                                n_agg, agg_sp, sp_col, col_t, s_sum, s_minv, s_maxv, s_have_mm);
+                                n_agg, agg_sp, sp_col, col_t, s_sum, s_isum, s_minv, s_maxv, s_have_mm);
             }
         }
     } else if (nby == 2) {
@@ -1060,7 +1099,7 @@ static int try_dense_ivec_group(V *tbl, V **bcols, int nby, ColSpec *specs, int 
             if (MB && !MB[r]) continue;
             int key_val = (int)(k0[r] * d1 + k1[r]);
             dense_accum_row(key_val, r, s_nrows, s_name_row, &nactive, specs,
-                            n_agg, agg_sp, sp_col, col_t, s_sum, s_minv, s_maxv, s_have_mm);
+                            n_agg, agg_sp, sp_col, col_t, s_sum, s_isum, s_minv, s_maxv, s_have_mm);
         }
     } else {
         for (int64_t r = 0; r < nr; r++) {
@@ -1070,15 +1109,16 @@ static int try_dense_ivec_group(V *tbl, V **bcols, int nby, ColSpec *specs, int 
                 flat = flat * dims[b] + bcols[b]->J[r];
             }
             dense_accum_row((int)flat, r, s_nrows, s_name_row, &nactive, specs,
-                            n_agg, agg_sp, sp_col, col_t, s_sum, s_minv, s_maxv, s_have_mm);
+                            n_agg, agg_sp, sp_col, col_t, s_sum, s_isum, s_minv, s_maxv, s_have_mm);
         }
     }
     int dense_rc = dense_to_slots(tab, slots_cap, nby, dims, s_nrows, s_name_row, tbl, name_idx, nspecs,
-                   nactive, specs, n_agg, agg_sp, s_sum, s_minv, s_maxv, s_have_mm);
+                   nactive, specs, n_agg, agg_sp, s_sum, s_isum, s_minv, s_maxv, s_have_mm);
     free(s_nrows);
     free(s_name_row);
     for (int k = 0; k < n_agg; k++) {
         free(s_sum[k]);
+        free(s_isum[k]);
         free(s_minv[k]);
         free(s_maxv[k]);
         free(s_have_mm[k]);
@@ -1286,7 +1326,8 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
         }
         for (int s = 0; s < nspecs; s++) {
             keys->L[c] = v_str(specs[s].kind == COL_COUNT && specs[s].src[0] == 0 ? "count" : specs[s].name);
-            if (specs[s].kind == COL_COUNT) {
+            V *src = specs[s].src[0] ? tbl_col(tbl, tbl_col_idx(tbl, specs[s].src)) : NULL;
+            if (specs[s].kind == COL_COUNT || (src && sum_is_int(specs[s].kind, src->t))) {
                 data->L[c] = v_ivec(tab->nslots);
             } else if (specs[s].kind == COL_NAME) {
                 data->L[c] = v_list(tab->nslots);
@@ -1323,7 +1364,7 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
             for (int s = 0; s < nspecs; s++) {
                 V *colv = data->L[col];
                 if (colv->t == T_IVEC) {
-                    colv->J[g] = slot->nrows;
+                    colv->J[g] = specs[s].kind == COL_SUM ? slot->isum[s] : slot->nrows;
                 } else if (colv->t == T_FVEC) {
                     if (specs[s].kind == COL_SUM) colv->F[g] = slot->sum[s];
                     else if (specs[s].kind == COL_AVG)

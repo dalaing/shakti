@@ -24,6 +24,7 @@ static const char IE_CARD_TEXT[] =
     "\n"
     "sql    import sql · select … by … from t where …\n"
     "note   . attr/col · @ each / deco · mmul matmul · == unsupported\n"
+    "       e[a:b]: v is an error (a slice can't be assigned)\n"
     "       0xHH char (two hex digits) · longer 0x int\n"
     "       iefs layout 1 (char=4 str=5) · layout 0 refused\n"
     "       table(a:1 2, b:3 4) · table(a:1 2; b:3 4)\n"

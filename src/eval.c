@@ -29,16 +29,53 @@ static V *assign_map_oom(V *a, V *b, V *c, V *d) {
     if (d) v_free(d);
     return v_nil();
 }
+/* An assignment that can't be done gives err, but what is still to be evaluated is evaluated
+   first, in order: the nodes a->ch[from..] and then, when given, the value v. An error in one
+   passes through instead (err is dropped). */
+static V *refuse_assign(V *err, Node *a, int from, Node *v, Env *e) {
+    int n = a ? a->nch : 0;
+    for (int k = from; k <= n; k++) {
+        Node *x = k < n ? a->ch[k] : v;
+        if (!x) continue;
+        V *r = eval(x, e);
+        if (r && r->t == T_ERR) { v_free(err); return r; }
+        v_free(r);
+    }
+    return err;
+}
 /* An indexed assignment into a value of type tn with more indices than it takes: the indices are
    evaluated in order and an error in one passes through; otherwise "cannot assign to tn with n
    indices". */
 static V *too_many_indices(const char *tn, Node *target, Env *e) {
-    for (int k = 1; k < target->nch; k++) {
-        V *v = eval(target->ch[k], e);
-        if (v && v->t == T_ERR) return v;
-        v_free(v);
+    return refuse_assign(v_errf("cannot assign to %s with %d indices", tn, target->nch - 1),
+                         target, 1, NULL, e);
+}
+static V *eval_slice(V *obj, V *start_v, V *stop_v, V *step_v);
+/* The slice x[a:b] (or x[a:b:c]) that an assignment reads before it writes into an item of it, or
+   that x[a:b] op= v reads: the sliced object and the bounds are evaluated in order, and an error in
+   one (an undefined name among them) passes through; then the slice is taken, which can be an
+   error too ("object is not sliceable"). */
+static V *slice_read(Node *sl, Env *e) {
+    V *p[4] = {NULL, NULL, NULL, NULL};
+    for (int k = 0; k < sl->nch && k < 4; k++) {
+        p[k] = eval(sl->ch[k], e);
+        if (p[k] && p[k]->t == T_ERR) {
+            V *r = p[k];
+            while (k--) v_free(p[k]);
+            return r;
+        }
     }
-    return v_errf("cannot assign to %s with %d indices", tn, target->nch - 1);
+    if (!p[3]) p[3] = v_int(1);
+    V *r = eval_slice(p[0], p[1], p[2], p[3]);
+    for (int k = 0; k < 4; k++) v_free(p[k]);
+    return r;
+}
+/* A slice is a fresh value, so a write into it, or into an item of it, could never land: it is an
+   error value, given in place of the write once the nodes a->ch[from..] (the sliced object and
+   the bounds of x[a:b]: v, or the indices of an item of a slice) and then v (an augmented
+   assignment's value) are evaluated, as refuse_assign does. */
+static V *slice_assign_err(Node *a, int from, Node *v, Env *e) {
+    return refuse_assign(v_err("slice assignment is not supported"), a, from, v, e);
 }
 /* t.name: val and t["name"]: val — replace or add a column of the table's height.
  * *valp is the caller's value: replaced by its copy if the column has to be one. */
@@ -1256,7 +1293,8 @@ V *eval(Node *n, Env *e) {
             V *r = v_ref(val); v_free(val); return r;
         }
         if(target->type == N_INDEX) {
-            V *obj = eval(target->ch[0], e);
+            int of_slice = target->ch[0]->type == N_SLICE;
+            V *obj = of_slice ? slice_read(target->ch[0], e) : eval(target->ch[0], e);
             if (!obj || obj->t == T_ERR) { v_free(val); return obj ? obj : v_err("bad assignment target"); }
             /* a matrix takes two indices; anything else one (x[i][j]: v writes into an item) */
             if (target->nch > 3 || (target->nch == 3 && !is_mat_t(obj->t))) {
@@ -1264,6 +1302,7 @@ V *eval(Node *n, Env *e) {
                 v_free(obj); v_free(val);
                 return too_many_indices(tn, target, e);
             }
+            if (of_slice) { v_free(obj); v_free(val); return slice_assign_err(target, 1, NULL, e); }
             if (target->nch == 3) {
                 V *idx0 = eval(target->ch[1], e);
                 if (!idx0 || idx0->t == T_ERR) {
@@ -1367,6 +1406,7 @@ V *eval(Node *n, Env *e) {
             return v_nil();
         }
         v_free(val);
+        if(target->type == N_SLICE) return slice_assign_err(target, 0, NULL, e);
         return v_err("bad assignment target");
     }
     case N_AUGASSIGN: {
@@ -1412,7 +1452,8 @@ V *eval(Node *n, Env *e) {
             V *r = v_ref(newval); v_free(newval); return r;
         }
         if(target->type == N_INDEX) {
-            V *obj = eval(target->ch[0], e);
+            int of_slice = target->ch[0]->type == N_SLICE;
+            V *obj = of_slice ? slice_read(target->ch[0], e) : eval(target->ch[0], e);
             if (obj->t == T_ERR) return obj;
             /* too many indices is an error before v is worked out; otherwise the
                indices and v are worked out, in order, before the item is read, and the
@@ -1422,6 +1463,7 @@ V *eval(Node *n, Env *e) {
                 v_free(obj);
                 return too_many_indices(tn, target, e);
             }
+            if (of_slice) { v_free(obj); return slice_assign_err(target, 1, n->ch[1], e); }
             V *idx = eval(target->ch[1], e);
             if (idx->t == T_ERR) { v_free(obj); return idx; }
             V *cell = NULL;
@@ -1449,6 +1491,12 @@ V *eval(Node *n, Env *e) {
             v_free(obj); v_free(idx); v_free(delta);
             if (cell) v_free(cell);
             return res;
+        }
+        if(target->type == N_SLICE) {
+            V *sl = slice_read(target, e);
+            if (sl->t == T_ERR) return sl;
+            v_free(sl);
+            return slice_assign_err(NULL, 0, n->ch[1], e);
         }
         return v_err("bad augmented assignment target");
     }

@@ -180,6 +180,8 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - **Bind** with `:` — `x: 1`, `a, b: (1, 2)`, `def f(n:2):`, `table(a:[1])`
 - **Compare** with `=` — `if x = 1:`, `while i < len(s):`
 - Dict literals and slices keep `:` — `{k: v}`, `a[1:3]`
+- A slice is read only: `a[1:3]: v`, `a[1:3] += v` and `a[1:3][0]: v` are error values
+  ("slice assignment is not supported")
 - `==` is not supported
 - Integer bitwise helpers: `band(a,b)`, `bor(a,b)`, `bxor(a,b)`, `bnot(a)`,
   `shl(a,b)`, `shr(a,b)` — `shl`/`shr` are logical shifts on the low 64 bits;

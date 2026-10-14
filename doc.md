@@ -207,6 +207,11 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - `parse_check(src)` returns `dict(ok, error)` — syntax only, no eval
 - `assert e` and `assert e, msg` are statements: the whole expression is asserted
   (`assert [1] = [2]` fails); `assert(e, msg)` works too
+- `break` and `continue` act on the innermost `while` or `for` around them,
+  within their own `def` or `class` body or at top level; one with no loop
+  there (even in a `def` written inside a loop) is a parse error (`'break'
+  outside a loop`); an f-string's `{…}` and `eval`'s text are parsed on
+  their own, so a `break` there is an error even inside a loop
 
 String and formatted-string token text is limited to 8191 bytes, and source
 indentation is limited to 255 nested levels. Inputs beyond either limit fail

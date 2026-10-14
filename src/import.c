@@ -118,14 +118,14 @@ static V *import_module(const char *name, Env *e) {
     Node *prog = parse(buf);
     V *r = eval(prog, mod_env);
     {
-        int stray = g_breaking || g_continuing || g_returning;
+        int stray = g_returning;
         shakti_clear_flow();
         v_free(r);
         if (stray) {
             node_free(prog);
             free(buf);
             env_free(mod_env);
-            return v_err("import: break or return at module top level");
+            return v_err("import: return at module top level");
         }
     }
     node_free(prog);

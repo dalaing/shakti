@@ -12,6 +12,9 @@ static char g_parse_err_first[256] = "";
  * reported is whichever came first. */
 static const Lexer *g_parse_lexer = NULL;
 static int  g_parse_first_after_lex = 0;
+/* Loops enclosing the statement being parsed, within the current def or
+   class body: break and continue need one. */
+static int  g_loop_depth = 0;
 
 static int src_has_semi_in_parens(const char *s) {
     int d = 0;
@@ -987,7 +990,9 @@ static Node *parse_while(Lexer *l) {
     Node *cond = parse_expr(l);
     expect(l, T_COLON_);
     expect(l, T_NEWLINE_);
+    g_loop_depth++;
     Node *body = parse_block(l);
+    g_loop_depth--;
     node_add(n, cond);
     node_add(n, body);
     return n;
@@ -1013,7 +1018,9 @@ static Node *parse_for(Lexer *l) {
     Node *iter = parse_expr(l);
     expect(l, T_COLON_);
     expect(l, T_NEWLINE_);
+    g_loop_depth++;
     Node *body = parse_block(l);
+    g_loop_depth--;
     node_add(n, vars);
     node_add(n, iter);
     node_add(n, body);
@@ -1067,7 +1074,10 @@ static Node *parse_def(Lexer *l) {
     }
     expect(l, T_COLON_);
     expect(l, T_NEWLINE_);
+    int loops = g_loop_depth;
+    g_loop_depth = 0;
     Node *body = parse_block(l);
+    g_loop_depth = loops;
     Node *n = node_new(N_DEF);
     n->sval = strdup(name.sval);
     node_add(n, params);
@@ -1128,7 +1138,10 @@ static Node *parse_class(Lexer *l) {
     }
     expect(l, T_COLON_);
     expect(l, T_NEWLINE_);
+    int loops = g_loop_depth;
+    g_loop_depth = 0;
     Node *body = parse_block(l);
+    g_loop_depth = loops;
     Node *n = node_new(N_CLASS);
     n->sval = strdup(name.sval);
     node_add(n, body);
@@ -1262,11 +1275,13 @@ static Node *parse_stmt(Lexer *l) {
     }
     if(pk.type == T_BREAK_) {
         lex_next(l);
+        if(!g_loop_depth) parse_fail("parse error: 'break' outside a loop");
         W(lex_peek(l).type == T_NEWLINE_,lex_next(l))
         return node_new(N_BREAK);
     }
     if(pk.type == T_CONTINUE_) {
         lex_next(l);
+        if(!g_loop_depth) parse_fail("parse error: 'continue' outside a loop");
         W(lex_peek(l).type == T_NEWLINE_,lex_next(l))
         return node_new(N_CONTINUE);
     }
@@ -1448,6 +1463,7 @@ Node *parse(const char *src) {
     g_parse_err_first[0] = 0;
     g_parse_lexer = &l;
     g_parse_first_after_lex = 0;
+    g_loop_depth = 0;
     g_parse_q_call_hint = src_has_semi_in_parens(src) || src_has_table_lbrack(src);
     Node *prog = node_new(N_BLOCK);
     W(lex_peek(&l).type != T_EOF_ && !l.failed,{

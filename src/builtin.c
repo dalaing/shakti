@@ -2203,10 +2203,10 @@ static V *bi_eval(V **a, int n, Env *e) {
     if (!prog) return v_err("eval: parse failed");
     r = eval(prog, root);
     node_free(prog);
-    if (g_breaking || g_continuing || g_returning) {
+    if (g_returning) {
         shakti_clear_flow();
         v_free(r);
-        return v_err("eval: break or return outside loop");
+        return v_err("eval: return outside a function");
     }
     if (g_error) {
         V *er = g_error_val ? g_error_val : v_err("eval: runtime error");

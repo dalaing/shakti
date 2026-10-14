@@ -787,8 +787,17 @@ V *v_dict_get(V *d, const char *key) {
             return d->vals->L[i];
     return NULL;
 }
-void v_serialize(V *v, FILE *fp) {
-    if(!v) { fputc(T_NIL, fp); return; }
+/* v_serialize's walk: path[0..depth-1] holds the lists, dicts and tables being written around
+ * the value at depth, counted as v_deserialize counts them (a dict's keys and vals lists are
+ * levels of their own there). A value that is already on the path holds itself, and no file
+ * can hold it; one other than None at SHAKTI_DESER_MAX_DEPTH couldn't be read back. */
+static int v_serialize_at(V *v, FILE *fp, V **path, int depth) {
+    if(!v) { fputc(T_NIL, fp); return 0; }
+    if (depth >= SHAKTI_DESER_MAX_DEPTH && v->t != T_NIL) return V_SERIAL_DEEP;
+    if (v->t == T_LIST || v->t == T_DICT || v->t == T_TABLE) {
+        if (v_on_path(v, path, depth)) return V_SERIAL_LOOP;
+        path[depth] = v;
+    }
     fputc(v->t, fp);
     switch(v->t) {
     case T_BOOL:  fputc(v->j, fp); break;
@@ -840,18 +849,25 @@ void v_serialize(V *v, FILE *fp) {
     }
     case T_LIST: {
         fwrite(&v->n, 8, 1, fp);
-        for(int64_t i=0; i<v->n; i++) v_serialize(v->L[i], fp);
+        for(int64_t i=0; i<v->n; i++) {
+            int rc = v_serialize_at(v->L[i], fp, path, depth + 1);
+            if (rc) return rc;
+        }
         break;
     }
     case T_DICT:
-        v_serialize(v->keys, fp);
-        v_serialize(v->vals, fp);
-        break;
-    case T_TABLE:
-        v_serialize(v->keys, fp);
-        v_serialize(v->vals, fp);
+    case T_TABLE: {
+        int rc = v_serialize_at(v->keys, fp, path, depth + 1);
+        if (!rc) rc = v_serialize_at(v->vals, fp, path, depth + 1);
+        if (rc) return rc;
         break;
     }
+    }
+    return 0;
+}
+int v_serialize(V *v, FILE *fp) {
+    V *path[SHAKTI_DESER_MAX_DEPTH];
+    return v_serialize_at(v, fp, path, 0);
 }
 /* Counts are checked against the bytes left in the file so a short file
  * cannot request large allocations. */
@@ -1053,7 +1069,23 @@ V *v_deserialize(FILE *fp) {
         d.left = sb.st_size > (off_t)pos ? (int64_t)(sb.st_size - pos) : 0;
     return v_deserialize_depth(&d, 0);
 }
-static void table_cell_buf(V *col, int64_t r, char *buf, size_t cap) {
+/* A walk that prints a value: path[0..depth-1] holds the lists, dicts and tables being printed
+ * around the value at depth. One that is already there holds itself, and is written [...]
+ * ({...} for a dict or a table) as Python does, so printing it takes time in the size of what it
+ * writes rather than running out to the fixed depth on every way round; looped says one was. */
+typedef struct { V *path[SHAKTI_PRINT_MAX_DEPTH]; int looped; } PrintWalk;
+static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth, PrintWalk *pw);
+/* v written out, as v_to_str does, at depth in walk pw. */
+static char *walk_to_str(V *v, int depth, PrintWalk *pw) {
+    char *buf = NULL; size_t sz = 0;
+    FILE *fp = OPEN_MEMSTREAM(&buf, &sz);
+    print_val_depth(v, fp, 0, depth, pw);
+    CLOSE_MEMSTREAM(fp, &buf, &sz);
+    return buf;
+}
+/* Cell r of column col, written into buf; a cell is at depth in walk pw, so a table whose
+ * cell holds the table (or a list holding it) writes {...} there. */
+static void table_cell_buf(V *col, int64_t r, char *buf, size_t cap, int depth, PrintWalk *pw) {
     buf[0] = 0;
     if (!col || r < 0) return;
     if (col->t == T_IVEC && r < col->n) snprintf(buf, cap, "%lld", (long long)col->J[r]);
@@ -1062,7 +1094,7 @@ static void table_cell_buf(V *col, int64_t r, char *buf, size_t cap) {
     else if (col->t == T_BVEC && r < col->n) snprintf(buf, cap, "%s", col->B[r] ? "True" : "False");
     else if (col->t == T_LIST && r < col->n) {
         V *el = col->L[r];
-        if (el) { char *s = v_to_str(el); snprintf(buf, cap, "%s", s ? s : ""); free(s); }
+        if (el) { char *s = walk_to_str(el, depth, pw); snprintf(buf, cap, "%s", s ? s : ""); free(s); }
         else snprintf(buf, cap, "None");
     } else if (is_mat_t(col->t) && r < col->n) {
         V *rw = v_mat_row(col, r);
@@ -1072,7 +1104,17 @@ static void table_cell_buf(V *col, int64_t r, char *buf, size_t cap) {
         v_free(rw);
     }
 }
-static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
+/* 1, after writing [...] or {...}, if v is already on pw's path; else v goes on it at depth. */
+static int print_looped(V *v, FILE *fp, int depth, PrintWalk *pw) {
+    if (v_on_path(v, pw->path, depth)) {
+        fprintf(fp, v->t == T_LIST ? "[...]" : "{...}");
+        pw->looped = 1;
+        return 1;
+    }
+    pw->path[depth] = v;
+    return 0;
+}
+static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth, PrintWalk *pw) {
     if (depth >= SHAKTI_PRINT_MAX_DEPTH) { fprintf(fp, "..."); return; }
     if(!v) { fprintf(fp, "None"); return; }
     switch(v->t) {
@@ -1143,6 +1185,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         print_mat_val(v, fp, repr_mode);
         break;
     case T_LIST: {
+        if (print_looped(v, fp, depth, pw)) break;
         /* Fast path: homogeneous int/float lists avoid per-element recursion. */
         int all_int = v->n > 0, all_float = v->n > 0;
         for (int64_t i = 0; i < v->n && (all_int || all_float); i++) {
@@ -1165,22 +1208,24 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         } else {
             for (int64_t i = 0; i < v->n; i++) {
                 if (i) fprintf(fp, ", ");
-                print_val_depth(v->L[i], fp, 1, depth + 1);
+                print_val_depth(v->L[i], fp, 1, depth + 1, pw);
             }
         }
         fprintf(fp, "]");
         break;
     }
     case T_DICT:
+        if (print_looped(v, fp, depth, pw)) break;
         fprintf(fp, "{");
         for(int64_t i=0;i<v->n;i++) {
             if(i) fprintf(fp,", ");
-            print_val_depth(v->keys->L[i],fp,1,depth+1);
+            print_val_depth(v->keys->L[i],fp,1,depth+1,pw);
             fprintf(fp,": ");
-            print_val_depth(v->vals->L[i],fp,1,depth+1);
+            print_val_depth(v->vals->L[i],fp,1,depth+1,pw);
         }
         fprintf(fp, "}"); break;
     case T_TABLE: {
+        if (print_looped(v, fp, depth, pw)) break;
         V *cols = v->keys, *data = v->vals;
         int nc = cols->n;
         int64_t nr = v->n;
@@ -1190,7 +1235,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
             V *col = data->L[c];
             for(int64_t r=0;r<nr && r<20;r++) {
                 char buf[64];
-                table_cell_buf(col, r, buf, sizeof buf);
+                table_cell_buf(col, r, buf, sizeof buf, depth + 1, pw);
                 int l=strlen(buf); if(l>w) w=l;
             }
             widths[c]=w;
@@ -1202,7 +1247,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         for(int64_t r=0;r<nr && r<20;r++) {
             for(int c=0;c<nc;c++) {
                 V *col=data->L[c]; char buf[64];
-                table_cell_buf(col, r, buf, sizeof buf);
+                table_cell_buf(col, r, buf, sizeof buf, depth + 1, pw);
                 fprintf(fp,"%-*s  ",widths[c],buf);
             }
             fprintf(fp,"\n");
@@ -1215,8 +1260,15 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
     case T_SUBPROCESS: fprintf(fp, "<proc>"); break;
     }
 }
+/* v printed to fp; *looped (if looped isn't NULL) says whether it held itself. */
+static void print_walk(V *v, FILE *fp, int repr_mode, int *looped) {
+    PrintWalk pw;
+    pw.looped = 0;
+    print_val_depth(v, fp, repr_mode, 0, &pw);
+    if (looped) *looped = pw.looped;
+}
 void print_val(V *v, FILE *fp, int repr_mode) {
-    print_val_depth(v, fp, repr_mode, 0);
+    print_walk(v, fp, repr_mode, NULL);
 }
 void v_print(V *v, int nl) { print_val(v, stdout, 0); if(nl) putchar('\n'); }
 
@@ -1253,6 +1305,10 @@ static int64_t repr_ivec_at(void *ctx, int64_t i) { return ((V *)ctx)->J[i]; }
 static int64_t repr_list_int_at(void *ctx, int64_t i) { return ((V *)ctx)->L[i]->j; }
 
 char *v_repr(V *v) {
+    return v_repr_loop(v, NULL);
+}
+char *v_repr_loop(V *v, int *looped) {
+    if (looped) *looped = 0;
     if (v && v->t == T_IVEC) {
         char *r = v_repr_int_seq(v->n, repr_ivec_at, v);
         if (r) return r;
@@ -1269,7 +1325,7 @@ char *v_repr(V *v) {
     }
     char *buf = NULL; size_t sz = 0;
     FILE *fp = OPEN_MEMSTREAM(&buf, &sz);
-    print_val(v, fp, 1);
+    print_walk(v, fp, 1, looped);
     CLOSE_MEMSTREAM(fp, &buf, &sz);
     return buf;
 }

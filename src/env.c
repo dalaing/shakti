@@ -205,13 +205,16 @@ int env_save(Env *e, const char *path) {
     P(!fp,0)
     fwrite("KAIO_MCP", 1, 8, fp);
     fwrite(&e->len, 4, 1, fp);
-    i(e->len,{
+    int rc = 0;
+    for (int i = 0; i < e->len && !rc; i++) {
         int nlen = strlen(e->names[i]);
         fwrite(&nlen, 4, 1, fp);
         fwrite(e->names[i], 1, nlen, fp);
-        v_serialize(e->vals[i], fp);
-    })
+        rc = v_serialize(e->vals[i], fp);
+    }
     fclose(fp);
+    /* a value that holds itself, or nests too deeply to load: no file rather than part of one */
+    if (rc) { remove(path); return -rc; }
     return 1;
 }
 int env_load(Env *e, const char *path) {

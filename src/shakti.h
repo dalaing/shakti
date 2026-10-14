@@ -401,6 +401,8 @@ void v_free(V *v);
 V *v_copy(V *v);
 void v_print(V *v, int nl);
 char *v_repr(V *v);
+/* v_repr, and *looped (if looped isn't NULL) says whether v held itself, written [...]. */
+char *v_repr_loop(V *v, int *looped);
 char *v_to_str(V *v);
 Env *env_new(Env *parent);
 void env_set(Env *e, const char *name, V *val);
@@ -425,6 +427,11 @@ void fn_ast_release(int idx);
 V *col_get(V *col, int64_t row);
 void v_dict_set(V *d, const char *key, V *val);
 V *v_dict_get(V *d, const char *key);
+/* Why a value can't be saved (v_serialize, env_save): it holds itself, or it nests too deeply
+ * for v_deserialize to read back. */
+enum { V_SERIAL_LOOP = 1, V_SERIAL_DEEP = 2 };
+/* 1, or 0 when path can't be written, -V_SERIAL_LOOP or -V_SERIAL_DEEP when a value can't be
+ * saved (then path is removed). */
 int env_save(Env *e, const char *path);
 int env_load(Env *e, const char *path);
 int shakti_parse_datetime_ms(const char *s, int64_t *out_ms);

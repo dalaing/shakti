@@ -171,6 +171,7 @@ typedef struct {
     char *p;
     size_t n;
     size_t cap;
+    LoopWalk walk; /* the lists and dicts being encoded */
 } JsonBuf;
 
 static int jb_grow(JsonBuf *b, size_t need) {
@@ -221,8 +222,10 @@ static int jb_quoted(JsonBuf *b, const char *s) {
     return jb_cstr(b, "\"");
 }
 
-static int json_encode(JsonBuf *b, V *v);
-
+/* v encoded into b. A list or dict enters b's walk here, without another argument, so that a
+ * level of nesting takes one stack frame of the size it did. Coming back round to one (a value
+ * that holds itself, which JSON has no form for) is -1, as a write that fails is; the walk is
+ * then given up, so it isn't left. */
 static int json_encode(JsonBuf *b, V *v) {
     if (!v || v->t == T_NIL) return jb_cstr(b, "null");
     if (v->t == T_BOOL) return jb_cstr(b, v->j ? "true" : "false");
@@ -238,14 +241,17 @@ static int json_encode(JsonBuf *b, V *v) {
     }
     if (v->t == T_STR) return jb_quoted(b, v->s);
     if (v->t == T_LIST) {
+        if (loop_enter(&b->walk, v, NULL, 0)) return -1;
         if (jb_cstr(b, "[") != 0) return -1;
         for (int64_t i = 0; i < v->n; i++) {
             if (i && jb_cstr(b, ",") != 0) return -1;
             if (json_encode(b, v->L[i]) != 0) return -1;
         }
+        loop_leave(&b->walk);
         return jb_cstr(b, "]");
     }
     if (v->t == T_DICT) {
+        if (loop_enter(&b->walk, v, NULL, 0)) return -1;
         if (jb_cstr(b, "{") != 0) return -1;
         int first = 1;
         for (int64_t i = 0; i < v->keys->n; i++) {
@@ -257,6 +263,7 @@ static int json_encode(JsonBuf *b, V *v) {
             if (jb_cstr(b, ":") != 0) return -1;
             if (json_encode(b, v->vals->L[i]) != 0) return -1;
         }
+        loop_leave(&b->walk);
         return jb_cstr(b, "}");
     }
     return jb_quoted(b, type_name(v->t));

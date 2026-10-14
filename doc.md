@@ -348,6 +348,16 @@ it, it is just equal or not: after `x: [1, "a", 0]; x[2]: x`, `x = [1, "a", [1, 
 `False`. Lists and dicts nested deeply without holding themselves copy and compare as deep as the
 stack allows (tables copy, but don't compare). Lists that hold each other are never freed.
 
+Printing such a value (`print`, `str`, `repr`, and a table's cells) writes `[...]` (`{...}` for
+a dict or a table) where it comes back round to one it is already inside, as Python does: after
+`x: [1, "a"]; x[1]: [x]`, `print(x)` shows `[1, [[...]]]`. JSON and a saved context have no such
+form, so `json_dumps(x)` gives an error value, `json_dumps: a value holds itself`, and so does
+`save_context(path)`, which then leaves no file at `path`. `save_context` also refuses a value
+nested too deeply for `load_context` to read back (anything but `None` inside 512 or more lists,
+dicts and tables, where a dict or a table counts as two): `save_context: a value nests too
+deeply`, again with no file. The [JSON-RPC daemon](#json-rpc-daemon) refuses a result that holds
+itself.
+
 ## Vectors
 
 `range(n)` builds an `ivec` `[0, 1, …, n - 1]`. Element-wise `+`, `-`, `*`, `/`, `//`, `%` work on matching-length `ivec` / `fvec` pairs (and scalar broadcast).
@@ -1327,6 +1337,8 @@ Routes:
 - other methods/paths — `handle_request(method, path, body, content_type)` if defined (must return a dict with `status` / `content_type` / `body`)
 
 CORS: localhost Origin only; mutating cross-origin requests get 403. Optional bearer: `Authorization: Bearer …` matching `SHAKTI_SERVE_TOKEN`.
+
+A result that holds itself has no JSON form: the daemon answers with a JSON-RPC error, code `-32603`.
 
 ```ie
 def handle_rpc(method, params, id):

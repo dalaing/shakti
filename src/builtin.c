@@ -2718,7 +2718,10 @@ V *builtin_call(const char *name,V **args,int nargs,V **kwn,V **kwv,int nkw,Env 
         return v_nil();}
     if(!strcmp(name,"save_context")){
         P(nargs<1 || args[0]->t != T_STR,v_err("save_context(path)"))
-        return env_save(e,args[0]->s)?v_nil():v_err("save failed");}
+        int rc=env_save(e,args[0]->s);
+        P(rc==-V_SERIAL_LOOP,v_err("save_context: a value holds itself"))
+        P(rc==-V_SERIAL_DEEP,v_err("save_context: a value nests too deeply"))
+        return rc>0?v_nil():v_err("save failed");}
     if(!strcmp(name,"load_context")){
         P(nargs<1 || args[0]->t != T_STR,v_err("load_context(path)"))
         return env_load(e,args[0]->s)?v_nil():v_err("load failed");}

@@ -598,7 +598,10 @@ V *bi_json_loads(V **a, in) {
 }
 V *bi_json_dumps(V **a, in) {
     P(n < 1,v_str(""))
-    char *r = v_repr(a[0]);
+    int looped = 0;
+    char *r = v_repr_loop(a[0], &looped);
+    /* print's [...] isn't JSON, and JSON has no form for a value that holds itself */
+    if (looped) { free(r); return v_err("json_dumps: a value holds itself"); }
     V *o = v_str(r);
     free(r);
     return o;

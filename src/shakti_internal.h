@@ -57,7 +57,15 @@ uint32_t fnv1a(const char *s);
 V *v_alloc(int t);
 V *try_promote_matrix(V **elems, int nch);
 void print_val(V *v, FILE *fp, int repr_mode);
-void v_serialize(V *v, FILE *fp);
+/* Whether v is one of path[0..depth-1]: a walk over lists, dicts and tables keeps the ones it
+ * is inside there, and coming back round to one means it holds itself. */
+static inline int v_on_path(const V *v, V *const *path, int depth) {
+    for (int i = 0; i < depth; i++) if (path[i] == v) return 1;
+    return 0;
+}
+/* Write v to fp for v_deserialize: 0, or V_SERIAL_LOOP when v holds itself and V_SERIAL_DEEP
+ * when it nests too deeply for v_deserialize to read back (fp then holds part of v). */
+int v_serialize(V *v, FILE *fp);
 /* The error value SHAKTI_LOOP_ERR, marked so that v_is_loop_err tells it from any other
  * error (in gives it back, where an item that doesn't compare is just not a match). */
 V *v_loop_err(void);

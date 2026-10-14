@@ -342,6 +342,15 @@ static int parse_enter(Lexer *l) {
     l->parse_depth++;
     return 1;
 }
+/* A juxtaposed assert's argument (and its message) and a list[T] constructor's argument have no
+ * bracket of their own to count, so they count one level here: a chain of them stops at the cap
+ * instead of running the C stack out. */
+static Node *parse_nested_expr(Lexer *l) {
+    if (!parse_enter(l)) return node_new(N_NONE);
+    Node *n = parse_expr(l);
+    l->parse_depth--;
+    return n;
+}
 static Node *parse_atom(Lexer *l) {
     if (!parse_enter(l)) return NULL;
     Node *n = parse_atom_body(l);
@@ -399,7 +408,7 @@ static Node *parse_postfix(Lexer *l) {
                     node_free(n);
                     n = node_new(N_CALL);
                     node_add(n, tnode);
-                    node_add(n, parse_expr(l));
+                    node_add(n, parse_nested_expr(l));
                     continue;
                 }
             } else if(n->type == N_NAME && n->sval && !strcmp(n->sval, "matrix")) {
@@ -493,10 +502,10 @@ static Node *parse_postfix(Lexer *l) {
              * assert(a = b), not (assert a) = b. Other callees stay atoms
              * so K-style `f x+y` remains (f x)+y. */
             if (n->type == N_NAME && n->sval && !strcmp(n->sval, "assert")) {
-                node_add(call, parse_expr(l));
+                node_add(call, parse_nested_expr(l));
                 if (lex_peek(l).type == T_COMMA_) {
                     lex_next(l);
-                    node_add(call, parse_expr(l));
+                    node_add(call, parse_nested_expr(l));
                 }
             } else {
                 while(is_jux_arg_start(l) && !peek_each_verb_at(l))

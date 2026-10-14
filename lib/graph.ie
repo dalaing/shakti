@@ -1,47 +1,50 @@
 # graph — in-memory knowledge graph (subject–predicate–object triples)
 #
 #   import graph
-#   graph.create()
+#   g : graph.create()
 #   graph.add("Ada", "knows", "Bob")
 #   graph.query("Ada", "knows", "*")
+#   graph.use(g)          # switch back to g after creating another graph
 
-_g : 0
+# The current graph, kept in a dict so create() and use(g) can change it.
+_state : {"g": 0}
 
 def create():
-    _g : graph_create()
-    return _g
+    _state["g"] : graph_create()
+    return _state["g"]
 
 def use(g):
-    _g : g
+    _state["g"] : g
+    return g
 
 def add(s, p, o):
-    return graph_add(_g, s, p, o)
+    return graph_add(_state["g"], s, p, o)
 
 def query(s:"*", p:"*", o:"*"):
-    return graph_query(_g, s, p, o)
+    return graph_query(_state["g"], s, p, o)
 
 def neighbors(node, direction:"out"):
-    return graph_neighbors(_g, node, direction)
+    return graph_neighbors(_state["g"], node, direction)
 
 def path(from_node, to_node, max_depth:8):
-    return graph_path(_g, from_node, to_node, max_depth)
+    return graph_path(_state["g"], from_node, to_node, max_depth)
 
 def from_table(t, subj_col, pred, obj_col):
-    return graph_from_table(_g, t, subj_col, pred, obj_col)
+    return graph_from_table(_state["g"], t, subj_col, pred, obj_col)
 
 def to_table(s:"*", p:"*", o:"*"):
-    return graph_to_table(_g, s, p, o)
+    return graph_to_table(_state["g"], s, p, o)
 
 def count():
-    return graph_count(_g)
+    return graph_count(_state["g"])
 
 def clear():
-    return graph_clear(_g)
+    return graph_clear(_state["g"])
 
 def add_many(triples):
     n : 0
     for t in triples:
-        r : graph_add(_g, t[0], t[1], t[2])
+        r : graph_add(_state["g"], t[0], t[1], t[2])
         if type(r) = "error":
             return r
         n : n + 1

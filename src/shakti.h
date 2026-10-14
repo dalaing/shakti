@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <limits.h>
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
@@ -14,6 +15,9 @@
 #include <math.h>
 #include <ctype.h>
 #include "a.h"
+
+/* 1 when a float truncates to a C int: not NaN, not an infinity, and inside int's range */
+static inline int float_fits_int(double d) { return d > INT_MIN - 1.0 && d < INT_MAX + 1.0; }
 
 #ifdef __cplusplus
 extern "C" {

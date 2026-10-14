@@ -794,7 +794,7 @@ V *eval(Node *n, Env *e) {
             }
         }
 #endif
-        if(r && r->t != T_ERR && n->ch[0] && n->ch[0]->type == N_NAME)
+        if(r && r->t != T_ERR && !iefs_path && n->ch[0] && n->ch[0]->type == N_NAME)
             env_update(e, n->ch[0]->sval, r);
         free(iefs_path);
         v_free(from); v_free(assignments); v_free(where);
@@ -835,7 +835,7 @@ V *eval(Node *n, Env *e) {
             }
         }
 #endif
-        if(r && r->t != T_ERR && n->ch[0] && n->ch[0]->type == N_NAME)
+        if(r && r->t != T_ERR && !iefs_path && n->ch[0] && n->ch[0]->type == N_NAME)
             env_update(e, n->ch[0]->sval, r);
         free(iefs_path);
         v_free(from); v_free(cols); v_free(where);

@@ -636,6 +636,8 @@ j : t join u on id
 
 `by col1, col2` groups and sorts ascending. There is no separate `group by` / `order by` clause.
 
+`update` and `delete` return the changed table. From a table variable they also rebind it; from a str naming a `.iefs` file (`update … from path`) they write the file and leave the variable as it was (see [iefs module](#iefs-module)).
+
 See also [syntax and builtins](#syntax-and-builtins) for tables, `load("file.csv")`, and matrix types.
 
 ---
@@ -1704,7 +1706,7 @@ print(iefs.direct_available(), iefs.uring_available(), iefs.libaio_available())
 - `iefs.map` — `mmap` the file, skip CRC, alias contiguous vector/matrix payloads. Compressed files require `load` / `loads`.
 - `iefs.dumps` / `iefs.loads` — in-memory frames as `list[char]`.
 - Host codecs: `zstd`, `snappy`, plus residual `delta_i64` / `fire_i64` / `gorilla_f64` / `date` / `time` / `datetime` (v3 extents; compounds like `fire_i64+zstd`). Also interned as `compress` / `decompress`.
-- SQL `select … from "….iefs"` opens via **map**.
+- SQL `select … from "….iefs"` opens via **map**. `update … from` and `delete from` a `.iefs` path write their result back to the file; a variable holding the path keeps the path.
 - Whole-file zstd/snappy on v1/v2; v3 per-extent codec + optional outer LZ.
 
 Type layout 1 (`char`=4, `str`=5) is stored at header offset 20. Env: `SHAKTI_IEFS_DIRECT=0|1`, `SHAKTI_IEFS_DIRECT_MIN=<bytes>`, `SHAKTI_IEFS_VERSION=3`, `SHAKTI_IEFS_LIBAIO=0|1`.

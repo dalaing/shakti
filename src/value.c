@@ -150,7 +150,7 @@ static void mat_cell_format(V *v, int64_t r, int64_t c, char *buf, size_t cap) {
         snprintf(buf, cap, "0x%02x", v->B[mat_idx(v, r, c)]);
     else if (v->t == T_FMAT) {
         double d = v->F[mat_idx(v, r, c)];
-        if (d == (int64_t)d && d < 1e15 && d > -1e15)
+        if (d < 1e15 && d > -1e15 && d == (int64_t)d)
             snprintf(buf, cap, "%.1f", d);
         else
             snprintf(buf, cap, "%g", d);
@@ -1085,7 +1085,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         break;
     }
     case T_FLOAT:{
-        if(v->f == (int64_t)v->f && v->f < 1e15 && v->f > -1e15)
+        if(v->f < 1e15 && v->f > -1e15 && v->f == (int64_t)v->f)
             fprintf(fp, "%.1f", v->f);
         else fprintf(fp, "%g", v->f);
         break;
@@ -1104,7 +1104,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         for(int64_t i=0;i<v->n;i++) {
             if(i) fprintf(fp,", ");
             double d = v->F[i];
-            if(d == (int64_t)d && d < 1e15 && d > -1e15) fprintf(fp,"%.1f",d);
+            if(d < 1e15 && d > -1e15 && d == (int64_t)d) fprintf(fp,"%.1f",d);
             else fprintf(fp,"%g",d);
         }
         fprintf(fp, "]"); break;
@@ -1142,7 +1142,7 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
             for (int64_t i = 0; i < v->n; i++) {
                 if (i) fprintf(fp, ", ");
                 double d = v->L[i]->f;
-                if (d == (int64_t)d && d < 1e15 && d > -1e15) fprintf(fp, "%.1f", d);
+                if (d < 1e15 && d > -1e15 && d == (int64_t)d) fprintf(fp, "%.1f", d);
                 else fprintf(fp, "%g", d);
             }
         } else {

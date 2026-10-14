@@ -716,7 +716,12 @@ and `name` a `list`, so `insert into u (id, name) values ("ada", 1)` is
 A group's `sum` of an int column is an int, added as `sum` adds a `list[int]`: exact past 2^53,
 and, if any group's int sum in the select doesn't fit in an int, every int sum in it is a
 float column, as on main. Of a float column it is a float. `avg`
-is a float, and `count` an int.
+is a float, and `count` an int. A group's `min` and `max` of a float column are floats; of any
+other column they are what the builtins `min` and `max` give for the group's items: an int for an
+int column, a bool for a `list[bool]` column, a char for a `list[char]` column, and for a `list`
+column the group's least and greatest item (an error value for a group whose items don't compare,
+as `min([1, None])` is). Of a matrix column, a group's `min` and `max` are those of the matrix of
+the group's rows.
 
 The aggregates are `count`, `sum`, `avg`, `min` and `max`; any other word in a select is a column's
 name. A column the table doesn't have is an error value, with or without `by`:

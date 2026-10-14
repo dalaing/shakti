@@ -725,6 +725,14 @@ static int parse_by_names(V *by, const char **names, int max_names) {
     }
     return (int)by->n;
 }
+/* min and max of a column that isn't a list[float] are the builtins min and max of each group's
+   items: an int column gives ints, a bool, char, generic or matrix column what min and max give
+   for it.
+   They are made once the groups are (build_group_result), not by the float accumulators. */
+static int minmax_by_builtin(V *tbl, const ColSpec *spec) {
+    V *src = spec->src[0] ? tbl_col(tbl, tbl_col_idx(tbl, spec->src)) : NULL;
+    return (spec->kind == COL_MIN || spec->kind == COL_MAX) && src && src->t != T_FVEC;
+}
 static void prep_agg_cols(V *tbl, ColSpec *specs, int nspecs,
                           V **sp_col, int *col_t, int *name_idx, int *agg_sp, int *n_agg) {
     *n_agg = 0;
@@ -733,7 +741,7 @@ static void prep_agg_cols(V *tbl, ColSpec *specs, int nspecs,
         sp_col[sp] = idx >= 0 ? tbl_col(tbl, idx) : NULL;
         name_idx[sp] = specs[sp].kind == COL_NAME ? tbl_col_idx(tbl, specs[sp].name) : -1;
         col_t[sp] = sp_col[sp] ? sp_col[sp]->t : 0;
-        if (specs[sp].kind != COL_COUNT && specs[sp].kind != COL_NAME) {
+        if (specs[sp].kind != COL_COUNT && specs[sp].kind != COL_NAME && !minmax_by_builtin(tbl, &specs[sp])) {
             agg_sp[(*n_agg)++] = sp;
         }
     }
@@ -1316,8 +1324,149 @@ static int typed_int_hash_group(V *tbl, V **bcols, int nby, const int *by_idx,
     }
     return 0;
 }
+/* Each row's group (-1 for a row `where` drops). The string-key pass records the slot it put each
+   row in (rowslot, before the slots were sorted); int-key groups are in key order, so a binary
+   search finds a row's, or a table by key when the keys span a small range. */
+static int64_t *group_ids(V *tbl, GhTab *tab, const int *by_idx, int nby, const unsigned char *MB,
+                          const int64_t *rowslot) {
+    int64_t nr = tbl->n, ng = tab->nslots;
+    int64_t *gid = malloc((size_t)(nr ? nr : 1) * sizeof(int64_t));
+    if (!gid) return NULL;
+    for (int64_t r = 0; r < nr; r++) gid[r] = -1;
+    if (rowslot) {
+        int64_t *pos = malloc((size_t)(ng ? ng : 1) * sizeof(int64_t));
+        if (!pos) { free(gid); return NULL; }
+        for (int64_t g = 0; g < ng; g++) pos[rowslot[tab->slots[g].name_row]] = g;
+        for (int64_t r = 0; r < nr; r++) if (rowslot[r] >= 0) gid[r] = pos[rowslot[r]];
+        free(pos);
+        return gid;
+    }
+    V *bcols[32];
+    for (int b = 0; b < nby; b++) bcols[b] = tbl_col(tbl, by_idx[b]);
+    if (ng == 0) return gid;
+    /* keys over small ranges: index the groups by key */
+    int64_t lo[32], hi[32];
+    uint64_t cells = 1;
+    for (int b = 0; b < nby; b++) {
+        lo[b] = hi[b] = tab->slots[0].iparts[b];
+        for (int64_t g = 1; g < ng; g++) {
+            int64_t x = tab->slots[g].iparts[b];
+            if (x < lo[b]) lo[b] = x;
+            if (x > hi[b]) hi[b] = x;
+        }
+        uint64_t w = (uint64_t)hi[b] - (uint64_t)lo[b] + 1;
+        cells = w && cells <= SQL_DENSE_CAP / w ? cells * w : SQL_DENSE_CAP + 1;
+    }
+    if (cells <= SQL_DENSE_CAP) {
+        int64_t *at = malloc((size_t)cells * sizeof(int64_t));
+        if (!at) { free(gid); return NULL; }
+        for (int64_t g = 0; g < ng; g++) {
+            uint64_t f = 0;
+            for (int b = 0; b < nby; b++)
+                f = f * ((uint64_t)hi[b] - (uint64_t)lo[b] + 1) + ((uint64_t)tab->slots[g].iparts[b] - (uint64_t)lo[b]);
+            at[f] = g;
+        }
+        for (int64_t r = 0; r < nr; r++) {
+            if (MB && !MB[r]) continue;
+            uint64_t f = 0;
+            for (int b = 0; b < nby; b++)
+                f = f * ((uint64_t)hi[b] - (uint64_t)lo[b] + 1) + ((uint64_t)bcols[b]->J[r] - (uint64_t)lo[b]);
+            gid[r] = at[f];
+        }
+        free(at);
+        return gid;
+    }
+    for (int64_t r = 0; r < nr; r++) {
+        if (MB && !MB[r]) continue;
+        int64_t left = 0, right = ng - 1;
+        while (left <= right) {
+            int64_t mid = left + (right - left) / 2;
+            int c = 0;
+            for (int b = 0; b < nby && !c; b++) {
+                int64_t x = bcols[b]->J[r], y = tab->slots[mid].iparts[b];
+                c = (x > y) - (x < y);
+            }
+            if (!c) { gid[r] = mid; break; }
+            if (c < 0) right = mid - 1; else left = mid + 1;
+        }
+    }
+    return gid;
+}
+/* the items of col at the given rows, of col's own kind */
+static V *col_take(V *col, const int64_t *rows, int64_t n) {
+    V *r;
+    switch (col->t) {
+    case T_BVEC: r = v_bvec(n); for (int64_t i = 0; i < n; i++) r->B[i] = col->B[rows[i]]; return r;
+    case T_CVEC: r = v_cvec(n); for (int64_t i = 0; i < n; i++) r->B[i] = col->B[rows[i]]; return r;
+    case T_BMAT: case T_CMAT: {
+        int64_t nc = mat_cols(col);
+        r = col->t == T_BMAT ? v_bmat(n, nc) : v_cmat(n, nc);
+        for (int64_t i = 0; i < n; i++)
+            if (nc) memcpy(r->B + i * nc, col->B + rows[i] * nc, (size_t)nc);
+        return r;
+    }
+    case T_IMAT: {
+        int64_t nc = mat_cols(col);
+        r = v_imat(n, nc);
+        for (int64_t i = 0; i < n; i++)
+            if (nc) memcpy(r->J + i * nc, col->J + rows[i] * nc, (size_t)nc * sizeof(int64_t));
+        return r;
+    }
+    case T_FMAT: {
+        int64_t nc = mat_cols(col);
+        r = v_fmat(n, nc);
+        for (int64_t i = 0; i < n; i++)
+            if (nc) memcpy(r->F + i * nc, col->F + rows[i] * nc, (size_t)nc * sizeof(double));
+        return r;
+    }
+    default: r = v_list(n); for (int64_t i = 0; i < n; i++) r->L[i] = col_get(col, rows[i]); return r;
+    }
+}
+/* Each group's rows, in row order: group g's run from rows[g ? end[g - 1] : 0] to just before
+   rows[end[g]]. Made from gid the first time a column is gathered by group, and kept for the
+   select's other columns. */
+typedef struct { int64_t *end, *rows; } GroupRows;
+static int group_rows(GroupRows *gr, const int64_t *gid, int64_t nr, int64_t ng) {
+    if (gr->end) return 0;
+    int64_t *end = calloc((size_t)ng + 1, sizeof(int64_t));
+    int64_t *rows = malloc((size_t)(nr ? nr : 1) * sizeof(int64_t));
+    if (!end || !rows) { free(end); free(rows); return -1; }
+    for (int64_t i = 0; i < nr; i++) if (gid[i] >= 0) end[gid[i] + 1]++;
+    for (int64_t g = 0; g < ng; g++) end[g + 1] += end[g];
+    for (int64_t i = 0; i < nr; i++) if (gid[i] >= 0) rows[end[gid[i]]++] = i;
+    gr->end = end;
+    gr->rows = rows;
+    return 0;
+}
+/* One result column: each group's min (or max) of col. An int column is folded here, exactly, as
+   the builtins fold one; any other is gathered by group and given to the builtin. */
+static V *group_minmax_col(V *col, const int64_t *gid, int64_t nr, int64_t ng, int is_min, GroupRows *gr) {
+    if (col->t == T_IVEC) {
+        V *r = v_ivec(ng);
+        unsigned char *seen = calloc((size_t)(ng ? ng : 1), 1);
+        if (!seen) { v_free(r); return NULL; }
+        for (int64_t i = 0; i < nr; i++) {
+            int64_t g = gid[i], x = col->J[i];
+            if (g < 0) continue;
+            if (!seen[g] || (is_min ? x < r->J[g] : x > r->J[g])) r->J[g] = x;
+            seen[g] = 1;
+        }
+        free(seen);
+        return r;
+    }
+    if (group_rows(gr, gid, nr, ng) != 0) return NULL;
+    V *r = v_list(ng);
+    for (int64_t g = 0, start = 0; g < ng; g++) {
+        V *items = col_take(col, gr->rows + start, gr->end[g] - start);
+        r->L[g] = builtin_call(is_min ? "min" : "max", &items, 1, NULL, NULL, 0, NULL);
+        v_free(items);
+        start = gr->end[g];
+    }
+    return r;
+}
 static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
-                             const char **by_names, const int *by_idx, int nby) {
+                             const char **by_names, const int *by_idx, int nby,
+                             const unsigned char *MB, const int64_t *rowslot) {
     int include_by[32];
     for (int i = 0; i < nby; i++) include_by[i] = 1;
     for (int s = 0; s < nspecs; s++) {
@@ -1334,6 +1483,9 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
     V *data = v_list(out_cols);
     int c = 0;
     int all_int_keys = tab->nslots == 0 || (tab->slots[0].use_int);
+    int64_t *gid = NULL;
+    GroupRows grows = {NULL, NULL};
+    int mm_done[64] = {0}, mm_oom = 0;
     if (nspecs == 0) {
         for (int i = 0; i < nby; i++) {
             keys->L[c] = v_ref(tbl->keys->L[by_idx[i]]);
@@ -1354,6 +1506,11 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
                 data->L[c] = v_ivec(tab->nslots);
             } else if (specs[s].kind == COL_NAME) {
                 data->L[c] = v_list(tab->nslots);
+            } else if (minmax_by_builtin(tbl, &specs[s])) {
+                if (!gid) gid = group_ids(tbl, tab, by_idx, nby, MB, rowslot);
+                data->L[c] = gid ? group_minmax_col(src, gid, tbl->n, tab->nslots, specs[s].kind == COL_MIN, &grows) : NULL;
+                if (!data->L[c]) { mm_oom = 1; data->L[c] = v_list(0); }
+                mm_done[s] = 1;
             } else {
                 data->L[c] = v_fvec(tab->nslots);
             }
@@ -1386,7 +1543,9 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
             }
             for (int s = 0; s < nspecs; s++) {
                 V *colv = data->L[col];
-                if (colv->t == T_IVEC) {
+                if (mm_done[s]) {
+                    /* filled above */
+                } else if (colv->t == T_IVEC) {
                     if (specs[s].kind == COL_SUM && slot->icarry[s]) g_isum_ovf = 1;
                     colv->J[g] = specs[s].kind == COL_SUM ? slot->isum[s] : slot->nrows;
                 } else if (colv->t == T_FVEC) {
@@ -1404,6 +1563,10 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
             }
         }
     }
+    free(gid);
+    free(grows.end);
+    free(grows.rows);
+    if (mm_oom) { v_free(keys); v_free(data); return v_err("select: out of memory"); }
     return v_table_own(keys, data);
 }
 static V *tbl_group_select_once(V *tbl, ColSpec *specs, int nspecs, V *by, V *row_mask) {
@@ -1433,6 +1596,7 @@ static V *tbl_group_select_once(V *tbl, ColSpec *specs, int nspecs, V *by, V *ro
     }
     GhTab tab;
     memset(&tab, 0, sizeof tab);
+    int64_t *rowslot = NULL;
     V *bcols[32];
     int all_ivec = 1;
     for (int i = 0; i < nby; i++) {
@@ -1464,25 +1628,36 @@ static V *tbl_group_select_once(V *tbl, ColSpec *specs, int nspecs, V *by, V *ro
         int n_agg = 0;
         prep_agg_cols(tbl, specs, nspecs, sp_col, col_t, name_idx, agg_sp, &n_agg);
         if (gh_init(&tab, 256) != 0) return v_err("select: out of memory");
+        for (int sp = 0; sp < nspecs && !rowslot; sp++) {
+            if (!minmax_by_builtin(tbl, &specs[sp])) continue;
+            rowslot = malloc((size_t)(tbl->n ? tbl->n : 1) * sizeof(int64_t));
+            if (!rowslot) { gh_free(&tab); return v_err("select: out of memory"); }
+            for (int64_t row = 0; row < tbl->n; row++) rowslot[row] = -1;
+        }
         char key[512];
         for (int64_t row = 0; row < tbl->n; row++) {
             if (MB && !MB[row]) continue;
             int key_len = composite_key(tbl, by_idx, nby, row, key, sizeof key);
             if (key_len < 0) {
                 gh_free(&tab);
+                free(rowslot);
                 return v_err("select: group key too long");
             }
-            if (gh_find_or_insert_str(&tab, key, (size_t)key_len, tbl, by_idx, nby, row, specs, nspecs,
-                                      sp_col, col_t, agg_sp, n_agg) < 0) {
+            int si = gh_find_or_insert_str(&tab, key, (size_t)key_len, tbl, by_idx, nby, row, specs, nspecs,
+                                           sp_col, col_t, agg_sp, n_agg);
+            if (si < 0) {
                 gh_free(&tab);
+                free(rowslot);
                 return v_err("select: out of memory");
             }
+            if (rowslot) rowslot[row] = si;
         }
         gh_sort_nby = nby;
         qsort(tab.slots, (size_t)tab.nslots, sizeof(GhSlot), gh_sort_cmp);
     }
 build_table:;
-    V *result = build_group_result(tbl, &tab, specs, nspecs, by_names, by_idx, nby);
+    V *result = build_group_result(tbl, &tab, specs, nspecs, by_names, by_idx, nby, MB, rowslot);
+    free(rowslot);
     if (tab.map) {
         gh_free(&tab);
     } else {

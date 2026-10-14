@@ -1257,6 +1257,7 @@ V *eval(Node *n, Env *e) {
     case N_UNOP: {
         V *a = eval(n->ch[0], e);
         if(n->op == OP_NEG) {
+            P(a->t==T_ERR,a)
             if(a->t==T_INT || a->t==T_CHAR)  {
                 /* -INT64_MIN overflows int64; promote to float. */
                 V *r = (a->j==INT64_MIN) ? v_float(-(double)INT64_MIN) : v_int(-a->j);

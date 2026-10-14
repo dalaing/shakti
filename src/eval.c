@@ -1262,8 +1262,25 @@ V *eval(Node *n, Env *e) {
                 }
             } else if(b->t==T_IVEC && a->t==T_INT) {
                 for(int64_t i=0;i<b->n;i++) if(b->J[i]==a->j) { found=1; break; }
+            } else if(is_vec_t(b->t) && (a->t==T_INT||a->t==T_FLOAT||a->t==T_BOOL||a->t==T_CHAR)) {
+                /* a number, bool or char in any other vector: found as `=` finds it, by exact value */
+                found = nums_have_num(b, a);
+            } else if(is_mat_t(b->t) && b->t!=T_BMAT && (a->t==T_IVEC||a->t==T_FVEC||a->t==T_CVEC||a->t==T_LIST)
+                      && a->n==mat_cols(b)) {
+                /* a list as long as a row, in a matrix: some row `=` to it, item by item, by exact
+                   value. `=` compares no list[bool], so a list[bool] or a row of a matrix[bool] is
+                   never found, and an item that isn't a number, bool or char never equals a number. */
+                int64_t m = a->n;
+                int ok = 1;
+                if(a->t==T_LIST) for(int64_t k=0;k<m && ok;k++) {
+                    V *y = a->L[k];
+                    ok = y && (y->t==T_INT||y->t==T_FLOAT||y->t==T_BOOL||y->t==T_CHAR);
+                }
+                found = ok && nums_have_row(b, a);
             } else if(b->t==T_STR && a->t==T_STR) {
                 found = strstr(b->s, a->s) != NULL;
+            } else if(b->t==T_STR && a->t==T_CHAR) {
+                found = memchr(b->s, (int)a->j, strlen(b->s)) != NULL;
             } else if(b->t==T_DICT && a->t==T_STR) {
                 found = v_dict_get(b, a->s) != NULL;
             } else if(b->t==T_DICT) {

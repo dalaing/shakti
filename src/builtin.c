@@ -1601,6 +1601,8 @@ static V *bi_enumerate(V**a,in){
         else if(v->t==T_BVEC)u->L[1]=v_bool(v->B[i]!=0);
         else if(v->t==T_LIST)u->L[1]=v_ref(v->L[i]);
         else if(v->t==T_STR){char b[2]={v->s[i],0};u->L[1]=v_str(b);}
+        else if(is_mat_t(v->t))u->L[1]=v_mat_row(v,i);
+        else if(v->t==T_DICT)u->L[1]=v_ref(v->keys->L[i]);
         else u->L[1]=v_nil();
         r->L[i]=u;
     }

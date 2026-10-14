@@ -409,6 +409,11 @@ m[0, 1] : 7     # assign cell
 
 len(m)      # row count
 shape(m)    # [rows, cols]
+
+for row in m:                 # each row as a vector, as m[i] gives it
+    print(row)
+for i, row in enumerate(m):   # each row with its index
+    print(i, row)
 ```
 
 ### Operators
@@ -464,6 +469,9 @@ k : ktable(a:1, b:2)
 ```
 
 Each column of `table(...)` (named arguments or a dict) is a vector, list or matrix, and all have the same length, the table's row count. Anything else (a scalar, a string, a dict, a table, None) or columns of different lengths is an error value.
+
+`for k in d` gives each key of a dict in order, and `for k, v in d` each key
+with its value. `enumerate(d)` pairs each key with its index: `[[0, "a"], [1, "b"]]`.
 
 ## I/O and JSON
 

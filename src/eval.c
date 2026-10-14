@@ -90,10 +90,18 @@ static int slice_at(int64_t start, int64_t k, int64_t step, int64_t len, int64_t
 }
 static V *eval_slice(V *obj, V *start_v, V *stop_v, V *step_v) {
     int64_t len = 0;
+    if(obj->t==T_ERR) return v_ref(obj);
     if(obj->t==T_STR) len = strlen(obj->s);
     else if(obj->t==T_IVEC||obj->t==T_FVEC||obj->t==T_BVEC||obj->t==T_CVEC||obj->t==T_LIST) len = obj->n;
     else if(is_mat_t(obj->t)) len = obj->n;
     else return v_err("object is not sliceable");
+    /* bounds and step are ints (a char counts, as in an index) or None; an error passes through */
+    V *bv[3] = {start_v, stop_v, step_v};
+    for (int k = 0; k < 3; k++) {
+        if (bv[k]->t == T_ERR) return v_ref(bv[k]);
+        if (bv[k]->t != T_NIL && bv[k]->t != T_INT && bv[k]->t != T_CHAR)
+            return v_err(k < 2 ? "slice bound must be an int" : "slice step must be an int");
+    }
     int64_t step  = step_v->t==T_NIL  ? 1 : step_v->j;
     P(step == 0,v_err("slice step cannot be zero"))
     int64_t start = start_v->t==T_NIL ? (step>0 ? 0 : len-1) : start_v->j;

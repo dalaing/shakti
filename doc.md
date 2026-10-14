@@ -341,7 +341,9 @@ print(catenate("ab", "cd"))   # abcd
 print(len(xs))                # 5
 ```
 
-`xs[i:j]` is a sublist. `xs[n:]` drops the first `n` items.
+`xs[i:j]` is a sublist. `xs[n:]` drops the first `n` items. `xs[i:j:k]` takes every
+`k`th item. A bound or step is an int (a char counts), or left out (or None); anything else
+is an error value (`xs[1.5:3]` is "slice bound must be an int").
 
 ## Vectors
 

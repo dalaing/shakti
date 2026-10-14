@@ -453,6 +453,11 @@ Reading `x[i, j]` indexes `x[i]` with `j`. An assignment takes one index, or two
 matrix: `x[0, 1]: v` on a list of lists is an error value ("cannot assign to list with 2
 indices"); `x[0][1]: v` writes into the item.
 
+`m[i]` is a copy of the row, so a write through it cannot reach the matrix, as it reaches
+an item of a list of lists: `m[0][1] : 7` (and `m[0][1] += 1`) gives the error value "a
+matrix row is a copy: set a cell with m[i, j] : v", the same in a matrix held in a list or a
+dict (`d["m"][0][1] : 7`).
+
 ### Operators
 
 | Operator | Meaning |

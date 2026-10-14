@@ -17,6 +17,9 @@ void shakti_clear_flow(void) {
 }
 static int g_call_depth;
 static int g_call_depth_limit = -1;
+/* Set when an index expression's last step took a row out of a matrix. The row is a copy, so a
+   write into it (m[0][0] : v) would be lost; the assignment refuses it instead. */
+static int g_index_row;
 
 /* Raise g_error and free assign temps when materializing a mapped column fails. */
 static V *assign_map_oom(V *a, V *b, V *c, V *d) {
@@ -76,6 +79,11 @@ static V *slice_read(Node *sl, Env *e) {
    assignment's value) are evaluated, as refuse_assign does. */
 static V *slice_assign_err(Node *a, int from, Node *v, Env *e) {
     return refuse_assign(v_err("slice assignment is not supported"), a, from, v, e);
+}
+/* The error for a write into a matrix row, once the indices after the row and then v (an
+   augmented assignment's value) are evaluated, as refuse_assign does. */
+static V *matrix_row_write(Node *target, Node *v, Env *e) {
+    return refuse_assign(v_err("a matrix row is a copy: set a cell with m[i, j] : v"), target, 1, v, e);
 }
 /* t.name: val and t["name"]: val — replace or add a column of the table's height.
  * *valp is the caller's value: replaced by its copy if the column has to be one. */
@@ -1294,7 +1302,9 @@ V *eval(Node *n, Env *e) {
         }
         if(target->type == N_INDEX) {
             int of_slice = target->ch[0]->type == N_SLICE;
+            g_index_row = 0;
             V *obj = of_slice ? slice_read(target->ch[0], e) : eval(target->ch[0], e);
+            int of_row = target->ch[0]->type == N_INDEX && g_index_row;
             if (!obj || obj->t == T_ERR) { v_free(val); return obj ? obj : v_err("bad assignment target"); }
             /* a matrix takes two indices; anything else one (x[i][j]: v writes into an item) */
             if (target->nch > 3 || (target->nch == 3 && !is_mat_t(obj->t))) {
@@ -1303,6 +1313,7 @@ V *eval(Node *n, Env *e) {
                 return too_many_indices(tn, target, e);
             }
             if (of_slice) { v_free(obj); v_free(val); return slice_assign_err(target, 1, NULL, e); }
+            if (of_row) { v_free(obj); v_free(val); return matrix_row_write(target, NULL, e); }
             if (target->nch == 3) {
                 V *idx0 = eval(target->ch[1], e);
                 if (!idx0 || idx0->t == T_ERR) {
@@ -1453,7 +1464,9 @@ V *eval(Node *n, Env *e) {
         }
         if(target->type == N_INDEX) {
             int of_slice = target->ch[0]->type == N_SLICE;
+            g_index_row = 0;
             V *obj = of_slice ? slice_read(target->ch[0], e) : eval(target->ch[0], e);
+            int of_row = target->ch[0]->type == N_INDEX && g_index_row;
             if (obj->t == T_ERR) return obj;
             /* too many indices is an error before v is worked out; otherwise the
                indices and v are worked out, in order, before the item is read, and the
@@ -1464,6 +1477,7 @@ V *eval(Node *n, Env *e) {
                 return too_many_indices(tn, target, e);
             }
             if (of_slice) { v_free(obj); return slice_assign_err(target, 1, n->ch[1], e); }
+            if (of_row) { v_free(obj); return matrix_row_write(target, n->ch[1], e); }
             V *idx = eval(target->ch[1], e);
             if (idx->t == T_ERR) { v_free(obj); return idx; }
             V *cell = NULL;
@@ -1502,18 +1516,19 @@ V *eval(Node *n, Env *e) {
     }
     case N_INDEX: {
         V *obj = eval(n->ch[0], e);
-        P(n->nch < 2, obj)
-        if (obj->t == T_ERR) return obj;
+        if (n->nch < 2 || obj->t == T_ERR) { g_index_row = 0; return obj; }
         if(obj->t == T_FN) {
             V *al = v_list(n->nch - 1);
             for(int i=1; i<n->nch; i++) al->L[i-1] = eval(n->ch[i], e);
             V *r = builtin_call("__invoke__", (V*[]){obj, al}, 2, NULL, NULL, 0, e);
-            v_free(obj); v_free(al); return r;
+            v_free(obj); v_free(al); g_index_row = 0; return r;
         }
+        int row = 0;
         for(int i=1; i<n->nch; i++) {
             if (obj->t == T_ERR) break;
             V *idx = eval(n->ch[i], e);
             V *next = NULL;
+            row = 0;
             if(obj->t == T_TABLE && idx->t == T_BVEC) {
                 next = table_filter(obj, idx);
             } else if(obj->t == T_TABLE && idx->t == T_STR) {
@@ -1527,7 +1542,7 @@ V *eval(Node *n, Env *e) {
             } else if(is_mat_t(obj->t) && (idx->t==T_INT || idx->t==T_CHAR)) {
                 int64_t j = idx->j;
                 if(j < 0) j += obj->n;
-                if(j >= 0 && j < obj->n) next = v_mat_row(obj, j);
+                if(j >= 0 && j < obj->n) { next = v_mat_row(obj, j); row = 1; }
                 else next = v_err("index out of range");
             } else if((obj->t==T_IVEC||obj->t==T_FVEC||obj->t==T_BVEC||obj->t==T_CVEC||obj->t==T_LIST) && (idx->t==T_INT||idx->t==T_CHAR)) {
                 int64_t j = idx->j;
@@ -1566,6 +1581,7 @@ V *eval(Node *n, Env *e) {
             obj = next ? next : v_nil();
             if(obj->t == T_ERR) break;
         }
+        g_index_row = row;
         return obj;
     }
     case N_SLICE: {

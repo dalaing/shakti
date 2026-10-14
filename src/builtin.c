@@ -448,7 +448,10 @@ static V *bi_type(V**a,in){
 }
 static V *bi_int(V**a,in){
     P(n<1,v_int(0))V*v=a[0];
-    P(v->t==T_INT,v_int(v->j))P(v->t==T_CHAR,v_int(v->j))P(v->t==T_FLOAT,v_int((int64_t)v->f))
+    P(v->t==T_INT,v_int(v->j))P(v->t==T_CHAR,v_int(v->j))
+    if(v->t==T_FLOAT){ /* truncates toward zero; one no int holds (NaN, an infinity, beyond +-2^63) is refused */
+        P(isnan(v->f),v_err("int: NaN is not an int"))P(!(v->f>=-0x1p63&&v->f<0x1p63),v_err("int: float out of int range"))
+        return v_int((int64_t)v->f);}
     P(v->t==T_BOOL,v_int(v->j))P(v->t==T_STR,v_int(strtoll(v->s,NULL,0)))
     return v_err("cannot convert to int");}
 static V *bi_float(V**a,in){

@@ -555,6 +555,30 @@ V *eval_fn(Node *body, Env *e) {
     return r;
 }
 
+/* dict and ktable, called with only bare names (dict(a, b)), take them as `a: a, b: b`, called by
+   their own name or through a name bound to them. */
+static int names_dict_builtin(V *fn) {
+    return fn && fn->t == T_FN && fn->n == -1 && (!strcmp(fn->s, "dict") || !strcmp(fn->s, "ktable"));
+}
+
+/* append and pop change their first argument in place: a shared list there is copied first, into
+   the name or index the call's first argument (n->ch[1]) is; -1 when it has no such place. */
+static int cow_first_arg(Env *e, const char *builtin, Node *n, V **args, int nargs) {
+    if ((strcmp(builtin, "pop") && strcmp(builtin, "append")) || nargs < 1 || n->nch < 2 ||
+        n->ch[1]->type == N_KWARG)
+        return 0;
+    return cow_list_arg(e, n->ch[1], &args[0]);
+}
+
+/* A builtin as a value (bound to a name, held in a dict, passed as an argument) is a function
+   value with n == -1 and the builtin's name in s: calling it calls the builtin, as calling it by
+   its own name does. */
+static V *call_builtin_value(V *fn, Node *n, V **args, int nargs, V **kwnames, V **kwvals, int nkw,
+                             Env *e) {
+    if (cow_first_arg(e, fn->s, n, args, nargs) < 0) return v_err("shared list");
+    return builtin_call(fn->s, args, nargs, kwnames, kwvals, nkw, e);
+}
+
 static V *seq_item(V *v, int64_t i) {
     switch (v->t) {
     case T_LIST: return v->L[i] ? v_ref(v->L[i]) : v_nil();
@@ -1711,8 +1735,9 @@ V *eval(Node *n, Env *e) {
                     }
                 }
                 attr = v_ref(attr);
-                V *result = attr->t == T_FN ? call_fn(attr, self, args, nargs, kwnames, kwvals, nkw, e)
-                                            : class_new(attr, args, nargs, kwnames, kwvals, nkw, e);
+                V *result = attr->t != T_FN ? class_new(attr, args, nargs, kwnames, kwvals, nkw, e)
+                          : attr->n == -1 ? call_builtin_value(attr, n, args, nargs, kwnames, kwvals, nkw, e)
+                          : call_fn(attr, self, args, nargs, kwnames, kwvals, nkw, e);
                 v_free(attr);
                 v_free(obj);
                 for(int i=0;i<nargs;i++) v_free(args[i]);
@@ -1752,13 +1777,15 @@ V *eval(Node *n, Env *e) {
         V **kwvals = calloc(nargs_total+1, sizeof(V*));
         int nargs = 0, nkw = 0;
         int positional_names = 0;
-        if (fn_node->type == N_NAME &&
-            (!strcmp(fn_node->sval, "dict") || !strcmp(fn_node->sval, "ktable")) &&
-            n->nch > 2) {
+        if (fn_node->type == N_NAME && n->nch > 2) {
             positional_names = 1;
             for (int i = 1; i < n->nch; i++) {
                 if (n->ch[i]->type != N_NAME) { positional_names = 0; break; }
             }
+            /* a name bound to dict or ktable (the builtin itself is called by name below); the
+               lookup comes first, as is_builtin scans every builtin's name */
+            if (positional_names && strcmp(fn_node->sval, "dict") && strcmp(fn_node->sval, "ktable"))
+                positional_names = names_dict_builtin(env_get(e, fn_node->sval)) && !is_builtin(fn_node->sval);
         }
         for(int i=1; i<n->nch; i++) {
             if(n->ch[i]->type == N_KWARG) {
@@ -1777,9 +1804,7 @@ V *eval(Node *n, Env *e) {
             }
         }
         if(fn_node->type == N_NAME && is_builtin(fn_node->sval)) {
-            if ((!strcmp(fn_node->sval, "pop") || !strcmp(fn_node->sval, "append")) &&
-                nargs >= 1 && n->nch > 1 && n->ch[1]->type != N_KWARG &&
-                cow_list_arg(e, n->ch[1], &args[0]) < 0) {
+            if (cow_first_arg(e, fn_node->sval, n, args, nargs) < 0) {
                 for(int i=0;i<nargs;i++) v_free(args[i]);
                 for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
                 free(args); free(kwnames); free(kwvals);
@@ -1824,7 +1849,7 @@ V *eval(Node *n, Env *e) {
         }
         if(fn && fn->t == T_FN && fn->n == -1) {
             /* a builtin held in a variable (w: len): call it as the builtin */
-            V *r = builtin_call(fn->s, args, nargs, kwnames, kwvals, nkw, e);
+            V *r = call_builtin_value(fn, n, args, nargs, kwnames, kwvals, nkw, e);
             v_free(fn);
             for(int i=0;i<nargs;i++) v_free(args[i]);
             for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }

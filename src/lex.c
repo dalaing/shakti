@@ -79,6 +79,18 @@ static int lex_append(Lexer *l, Token *t, int *len, char ch) {
 static void lex_finish_text(Lexer *l, Token *t, int len) {
     t->sval = lex_intern(l, l->text ? l->text : "", (size_t)len);
 }
+/* The character after a backslash in a quoted string (single or triple quotes): \n \t \r \0 \\
+   \' \" are decoded; any other keeps its backslash. */
+static int lex_append_escape(Lexer *l, Token *t, int *len, char ch) {
+    switch(ch) {
+    case 'n': return lex_append(l, t, len, '\n');
+    case 't': return lex_append(l, t, len, '\t');
+    case 'r': return lex_append(l, t, len, '\r');
+    case '0': return lex_append(l, t, len, '\0');
+    case '\\': case '\'': case '"': return lex_append(l, t, len, ch);
+    default: return lex_append(l, t, len, '\\') && lex_append(l, t, len, ch);
+    }
+}
 
 /* Update noun_pos after emitting a token (kparser-style left context). */
 static void lex_note_token(Lexer *l, Token t) {
@@ -324,14 +336,7 @@ static Token lex_raw(Lexer *l) {
             while(p+2 < l->len && !(s[p]==q && s[p+1]==q && s[p+2]==q)) {
                 if(s[p]=='\\' && p+1<l->len) {
                     p++;
-                    char escaped;
-                    switch(s[p]) {
-                    case 'n': escaped='\n'; break;
-                    case 't': escaped='\t'; break;
-                    case '\\': escaped='\\'; break;
-                    default: escaped=s[p]; break;
-                    }
-                    if(!lex_append(l, &t, &qi, escaped)) return make_tok(T_EOF_);
+                    if(!lex_append_escape(l, &t, &qi, s[p])) return make_tok(T_EOF_);
                 } else if(!lex_append(l, &t, &qi, s[p])) return make_tok(T_EOF_);
                 p++;
             }
@@ -346,19 +351,7 @@ static Token lex_raw(Lexer *l) {
             while(p < l->len && s[p] != q) {
                 if(s[p]=='\\' && p+1<l->len) {
                     p++;
-                    switch(s[p]) {
-                    case 'n': if(!lex_append(l,&t,&qi,'\n')) return make_tok(T_EOF_); break;
-                    case 't': if(!lex_append(l,&t,&qi,'\t')) return make_tok(T_EOF_); break;
-                    case '\\': if(!lex_append(l,&t,&qi,'\\')) return make_tok(T_EOF_); break;
-                    case '\'': if(!lex_append(l,&t,&qi,'\'')) return make_tok(T_EOF_); break;
-                    case '"': if(!lex_append(l,&t,&qi,'"')) return make_tok(T_EOF_); break;
-                    case 'r': if(!lex_append(l,&t,&qi,'\r')) return make_tok(T_EOF_); break;
-                    case '0': if(!lex_append(l,&t,&qi,'\0')) return make_tok(T_EOF_); break;
-                    default:
-                        if(!lex_append(l,&t,&qi,'\\') || !lex_append(l,&t,&qi,s[p]))
-                            return make_tok(T_EOF_);
-                        break;
-                    }
+                    if(!lex_append_escape(l, &t, &qi, s[p])) return make_tok(T_EOF_);
                 } else if(!lex_append(l, &t, &qi, s[p])) return make_tok(T_EOF_);
                 p++;
             }

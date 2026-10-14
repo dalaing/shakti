@@ -375,7 +375,9 @@ void v_list_unshare(V **p);
  * a parameter that holds the column (c: t.a, f(t.a)) can't change the table's height, and
  * tables can share columns. Append and pop refuse other vectors and matrices anyway; they
  * are marked so that a table made from another's columns (table(a: t.a)) shares them
- * rather than copying them. */
+ * rather than copying them, and because an assignment of a value of another kind to one of
+ * their items (v_list_set) can turn one into a list in place, and that list must stay
+ * fixed in length. */
 enum { V_COLUMN = 1 << 16 };
 static inline int v_is_column(const V *v) {
     return v && (v->bits & V_COLUMN);
@@ -386,6 +388,17 @@ static inline int v_is_column(const V *v) {
  * is. */
 void v_table_column(V **p);
 void v_list_append_own(V *v, V *item);
+/* The vector or matrix that n items promote to, as a list literal of them promotes:
+ * atoms whose kinds join make a vector (chars among ints are ints, ints among floats
+ * floats), vectors of one length a matrix. NULL when they stay a list. */
+V *v_promote_items(V **items, int64_t n);
+/* Item i of a list, vector (an atom) or matrix (a row), as a new reference; NULL past the end. */
+V *v_list_item(V *v, int64_t i);
+/* Set item i of a list, vector or matrix in place; a value of another kind changes its
+ * type as a literal of its items would have it, except that an int put in a list[char]
+ * or matrix[char] is stored as a byte, and that a vector or matrix doesn't take an error
+ * value: 0 ok, -1 i out of range, -2 out of memory, -3 x is an error value (v unchanged). */
+int v_list_set(V *v, int64_t i, V *x);
 V *v_dict(V *keys, V *vals);
 V *v_dict_empty(void);
 V *v_dict_own(V *keys, V *vals);

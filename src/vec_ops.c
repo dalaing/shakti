@@ -50,14 +50,6 @@ V *vec_logic(V *a, V *b, int is_and) {
     }
     return r;
 }
-double to_float(V *v) {
-    P(!v,0)
-    P(v->t==T_INT,(double)v->j)
-    P(v->t==T_CHAR,(double)v->j)
-    P(v->t==T_FLOAT,v->f)
-    P(v->t==T_BOOL,(double)v->j)
-    return 0;
-}
 static double i64_floordiv_f(int64_t x, int64_t y) {
     if (!y) return 0;
     if (i64_pair_promotes(x, y)) return -(double)INT64_MIN;

@@ -949,46 +949,18 @@ V *eval(Node *n, Env *e) {
     case N_LIST: {
         int nch = n->nch;
         V **elems = calloc(nch?nch:1, sizeof(V*));
-        int all_int=1, all_u8=1, all_num=1, all_bool=1;
         for(int i=0;i<nch;i++) {
             elems[i] = eval(n->ch[i], e);
             if(g_error) { for(int j=0;j<=i;j++) v_free(elems[j]); free(elems); return v_nil(); }
             if(elems[i]->t == T_ERR) { V *err = elems[i]; for(int j=0;j<i;j++) v_free(elems[j]); free(elems); return err; }
-            if(elems[i]->t != T_INT && elems[i]->t != T_CHAR) all_int = 0;
-            if(elems[i]->t != T_CHAR) all_u8 = 0;
-            if(elems[i]->t != T_INT && elems[i]->t != T_FLOAT && elems[i]->t != T_CHAR) all_num = 0;
-            if(elems[i]->t != T_BOOL) all_bool = 0;
         }
-        if(nch > 0 && all_u8) {
-            V *r = v_cvec(nch);
-            i(nch,{r->B[i]=(unsigned char)elems[i]->j; v_free(elems[i]);})
-            free(elems); return r;
+        V *r = v_promote_items(elems, nch);
+        if(r) {
+            for(int i=0;i<nch;i++) v_free(elems[i]);
+        } else {
+            r = v_list(nch);
+            i(nch,r->L[i] = elems[i])
         }
-        if(nch > 0 && all_int) {
-            V *r = v_ivec(nch);
-            i(nch,{r->J[i]=elems[i]->j; v_free(elems[i]);})
-            free(elems); return r;
-        }
-        if(nch > 0 && all_num) {
-            V *r = v_fvec(nch);
-            i(nch,{r->F[i]=to_float(elems[i]); v_free(elems[i]);})
-            free(elems); return r;
-        }
-        if(nch > 0 && all_bool) {
-            V *r = v_bvec(nch);
-            i(nch,{r->B[i]=elems[i]->j?1:0; v_free(elems[i]);})
-            free(elems); return r;
-        }
-        {
-            V *mat = try_promote_matrix(elems, nch);
-            if (mat) {
-                for (int i = 0; i < nch; i++) v_free(elems[i]);
-                free(elems);
-                return mat;
-            }
-        }
-        V *r = v_list(nch);
-        i(nch,r->L[i] = elems[i])
         free(elems);
         return r;
     }
@@ -1223,7 +1195,8 @@ V *eval(Node *n, Env *e) {
                     v_free(obj); v_free(idx0); v_free(val);
                     return idx1 ? idx1 : v_err("bad assignment index");
                 }
-                if ((idx0->t == T_INT || idx0->t == T_CHAR) && (idx1->t == T_INT || idx1->t == T_CHAR)) {
+                /* the indices can call a function that turns obj into a list of rows in place */
+                if (is_mat_t(obj->t) && (idx0->t == T_INT || idx0->t == T_CHAR) && (idx1->t == T_INT || idx1->t == T_CHAR)) {
                     int64_t r = idx0->j, c = idx1->j;
                     if (r < 0) r += obj->n;
                     if (c < 0) c += mat_cols(obj);
@@ -1238,6 +1211,14 @@ V *eval(Node *n, Env *e) {
                             obj->B[mat_idx(obj, r, c)] = val->j ? 1 : 0;
                         else if (obj->t == T_CMAT && (val->t == T_CHAR || val->t == T_INT))
                             obj->B[mat_idx(obj, r, c)] = (unsigned char)val->j;
+                        else {
+                            /* another kind: the row takes it, then the matrix the row */
+                            V *row = v_mat_row(obj, r);
+                            int rc = v_list_set(row, c, val);
+                            if (rc == 0) rc = v_list_set(obj, r, row);
+                            v_free(row);
+                            if (rc == -2) return assign_map_oom(obj, idx0, idx1, val);
+                        }
                     }
                 }
                 v_free(obj); v_free(idx0); v_free(idx1); v_free(val);
@@ -1262,41 +1243,8 @@ V *eval(Node *n, Env *e) {
                 v_free(obj); v_free(idx); v_free(val);
                 return v_nil();
             }
-            if(idx->t==T_INT || idx->t==T_CHAR) {
-                int64_t i = idx->j;
-                if(i < 0) i += obj->n;
-                if(i >= 0 && i < obj->n) {
-                    if(obj->t==T_LIST) { v_free(obj->L[i]); obj->L[i] = v_ref(val); }
-                    else if(obj->t==T_IVEC && (val->t==T_INT || val->t==T_CHAR)) {
-                        if (v_ensure_writable(obj) != 0)
-                            return assign_map_oom(obj, idx, val, NULL);
-                        obj->J[i] = val->j;
-                    } else if(obj->t==T_FVEC && (val->t==T_FLOAT||val->t==T_INT||val->t==T_CHAR)) {
-                        if (v_ensure_writable(obj) != 0)
-                            return assign_map_oom(obj, idx, val, NULL);
-                        obj->F[i] = val->t==T_FLOAT ? val->f : (double)val->j;
-                    } else if(obj->t==T_BVEC && val->t==T_BOOL) {
-                        if (v_ensure_writable(obj) != 0)
-                            return assign_map_oom(obj, idx, val, NULL);
-                        obj->B[i] = val->j ? 1 : 0;
-                    } else if(obj->t==T_CVEC && (val->t==T_CHAR || val->t==T_INT)) {
-                        if (v_ensure_writable(obj) != 0)
-                            return assign_map_oom(obj, idx, val, NULL);
-                        obj->B[i] = (unsigned char)val->j;
-                    } else if(is_mat_t(obj->t) && target->nch == 2) {
-                        if (v_ensure_writable(obj) != 0)
-                            return assign_map_oom(obj, idx, val, NULL);
-                        int64_t cols = mat_cols(obj);
-                        if(obj->t==T_IMAT && val->t==T_IVEC && val->n==cols)
-                            memcpy(obj->J + mat_idx(obj, i, 0), val->J, (size_t)cols * 8);
-                        else if(obj->t==T_FMAT && val->t==T_FVEC && val->n==cols)
-                            memcpy(obj->F + mat_idx(obj, i, 0), val->F, (size_t)cols * 8);
-                        else if(obj->t==T_BMAT && val->t==T_BVEC && val->n==cols)
-                            memcpy(obj->B + mat_idx(obj, i, 0), val->B, (size_t)cols);
-                        else if(obj->t==T_CMAT && val->t==T_CVEC && val->n==cols)
-                            memcpy(obj->B + mat_idx(obj, i, 0), val->B, (size_t)cols);
-                    }
-                }
+            if ((obj->t == T_LIST || is_vec_t(obj->t) || is_mat_t(obj->t)) && (idx->t == T_INT || idx->t == T_CHAR)) {
+                if (v_list_set(obj, idx->j, val) == -2) return assign_map_oom(obj, idx, val, NULL);
             }
             v_free(obj); v_free(idx); v_free(val);
             return v_nil();
@@ -1760,58 +1708,12 @@ V *eval(Node *n, Env *e) {
         Node *vars = n->ch[0];
         V *iter = eval(n->ch[1], e);
         V *r = v_nil();
-        if(iter->t == T_IVEC) {
+        if(iter->t == T_LIST || is_vec_t(iter->t) || is_mat_t(iter->t)) {
+            /* Each item is read afresh: the body can change the list's items, its length
+             * and, through x[i]: v, its kind (a vector can become a list in place). */
             for(int64_t i=0;i<iter->n;i++) {
-                V *item = iter->t == T_IVEC ? v_int(iter->J[i]) : iter->L[i] ? v_ref(iter->L[i]) : v_nil();
-                for_set_vars(vars, item, e);
-                v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
-                if(g_returning||g_error) { v_free(iter); return r; }
-                if(g_breaking) { g_breaking=0; break; }
-                if(g_continuing) { g_continuing=0; }
-            }
-        } else if(iter->t == T_FVEC) {
-            for(int64_t i=0;i<iter->n;i++) {
-                V *item = v_float(iter->F[i]);
-                for_set_vars(vars, item, e);
-                v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
-                if(g_returning||g_error) { v_free(iter); return r; }
-                if(g_breaking) { g_breaking=0; break; }
-                if(g_continuing) { g_continuing=0; }
-            }
-        } else if(iter->t == T_CVEC) {
-            for(int64_t i=0;i<iter->n;i++) {
-                V *item = v_char(iter->B[i]);
-                for_set_vars(vars, item, e);
-                v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
-                if(g_returning||g_error) { v_free(iter); return r; }
-                if(g_breaking) { g_breaking=0; break; }
-                if(g_continuing) { g_continuing=0; }
-            }
-        } else if(iter->t == T_BVEC) {
-            for(int64_t i=0;i<iter->n;i++) {
-                V *item = v_bool(iter->B[i] != 0);
-                for_set_vars(vars, item, e);
-                v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
-                if(g_returning||g_error) { v_free(iter); return r; }
-                if(g_breaking) { g_breaking=0; break; }
-                if(g_continuing) { g_continuing=0; }
-            }
-        } else if(iter->t == T_LIST) {
-            for(int64_t i=0;i<iter->n;i++) {
-                for_set_vars(vars, iter->L[i], e);
-                v_free(r);
-                r = eval(n->ch[2], e);
-                if(g_returning||g_error) { v_free(iter); return r; }
-                if(g_breaking) { g_breaking=0; break; }
-                if(g_continuing) { g_continuing=0; }
-            }
-        } else if(is_mat_t(iter->t)) {
-            for(int64_t i=0;i<iter->n;i++) {
-                V *item = v_mat_row(iter, i);
+                V *item = v_list_item(iter, i);
+                if(!item) break;
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
                 r = eval(n->ch[2], e);

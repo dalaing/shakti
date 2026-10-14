@@ -1,6 +1,7 @@
 /* shakti/src/value.c — V constructors, copy/free, print, serialize */
 #include "shakti_internal.h"
 #include "mat_simd.h"
+#include <limits.h>
 #ifdef SHAKTI_HAVE_IEFS
 #include "iefs_format.h"
 #include "iefs_io.h"
@@ -241,6 +242,14 @@ V *v_mat_row(V *m, int64_t r) {
     memcpy(rv->B, m->B + mat_idx(m, r, 0), (size_t)cols);
     return rv;
 }
+double to_float(V *v) {
+    P(!v,0)
+    P(v->t==T_INT,(double)v->j)
+    P(v->t==T_CHAR,(double)v->j)
+    P(v->t==T_FLOAT,v->f)
+    P(v->t==T_BOOL,(double)v->j)
+    return 0;
+}
 V *try_promote_matrix(V **elems, int nch) {
     if (nch <= 0) return NULL;
     int64_t cols = -1;
@@ -248,6 +257,7 @@ V *try_promote_matrix(V **elems, int nch) {
     for (int i = 0; i < nch; i++) {
         V *row = elems[i];
         int64_t row_len = 0;
+        if (!row) return NULL;
         if (row->t == T_IVEC) {
             row_len = row->n; all_u8 = 0; all_bool = 0;
         } else if (row->t == T_CVEC) {
@@ -268,6 +278,7 @@ V *try_promote_matrix(V **elems, int nch) {
         } else return NULL;
         if (cols < 0) cols = row_len;
         else if (cols != row_len) return NULL;
+        if (!(all_int || all_u8 || all_num || all_bool)) return NULL;
     }
     if (all_u8) {
         V *r = v_cmat(nch, cols);
@@ -313,6 +324,48 @@ V *try_promote_matrix(V **elems, int nch) {
     }
     return NULL;
 }
+V *v_promote_items(V **items, int64_t n) {
+    int all_int = 1, all_u8 = 1, all_num = 1, all_bool = 1;
+    if (n <= 0 || !items[0]) return NULL;
+    if (is_vec_t(items[0]->t) || items[0]->t == T_LIST)
+        return n > INT_MAX ? NULL : try_promote_matrix(items, (int)n);
+    for (int64_t i = 0; i < n; i++) {
+        V *x = items[i];
+        if (!x) return NULL;
+        if (x->t != T_INT && x->t != T_CHAR) all_int = 0;
+        if (x->t != T_CHAR) all_u8 = 0;
+        if (x->t != T_INT && x->t != T_FLOAT && x->t != T_CHAR) all_num = 0;
+        if (x->t != T_BOOL) all_bool = 0;
+        if (!(all_int || all_u8 || all_num || all_bool)) return NULL;
+    }
+    if (all_u8) {
+        V *r = v_cvec(n);
+        for (int64_t i = 0; i < n; i++) r->B[i] = (unsigned char)items[i]->j;
+        return r;
+    }
+    if (all_int) {
+        V *r = v_ivec(n);
+        for (int64_t i = 0; i < n; i++) r->J[i] = items[i]->j;
+        return r;
+    }
+    if (all_num) {
+        V *r = v_fvec(n);
+        for (int64_t i = 0; i < n; i++) r->F[i] = to_float(items[i]);
+        return r;
+    }
+    V *r = v_bvec(n);
+    for (int64_t i = 0; i < n; i++) r->B[i] = items[i]->j ? 1 : 0;
+    return r;
+}
+/* Take a list; return it, or the vector or matrix its items promote to. */
+static V *v_promote(V *v) {
+    V *r;
+    if (!v || v->t != T_LIST) return v;
+    r = v_promote_items(v->L, v->n);
+    if (!r) return v;
+    v_free(v);
+    return r;
+}
 V *mat_matmul(V *a, V *b) {
     P(!is_mat_t(a->t) || !is_mat_t(b->t), v_err("mmul requires numeric matrices"))
     P(a->t == T_BMAT || b->t == T_BMAT, v_err("mmul not supported for matrix[bool]"))
@@ -353,9 +406,12 @@ void v_list_unshare(V **p) {
     *p = c;
     v_free(v);
 }
+static int is_list_kind(int t) {
+    return t == T_LIST || is_vec_t(t) || is_mat_t(t);
+}
 void v_table_column(V **p) {
     V *v = p ? *p : NULL;
-    if (!v || v_is_column(v) || !(v->t == T_LIST || is_vec_t(v->t) || is_mat_t(v->t))) return;
+    if (!v || v_is_column(v) || !is_list_kind(v->t)) return;
     if (v->t == T_LIST) {
         v_list_unshare(p);
     } else if (v->rc > 1) {
@@ -429,6 +485,80 @@ V *v_table_own(V *cols, V *data) {
     V *t = v_table(cols, data);
     v_free(cols); v_free(data);
     return t;
+}
+/* Item i of a list, vector (an atom) or matrix (a row), as a new reference; NULL past the end. */
+V *v_list_item(V *v, int64_t i) {
+    if (!v || i < 0 || i >= v->n) return NULL;
+    switch (v->t) {
+    case T_IVEC: return v_int(v->J[i]);
+    case T_FVEC: return v_float(v->F[i]);
+    case T_CVEC: return v_char(v->B[i]);
+    case T_BVEC: return v_bool(v->B[i] != 0);
+    case T_LIST: return v->L[i] ? v_ref(v->L[i]) : v_nil();
+    case T_IMAT: case T_FMAT: case T_CMAT: case T_BMAT: return v_mat_row(v, i);
+    default: return NULL;
+    }
+}
+/* Give v the payload of w (which must be held only by the caller) and free v's
+ * old payload: v keeps its identity, so every holder of v sees the new value, and
+ * stays a table's column if it was one. */
+static void v_become(V *v, V *w) {
+    V old = *v;
+    int rc = v->rc;
+    *v = *w;
+    v->rc = rc;
+    v->bits |= old.bits & V_COLUMN;
+    *w = old;
+    w->rc = 1;
+    v_free(w);
+}
+/* Set item i of list v in place to x. A vector takes an atom of its kind and a
+ * matrix a row of its kind and width (an int vector takes a char, a float vector an
+ * int or a char; a char vector or matrix takes ints as bytes, as it always has);
+ * anything else rebuilds the items and promotes them as a literal would, so the kind
+ * may change (every holder of v sees it). A generic list keeps its kind. A vector or
+ * matrix doesn't take an error value. 0 ok, -1 i out of range, -2 out of memory, -3 x is
+ * an error value (v unchanged). */
+int v_list_set(V *v, int64_t i, V *x) {
+    if (!v || !x || !is_list_kind(v->t)) return -1;
+    if (i < 0) i += v->n;
+    if (i < 0 || i >= v->n) return -1;
+    if (v->t == T_LIST) {
+        v_free(v->L[i]);
+        v->L[i] = v_ref(x);
+        return 0;
+    }
+    if (x->t == T_ERR) return -3;
+    if ((v->t == T_IVEC && (x->t == T_INT || x->t == T_CHAR)) ||
+        (v->t == T_FVEC && (x->t == T_FLOAT || x->t == T_INT || x->t == T_CHAR)) ||
+        (v->t == T_CVEC && (x->t == T_CHAR || x->t == T_INT)) ||
+        (v->t == T_BVEC && x->t == T_BOOL)) {
+        if (v_ensure_writable(v) != 0) return -2;
+        if (v->t == T_IVEC) v->J[i] = x->j;
+        else if (v->t == T_FVEC) v->F[i] = x->t == T_FLOAT ? x->f : (double)x->j;
+        else v->B[i] = v->t == T_BVEC ? (x->j ? 1 : 0) : (unsigned char)x->j;
+        return 0;
+    }
+    if (is_mat_t(v->t) && x->t == v->t - (T_IMAT - T_IVEC) && x->n == mat_cols(v)) {
+        int64_t cols = mat_cols(v);
+        if (v_ensure_writable(v) != 0) return -2;
+        if (v->t == T_IMAT) memcpy(v->J + mat_idx(v, i, 0), x->J, (size_t)cols * 8);
+        else if (v->t == T_FMAT) memcpy(v->F + mat_idx(v, i, 0), x->F, (size_t)cols * 8);
+        else memcpy(v->B + mat_idx(v, i, 0), x->B, (size_t)cols);
+        return 0;
+    }
+    if (v->t == T_CMAT && x->t == T_IVEC && x->n == mat_cols(v)) {
+        int64_t cols = mat_cols(v);
+        if (v_ensure_writable(v) != 0) return -2;
+        for (int64_t k = 0; k < cols; k++) v->B[mat_idx(v, i, k)] = (unsigned char)x->J[k];
+        return 0;
+    }
+    {
+        V *w = v_list(v->n);
+        for (int64_t k = 0; k < v->n; k++) w->L[k] = k == i ? v_ref(x) : v_list_item(v, k);
+        v_become(v, v_promote(w));
+    }
+    return 0;
 }
 void v_list_append_own(V *v, V *item) {
     v_list_append(v, item);

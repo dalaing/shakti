@@ -347,6 +347,16 @@ print(len(xs))                # 5
 
 `xs[i:j]` is a sublist. `xs[n:]` drops the first `n` items.
 
+`x[i]: v` (and `m[r, c]: v`) changes one item in place, seen through every name that holds `x`.
+In a vector or matrix a value of another kind changes the type in place, for every name that
+holds it, as a literal of the items would have it: `x: 1 2; x[0]: "a"` makes `x` a `list`,
+`x[0]: 1.5` a `list[float]`, and a matrix cell or row of another kind makes a `matrix[float]` or
+a list of rows. A `list` stays a `list` (`x: [1, "a"]; x[1]: 2`). An int put in a `list[char]`
+or a `matrix[char]` is stored as a byte and the type stays (`c: 0x6162; c[0]: 65` gives
+`0x4162`). A vector or matrix doesn't take an error value: `x: 1 2; x[0]: x[0] + "s"` leaves
+`x` as it was (a `list` stores it, as it stores any value). A `for` loop over `x` sees the new
+items from the next one on.
+
 A list can hold itself, and lists can hold each other: `x[0]: x` and `x.append([x])` make `x`
 hold itself, and `a.append(b)` then `b.append(a)` make `a` and `b` hold each other.
 Copying such a value (`list(x)`, `sorted(x)`) gives an error value, `a value holds itself`, and
@@ -470,7 +480,7 @@ k : ktable(a:1, b:2)
 
 A table's `list` or `list[int]` column can't grow or shrink, whatever holds it: `t.a.pop()`, `pop(t.a)`, `t["a"].append(x)`, `getattr(t, "a").pop()`, a function popping its parameter (`f(t.a)`), and `c.append(x)` after `c: t.a` are all error values (`append: a table column's length is fixed; copy it with list() first`). A list or `list[int]` that has been a table's column stays fixed for good, even once the table is gone or the column is replaced (`t.a: y`, `insert`); `list(t.a)`, a slice (`t.a[0:2]`) or `+` gives a copy that can grow or shrink. An item of a column can still be assigned (`t.a[0]: 9`, or `c[0]: 9` after `c: t.a`), and the table sees it.
 
-A `list`, vector or matrix put into a table (`table(a: x)`, `table(d)`, `t.a: x`) is copied as it goes in when anything else also holds it (a name, a dict, another list), which takes time and memory in proportion to its length, so `x` stays a value of its own: after `table(a: x)`, `x[0]: 9` (and, for a `list` or `list[int]`, `x.append(1)`) doesn't change the table. One nothing else holds (`table(a: list(x))`, `table(a: [1, 2])`) isn't copied. Two tables can share a column (`table(a: t.a)` takes `t`'s own column as it is), since neither can change its length.
+A `list`, vector or matrix put into a table (`table(a: x)`, `table(d)`, `t.a: x`) is copied as it goes in when anything else also holds it (a name, a dict, another list), which takes time and memory in proportion to its length, so `x` stays a value of its own: after `table(a: x)`, `x[0]: 9` (and, for a `list` or `list[int]`, `x.append(1)`) doesn't change the table. One nothing else holds (`table(a: list(x))`, `table(a: [1, 2])`) isn't copied. A vector or matrix column is held to the same rule as a list column: an item of another kind (`t.a[0]: "s"`) turns it into a list in place, and that list can't grow or shrink, through `t.a` or through `c` after `c: t.a` (`c.append(3)` is an error value), for good. Two tables can share a column (`table(a: t.a)` takes `t`'s own column as it is), since neither can change its length.
 
 ## I/O and JSON
 

@@ -657,6 +657,13 @@ j : t join u on id
 
 `by col1, col2` groups and sorts ascending. There is no separate `group by` / `order by` clause.
 
+`insert` puts each value in its column as it is, or is an error and inserts nothing: a `list[int]`
+column takes an int or a char, a `list[float]` a float, an int or a char (an int becomes a float,
+and a char its code), a `list[bool]` a bool, a `list[char]` a char, a matrix a row of its width
+whose items fit, and a `list` anything. `create table u (id: 0, name: "")` makes `id` a `list[int]`
+and `name` a `list`, so `insert into u (id, name) values ("ada", 1)` is
+`insert: column 'id' holds int, not str`.
+
 See also [syntax and builtins](#syntax-and-builtins) for tables, `load("file.csv")`, and matrix types.
 
 ---

@@ -106,6 +106,7 @@ enum {
  *   - j vs _ht_cap: scalars/fn/input use j; vec/mat/list/dict/table use _ht_cap.
  *   - T_INPUT uses j (mode) and s (prompt) together.
  *   - T_SUBPROCESS uses j (PTY fd), n (pid, then 0/-1 after wait), bits (exit/signal).
+ *   - bits also holds V_COLUMN on a list, vector or matrix that is a table's column.
  *   - T_FN uses j (body AST index) and params/defaults/closure together.
  *     Builtin wrappers (n == -1) store the name in s instead of params.
  *   - bits, owner_kind, map_reg apply across numeric/buffer types.
@@ -368,10 +369,27 @@ V *v_list(int64_t n);
 void v_list_append(V *v, V *item);
 /* If *p is a shared list, replace it with a shallow clone and drop our ref. */
 void v_list_unshare(V **p);
+/* A table's column (a list, vector or matrix) is marked in bits, above the lane width.
+ * A list or list[int] so marked is fixed in length: append and pop refuse it, so a name or
+ * a parameter that holds the column (c: t.a, f(t.a)) can't change the table's height, and
+ * tables can share columns. Append and pop refuse other vectors and matrices anyway; they
+ * are marked so that a table made from another's columns (table(a: t.a)) shares them
+ * rather than copying them. */
+enum { V_COLUMN = 1 << 16 };
+static inline int v_is_column(const V *v) {
+    return v && (v->bits & V_COLUMN);
+}
+/* Make *p fit to be a table's column: a list, vector or matrix that isn't a column yet and
+ * that something else also holds is replaced by its own copy (our ref dropped), costing
+ * time and memory in its length, and is then marked a column. Anything else is left as it
+ * is. */
+void v_table_column(V **p);
 void v_list_append_own(V *v, V *item);
 V *v_dict(V *keys, V *vals);
 V *v_dict_empty(void);
 V *v_dict_own(V *keys, V *vals);
+/* A table of columns cols (names) and data (values). Makes each item of data a column
+ * as v_table_column does, so it may replace items of data with their copies. */
 V *v_table(V *cols, V *data);
 V *v_table_own(V *cols, V *data);
 void v_dict_put(V *d, const char *key, V *val);

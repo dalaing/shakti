@@ -481,7 +481,10 @@ static int list_is_call_arg(V *obj) {
 static int cow_list_arg(Env *e, Node *slot, V **objp) {
     V *obj = *objp;
     V *copy;
-    if (!obj || (obj->t != T_LIST && obj->t != T_IVEC) || obj->rc <= 2 || list_is_call_arg(obj)) return 0;
+    /* a table's column isn't copied: append and pop refuse it, whatever holds it */
+    if (!obj || (obj->t != T_LIST && obj->t != T_IVEC) || obj->rc <= 2 || list_is_call_arg(obj) ||
+        v_is_column(obj))
+        return 0;
     if (obj->t == T_IVEC) {
         copy = v_ivec(obj->n);
         if (obj->n > 0 && obj->J)
@@ -511,18 +514,6 @@ static int cow_list_arg(Env *e, Node *slot, V **objp) {
                 v_free(box->vals->L[i]);
                 box->vals->L[i] = v_ref(copy);
                 placed = 1;
-            }
-        } else if (box && box->t == T_TABLE && idx && idx->t == T_STR && box->vals && box->keys) {
-            int64_t j;
-            v_list_unshare(&box->vals);
-            for (j = 0; j < box->keys->n; j++) {
-                if (box->keys->L[j] && box->keys->L[j]->t == T_STR && box->vals->L[j] == obj &&
-                    !strcmp(box->keys->L[j]->s, idx->s)) {
-                    v_free(box->vals->L[j]);
-                    box->vals->L[j] = v_ref(copy);
-                    placed = 1;
-                    break;
-                }
             }
         }
         if (box) v_free(box);
@@ -1406,26 +1397,22 @@ V *eval(Node *n, Env *e) {
                 v_dict_set(obj, target->sval, val);
             } else if(obj->t == T_TABLE) {
                 int found = -1;
+                if ((val->t==T_IVEC||val->t==T_FVEC||val->t==T_BVEC||val->t==T_CVEC||val->t==T_LIST) &&
+                    obj->n > 0 && val->n != obj->n) {
+                    v_free(obj); v_free(val);
+                    return v_err("table column length mismatch");
+                }
                 v_list_unshare(&obj->keys);
                 v_list_unshare(&obj->vals);
                 for(int i=0; i<obj->keys->n; i++) {
                     if(obj->keys->L[i] && obj->keys->L[i]->t == T_STR &&
                        !strcmp(obj->keys->L[i]->s, target->sval)) { found=i; break; }
                 }
+                v_table_column(&val);  /* as table() takes a column */
                 if(found >= 0) {
-                    if ((val->t==T_IVEC||val->t==T_FVEC||val->t==T_BVEC||val->t==T_CVEC||val->t==T_LIST) &&
-                        obj->n > 0 && val->n != obj->n) {
-                        v_free(obj); v_free(val);
-                        return v_err("table column length mismatch");
-                    }
                     v_free(obj->vals->L[found]);
                     obj->vals->L[found] = v_ref(val);
                 } else {
-                    if ((val->t==T_IVEC||val->t==T_FVEC||val->t==T_BVEC||val->t==T_CVEC||val->t==T_LIST) &&
-                        obj->n > 0 && val->n != obj->n) {
-                        v_free(obj); v_free(val);
-                        return v_err("table column length mismatch");
-                    }
                     V *k = v_str(target->sval);
                     v_list_append(obj->keys, k);
                     v_list_append(obj->vals, val);

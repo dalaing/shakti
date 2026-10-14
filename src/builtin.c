@@ -1664,7 +1664,9 @@ static int ivec_own(V *v) {
     v->_ht_cap = v->n > 0 ? (uint32_t)v->n : 0;
     return 0;
 }
+#define COLUMN_FIXED ": a table column's length is fixed; copy it with list() first"
 static V *bi_append(V**a,in){
+    P(n>=2&&a[0]&&(a[0]->t==T_LIST||a[0]->t==T_IVEC)&&v_is_column(a[0]),v_err("append" COLUMN_FIXED))
     if (n >= 2 && a[0] && a[0]->t == T_IVEC) {
         if (ivec_own(a[0]) != 0) return v_err("append: read-only vector");
         if (a[1] && (a[1]->t == T_INT || a[1]->t == T_CHAR)) {
@@ -1677,6 +1679,7 @@ static V *bi_append(V**a,in){
     P(n<2||a[0]->t!=T_LIST,v_err("append(list,val)"))
     v_list_append(a[0], a[1]); return v_nil();}
 static V *bi_pop(V**a,in){
+    P(n>=1&&a[0]&&(a[0]->t==T_LIST||a[0]->t==T_IVEC)&&v_is_column(a[0]),v_err("pop" COLUMN_FIXED))
     if (n >= 1 && a[0] && a[0]->t == T_IVEC) {
         if (a[0]->n <= 0) return v_err("pop");
         return v_int(a[0]->J[--a[0]->n]);
@@ -1697,7 +1700,10 @@ static V *bi_table(V**a,in,V**kwn,V**kwv,int nkw){
         V*k=list_ref_elems(a[0]->keys),*v=list_ref_elems(a[0]->vals);
         V*r=v_table(k,v);v_free(k);v_free(v);return r;}
     if(nkw>0){V*p=v_list(nkw),*d=v_list(nkw);
-        for(int i=0;i<nkw;i++){p->L[i]=v_ref(kwn[i]);d->L[i]=v_ref(kwv[i]);}
+        /* a value only this call holds is handed over, so v_table can mark it a column
+         * without copying it */
+        for(int i=0;i<nkw;i++){p->L[i]=v_ref(kwn[i]);
+            if(kwv[i]->rc==1){d->L[i]=kwv[i];kwv[i]=NULL;}else d->L[i]=v_ref(kwv[i]);}
         V*r=v_table(p,d);v_free(p);v_free(d);return r;}
     return v_err("table()");}
 static V *bi_columns(V**a,in){return n>0&&a[0]->t==T_TABLE?v_copy(a[0]->keys):v_err("columns()");}
@@ -2686,6 +2692,9 @@ static int bi_kw_true(V **kwn, V **kwv, int nkw, const char *name) {
     return 0;
 }
 extern V *subprocess_ex(V **a, int n, const char *dir_env);
+/* Call builtin name. The caller keeps and frees args and kwv; a builtin may take over a
+ * keyword argument's value instead (table() does), leaving NULL in its kwv slot, which the
+ * caller's v_free(NULL) then skips. */
 V *builtin_call(const char *name,V **args,int nargs,V **kwn,V **kwv,int nkw,Env *e){
     BiCall fn;
     {

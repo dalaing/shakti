@@ -351,6 +351,19 @@ void v_list_unshare(V **p) {
     *p = c;
     v_free(v);
 }
+void v_table_column(V **p) {
+    V *v = p ? *p : NULL;
+    if (!v || v_is_column(v) || !(v->t == T_LIST || is_vec_t(v->t) || is_mat_t(v->t))) return;
+    if (v->t == T_LIST) {
+        v_list_unshare(p);
+    } else if (v->rc > 1) {
+        /* a vector or matrix is copied as a list is, so the mark never lands on one that
+         * something else (a name) holds */
+        *p = v_copy(v);
+        v_free(v);
+    }
+    (*p)->bits |= V_COLUMN;
+}
 void v_list_append(V *v, V *item) {
     Pv(v->t != T_LIST)
     if (v->n >= v->_ht_cap) {
@@ -400,6 +413,9 @@ V *v_table(V *cols, V *data) {
                 return v_err("table: ragged columns");
         }
     }
+    /* a list, vector or matrix that something else also holds is copied as it enters the
+     * table; one that is a column already (of the table this one is made from) is shared */
+    for (int64_t i = 0; i < data->n; i++) v_table_column(&data->L[i]);
     V *v = v_alloc(T_TABLE);
     v->n = n;
     v->keys = v_ref(cols);

@@ -440,6 +440,10 @@ t : table(a:1 2; b:3 4)
 k : ktable(a:1, b:2)
 ```
 
+A table's `list` or `list[int]` column can't grow or shrink, whatever holds it: `t.a.pop()`, `pop(t.a)`, `t["a"].append(x)`, `getattr(t, "a").pop()`, a function popping its parameter (`f(t.a)`), and `c.append(x)` after `c: t.a` are all error values (`append: a table column's length is fixed; copy it with list() first`). A list or `list[int]` that has been a table's column stays fixed for good, even once the table is gone or the column is replaced (`t.a: y`, `insert`); `list(t.a)`, a slice (`t.a[0:2]`) or `+` gives a copy that can grow or shrink. An item of a column can still be assigned (`t.a[0]: 9`, or `c[0]: 9` after `c: t.a`), and the table sees it.
+
+A `list`, vector or matrix put into a table (`table(a: x)`, `table(d)`, `t.a: x`) is copied as it goes in when anything else also holds it (a name, a dict, another list), which takes time and memory in proportion to its length, so `x` stays a value of its own: after `table(a: x)`, `x[0]: 9` (and, for a `list` or `list[int]`, `x.append(1)`) doesn't change the table. One nothing else holds (`table(a: list(x))`, `table(a: [1, 2])`) isn't copied. Two tables can share a column (`table(a: t.a)` takes `t`'s own column as it is), since neither can change its length.
+
 ## I/O and JSON
 
 - `read(path)`, `write(path, text)`, `readlines(path)`

@@ -2007,6 +2007,7 @@ V *table_sql_insert(V *table, V *cols, V *vals) {
             if (next != col) {
                 v_free(table->vals->L[idx]);
                 table->vals->L[idx] = next;
+                v_table_column(&table->vals->L[idx]);
             }
         }
         free(saved_n);

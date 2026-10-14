@@ -125,7 +125,7 @@ V *do_import(const char *name, Env *e) {
             node_free(prog);
             free(buf);
             env_free(mod_env);
-            return v_err("import: break or return at module top level");
+            return v_err("import: return at module top level");
         }
     }
     node_free(prog);

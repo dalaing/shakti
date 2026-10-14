@@ -247,7 +247,7 @@ char *shakti_eval(const char *src) {
         shakti_clear_flow();
         v_free(result);
         node_free(prog);
-        return strdup("break or return outside loop");
+        return strdup("return outside a function");
     }
     if (g_error) {
         const char *msg = (g_error_val && g_error_val->s) ? g_error_val->s : "error";

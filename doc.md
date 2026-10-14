@@ -188,6 +188,9 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - `char(n)` builds a `char` from an int (distinct from `chr`, which returns a
   one-character `str`)
 - `parse_check(src)` returns `dict(ok, error)` — syntax only, no eval
+- `break` and `continue` act on the innermost `while` or `for` around them in
+  the same `def` (or `class`) body; anywhere else, including a def body inside a
+  loop, they are a parse error (`'break' outside a loop`)
 
 String and formatted-string token text is limited to 8191 bytes, and source
 indentation is limited to 255 nested levels. Inputs beyond either limit fail

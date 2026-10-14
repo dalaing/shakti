@@ -7,6 +7,7 @@
 
 import pong_core
 import pong_gfx_render
+import pong_skins
 
 def report(name, n, elapsed):
     nf : n * 1.0
@@ -35,7 +36,7 @@ def bench_frame(n):
     t0 : clock()
     i : 0
     while i < n:
-        f : pong_core.frame(st, "BENCH")
+        f : pong_core.frame(st, "BENCH", pong_skins.SKIN_GRASS)
         i : i + 1
     t1 : clock()
     return pong_core.sub(t1, t0)
@@ -48,7 +49,7 @@ def bench_tick(n):
         pong_core.step(st)
         if st["over"] = 1:
             st : pong_core.new_state()
-        f : pong_core.frame(st, "BENCH")
+        f : pong_core.frame(st, "BENCH", pong_skins.SKIN_GRASS)
         i : i + 1
     t1 : clock()
     return pong_core.sub(t1, t0)

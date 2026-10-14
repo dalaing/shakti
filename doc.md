@@ -190,6 +190,13 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - **Compare** with `=` — `if x = 1:`, `while i < len(s):`
 - Dict literals and slices keep `:` — `{k: v}`, `a[1:3]`
 - `==` is not supported
+- A call checks its arguments: too many, a keyword that names no parameter (unless
+  the function has a `**kw` parameter), a parameter given twice, or one with no
+  argument and no default is an error value at the call, prefixed with the name
+  the function is called by when the callee is a name or `obj.m`, as in `f(...)`,
+  `f[x]`, `obj.m(...)` or `obj.m[x]` (`f: takes 2 arguments but 3 were given`,
+  `f: missing argument 'x'`), with `map`, `filter` or `each` when they call it,
+  and otherwise with `function`.
 - Integer bitwise helpers: `band(a,b)`, `bor(a,b)`, `bxor(a,b)`, `bnot(a)`,
   `shl(a,b)`, `shr(a,b)` — `shl`/`shr` are logical shifts on the low 64 bits;
   shift counts must be in `0..63`
@@ -1321,6 +1328,8 @@ Routes:
   - `handle_rpc(method, params, id)` if defined in the calling environment
   - else built-in `ping` → `"pong"`
 - other methods/paths — `handle_request(method, path, body, content_type)` if defined (must return a dict with `status` / `content_type` / `body`)
+
+A handler must accept all the arguments the server passes it (three to `handle_rpc`, four to `handle_request`; a `*rest` parameter can take those it does not use): one that takes fewer gives a call error, which JSON-RPC answers with -32603.
 
 CORS: localhost Origin only; mutating cross-origin requests get 403. Optional bearer: `Authorization: Bearer …` matching `SHAKTI_SERVE_TOKEN`.
 

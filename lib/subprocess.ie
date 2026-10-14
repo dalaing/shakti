@@ -24,11 +24,11 @@ class Popen:
 		self.stderr : None
 		self.stdin : stdin
 		self.returncode : sh(cmd)
-	def wait(self, timeout:None):
+	def wait(timeout:None):
 		return self.returncode
-	def communicate(self, input:None, timeout:None):
+	def communicate(input:None, timeout:None):
 		return [None, None]
-	def poll(self):
+	def poll():
 		return self.returncode
 
 def run(command, shell:False, check:False):

@@ -384,7 +384,7 @@ V *shakti_instance_str(V *v, Env *e) {
     if(!shakti_is_instance(v)) return NULL;
     V*f=v_dict_get(v,"__str__");
     if(!f||f->t!=T_FN) return NULL;
-    f=v_ref(f);V*r=shakti_call_fn(f,v,NULL,0,NULL,NULL,0,e);v_free(f);
+    f=v_ref(f);V*r=shakti_call_fn(f,"__str__",v,NULL,0,NULL,NULL,0,e);v_free(f);
     if(r&&r->t==T_STR) return r;
     v_free(r);
     return NULL;
@@ -1581,7 +1581,8 @@ static V *bi_map(V**a,in,Env*e){
             V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
             else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
             else item=v_nil();
-            Env*ce=env_new(fn->closure);shakti_bind_params(ce,fn,&item,1,NULL,NULL,0);v_free(item);
+            Env*ce=env_new(fn->closure);V*be=shakti_bind_params(ce,fn,"map",&item,1,NULL,NULL,0);v_free(item);
+            if(be){env_free(ce);v_free(r);return be;}
             if(fn->j<0||fn->j>=fn_ast_n){env_free(ce);v_free(r);return v_err("map: bad function");}
             V*rv=eval_fn(fn_ast[(int)fn->j],ce);if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
             r->L[i]=rv;env_free(ce);
@@ -1612,7 +1613,8 @@ static V *bi_filter(V**a,in,Env*e){
             V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
             else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
             else item=v_nil();
-            Env*ce=env_new(fn->closure);shakti_bind_params(ce,fn,&item,1,NULL,NULL,0);
+            Env*ce=env_new(fn->closure);V*be=shakti_bind_params(ce,fn,"filter",&item,1,NULL,NULL,0);
+            if(be){for(int64_t j=0;j<out;j++)v_free(tmp[j]);v_free(item);env_free(ce);free(tmp);return be;}
             if(fn->j<0||fn->j>=fn_ast_n){v_free(item);env_free(ce);free(tmp);return v_err("filter: bad function");}
             V*rv=eval_fn(fn_ast[(int)fn->j],ce);if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
             int keep=rv&&((rv->t==T_BOOL&&rv->j)||(rv->t==T_INT&&rv->j)||(rv->t!=T_NIL&&rv->t!=T_BOOL&&rv->t!=T_INT));
@@ -2686,6 +2688,18 @@ static int bi_kw_true(V **kwn, V **kwv, int nkw, const char *name) {
     return 0;
 }
 extern V *subprocess_ex(V **a, int n, const char *dir_env);
+V *fn_invoke(V *fnv, V *al, const char *name, Env *e){
+    P(!fnv || fnv->t != T_FN, v_err("__invoke__: not a function"))
+    P(!al || al->t != T_LIST, v_err("__invoke__: args must be a list"))
+    P(fnv->n == -1,builtin_call(fnv->s, al->L, (int)al->n, NULL, NULL, 0, e))
+    P(fnv->j < 0 || fnv->j >= fn_ast_n, v_err("__invoke__: bad function"))
+    Env*ce=env_new(fnv->closure);
+    V*be=shakti_bind_params(ce, fnv, name, al->L, (int)al->n, NULL, NULL, 0);
+    if(be){env_free(ce);return be;}
+    Node*body=fn_ast[(int)fnv->j];V*rv=eval_fn(body,ce);
+    if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
+    env_free(ce);return rv;
+}
 V *builtin_call(const char *name,V **args,int nargs,V **kwn,V **kwv,int nkw,Env *e){
     BiCall fn;
     {
@@ -2726,16 +2740,7 @@ V *builtin_call(const char *name,V **args,int nargs,V **kwn,V **kwv,int nkw,Env 
     }
     if(!strcmp(name,"__invoke__")){
         P(nargs < 2, v_err("__invoke__(fn, args)"))
-        V*fnv=args[0],*al=args[1];
-        P(!fnv || fnv->t != T_FN, v_err("__invoke__: not a function"))
-        P(!al || al->t != T_LIST, v_err("__invoke__: args must be a list"))
-        P(fnv->n == -1,builtin_call(fnv->s, al->L, (int)al->n, NULL, NULL, 0, e))
-        P(fnv->j < 0 || fnv->j >= fn_ast_n, v_err("__invoke__: bad function"))
-        Env*ce=env_new(fnv->closure);
-        shakti_bind_params(ce, fnv, al->L, (int)al->n, NULL, NULL, 0);
-        Node*body=fn_ast[(int)fnv->j];V*rv=eval_fn(body,ce);
-        if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
-        env_free(ce);return rv;
+        return fn_invoke(args[0], args[1], NULL, e);
     }
     if(!strcmp(name,"load")) {
         if(nargs < 1 || args[0]->t != T_STR) {

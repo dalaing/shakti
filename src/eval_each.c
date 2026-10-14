@@ -11,7 +11,7 @@ static int each_is_container(V *v) {
 static V *each_invoke(V *fn, V **args, int nargs, Env *e) {
     V *al = v_list(nargs);
     for (int i = 0; i < nargs; i++) al->L[i] = v_ref(args[i]);
-    V *r = builtin_call("__invoke__", (V*[]){fn, al}, 2, NULL, NULL, 0, e);
+    V *r = fn_invoke(fn, al, "each", e);
     v_free(al);
     return r;
 }

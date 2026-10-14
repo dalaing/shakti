@@ -620,54 +620,85 @@ static int param_named(V *params, const char *name) {
     }
     return 0;
 }
+/* 1 when one of the call's first nkw keywords is p. */
+static int kw_given(V **kwn, int nkw, const char *p) {
+    for (int i = 0; i < nkw; i++) if (!strcmp(kwn[i]->s, p)) return 1;
+    return 0;
+}
 /* Bind a call's arguments to fn's parameters in ce: positional arguments in order, a `*name`
-   parameter the rest of them, defaults the parameters left; then each `name: value`, but that a
-   `**name` parameter takes the keywords that name no parameter, as a dict. */
-static inline void bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V **kwv, int nkw) {
-    V *params = fn->params;
-    int positional = 1;
+   parameter the rest of them, each `name: value` its parameter, a `**name` parameter the keywords
+   that name no parameter (as a dict), and defaults the parameters left. Too many arguments, an
+   unknown or repeated keyword, a parameter given both by position and by name, or one left with
+   no argument and no default (NULL in defaults) is an error at the call: returned, prefixed with
+   the name the function is called by (`f: missing argument 'x'`), or what calls it
+   (`map: ...`), or else `function: `; else NULL. */
+static V *bind_params(Env *ce, V *fn, const char *name, V **args, int nargs, V **kwn, V **kwv,
+                      int nkw) {
+    V *params = fn->params, *defaults = fn->defaults;
+    const char *pre = name ? name : "function";
     const char *kwrest = NULL;
-    if (!params || params->t != T_LIST) return;
+    int npos = 0, nreq = 0, has_rest = 0;
+    if (!params || params->t != T_LIST) return NULL;
     for (int i = 0; i < params->n; i++) {
-        V *p = params->L[i];
-        if (!p || p->t != T_STR) continue;
-        const char *s = p->s;
-        if (s[0] == '*' && s[1] == '*') {
-            V *k = v_list(0), *vl = v_list(0);
-            for (int j = 0; j < nkw; j++) {
-                if (param_named(params, kwn[j]->s)) continue;
-                v_list_append(k, kwn[j]);
-                v_list_append(vl, kwv[j]);
-            }
-            V *d = v_dict(k, vl);
-            v_free(k); v_free(vl);
-            env_set(ce, s + 2, d);
-            v_free(d);
-            kwrest = s + 2;
-        } else if (s[0] == '*') {
-            V *rest = v_list(nargs > i ? nargs - i : 0);
-            for (int j = i; j < nargs; j++) rest->L[j - i] = v_ref(args[j]);
-            env_set(ce, s + 1, rest);
+        const char *p = params->L[i]->s;
+        if (p[0] == '*') { if (p[1] == '*') kwrest = p + 2; else has_rest = 1; continue; }
+        if (has_rest) continue;
+        npos++;
+        if (!defaults || i >= defaults->n || !defaults->L[i]) nreq = npos;
+    }
+    if (!has_rest && nargs > npos) {
+        if (nreq < npos)
+            return v_errf("%s: takes %d to %d arguments but %d were given", pre, nreq, npos, nargs);
+        return v_errf("%s: takes %d argument%s but %d %s given", pre, npos, npos == 1 ? "" : "s",
+                      nargs, nargs == 1 ? "was" : "were");
+    }
+    for (int i = 0; i < nkw; i++) {
+        if (kw_given(kwn, i, kwn[i]->s))
+            return v_errf("%s: multiple values for argument '%s'", pre, kwn[i]->s);
+        if (!kwrest && !param_named(params, kwn[i]->s))
+            return v_errf("%s: unexpected keyword argument '%s'", pre, kwn[i]->s);
+    }
+    int pos = 0;
+    for (int i = 0; i < params->n; i++) {
+        const char *p = params->L[i]->s;
+        if (p[0] == '*' && p[1] == '*') continue;
+        if (p[0] == '*') {
+            V *rest = v_list(nargs > pos ? nargs - pos : 0);
+            for (int j = pos; j < nargs; j++) rest->L[j - pos] = v_ref(args[j]);
+            env_set(ce, p + 1, rest);
             v_free(rest);
-            positional = 0;
-        } else if (positional && i < nargs) {
-            env_set(ce, s, args[i]);
-        } else if (fn->defaults && i < fn->defaults->n && fn->defaults->L[i]) {
-            env_set(ce, s, fn->defaults->L[i]);
+            pos = nargs;
+        } else if (pos < nargs) {
+            if (kw_given(kwn, nkw, p)) return v_errf("%s: multiple values for argument '%s'", pre, p);
+            env_set(ce, p, args[pos++]);
+        } else if (!kw_given(kwn, nkw, p)) {
+            if (!defaults || i >= defaults->n || !defaults->L[i])
+                return v_errf("%s: missing argument '%s'", pre, p);
+            env_set(ce, p, defaults->L[i]);
         }
     }
-    for (int i = 0; i < nkw; i++)
-        if (!kwrest || param_named(params, kwn[i]->s)) env_set(ce, kwn[i]->s, kwv[i]);
+    V *extra = kwrest ? v_dict_empty() : NULL;
+    for (int i = 0; i < nkw; i++) {
+        if (param_named(params, kwn[i]->s)) env_set(ce, kwn[i]->s, kwv[i]);
+        else v_dict_set(extra, kwn[i]->s, kwv[i]);
+    }
+    if (extra) { env_set(ce, kwrest, extra); v_free(extra); }
+    return NULL;
 }
-void shakti_bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V **kwv, int nkw) {
-    bind_params(ce, fn, args, nargs, kwn, kwv, nkw);
+V *shakti_bind_params(Env *ce, V *fn, const char *name, V **args, int nargs, V **kwn, V **kwv,
+                      int nkw) {
+    return bind_params(ce, fn, name, args, nargs, kwn, kwv, nkw);
 }
-static inline V *call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw, Env *e) {
+/* Call fn (a builtin or a user function; self, when not NULL, bound as `self`). name, when known,
+   is the one it was called by, for a binding error. */
+static inline V *call_fn(V *fn, const char *name, V *self, V **args, int nargs, V **kwn, V **kwv,
+                         int nkw, Env *e) {
     if (!fn || fn->t != T_FN) return v_err("call: not a function");
     if (fn->n == -1) return builtin_call(fn->s, args, nargs, kwn, kwv, nkw, e);
     if (fn->j < 0 || fn->j >= fn_ast_n || !fn_ast[(int)fn->j]) return v_err("call: bad function");
     Env *ce = env_new(fn->closure);
-    bind_params(ce, fn, args, nargs, kwn, kwv, nkw);
+    V *err = bind_params(ce, fn, name, args, nargs, kwn, kwv, nkw);
+    if (err) { env_free(ce); return err; }
     if (self) env_set(ce, "self", self);
     int npush = push_list_vals(args, nargs) + push_list_vals(kwv, nkw);
     V *r = eval_fn(fn_ast[(int)fn->j], ce);
@@ -681,8 +712,9 @@ static inline V *call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, 
     env_free(ce);
     return r;
 }
-V *shakti_call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw, Env *e) {
-    return call_fn(fn, self, args, nargs, kwn, kwv, nkw, e);
+V *shakti_call_fn(V *fn, const char *name, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw,
+                  Env *e) {
+    return call_fn(fn, name, self, args, nargs, kwn, kwv, nkw, e);
 }
 /* Classes are dicts whose first key is "__bases__"; instances lead with "__class__". */
 static V *dict_lead(V *v, const char *key) {
@@ -726,7 +758,7 @@ static V *class_new(V *cls, V **args, int nargs, V **kwn, V **kwv, int nkw, Env 
     V *init = v_dict_get(self, "__init__");
     if (init && init->t == T_FN) {
         init = v_ref(init);
-        V *r = call_fn(init, self, args, nargs, kwn, kwv, nkw, e);
+        V *r = call_fn(init, "__init__", self, args, nargs, kwn, kwv, nkw, e);
         v_free(init);
         if (r && r->t == T_ERR) { v_free(self); return r; }
         v_free(r);
@@ -1546,7 +1578,9 @@ V *eval(Node *n, Env *e) {
         if(obj->t == T_FN) {
             V *al = v_list(n->nch - 1);
             for(int i=1; i<n->nch; i++) al->L[i-1] = eval(n->ch[i], e);
-            V *r = builtin_call("__invoke__", (V*[]){obj, al}, 2, NULL, NULL, 0, e);
+            /* f[x] and obj.m[x] name the function in a binding error, as f(x) and obj.m(x) do */
+            int named = n->ch[0]->type == N_NAME || n->ch[0]->type == N_DOT;
+            V *r = fn_invoke(obj, al, named ? n->ch[0]->sval : NULL, e);
             v_free(obj); v_free(al); return r;
         }
         for(int i=1; i<n->nch; i++) {
@@ -1752,7 +1786,7 @@ V *eval(Node *n, Env *e) {
                 attr = v_ref(attr);
                 V *result = attr->t != T_FN ? class_new(attr, args, nargs, kwnames, kwvals, nkw, e)
                           : attr->n == -1 ? call_builtin_value(attr, n, args, nargs, kwnames, kwvals, nkw, e)
-                          : call_fn(attr, self, args, nargs, kwnames, kwvals, nkw, e);
+                          : call_fn(attr, method, self, args, nargs, kwnames, kwvals, nkw, e);
                 v_free(attr);
                 v_free(obj);
                 for(int i=0;i<nargs;i++) v_free(args[i]);
@@ -1882,7 +1916,16 @@ V *eval(Node *n, Env *e) {
             return v_errf("'%s' is not callable", fn_node->sval ? fn_node->sval : "?");
         }
         Env *call_env = env_acquire(fn->closure);
-        bind_params(call_env, fn, args, nargs, kwnames, kwvals, nkw);
+        V *bind_err = bind_params(call_env, fn, fn_node->type == N_NAME ? fn_node->sval : NULL,
+                                  args, nargs, kwnames, kwvals, nkw);
+        if(bind_err) {
+            env_release(call_env);
+            v_free(fn);
+            for(int i=0;i<nargs;i++) v_free(args[i]);
+            for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
+            free(args); free(kwnames); free(kwvals);
+            return bind_err;
+        }
         Node *body = fn_ast[(int)fn->j];
         int npush = push_list_vals(args, nargs) + push_list_vals(kwvals, nkw);
         V *result = eval_fn(body, call_env);

@@ -161,10 +161,10 @@ static void http_respond(int fd, int code, const char *status,
     if (body && blen > 0) conn_write_all(fd, body, (size_t)blen);
 }
 
-static V *server_invoke_fn(V *fn, V **args, int nargs) {
+static V *server_invoke_fn(V *fn, const char *name, V **args, int nargs) {
     if (!fn || fn->t != T_FN)
         return v_err("not callable");
-    return shakti_call_fn(fn, NULL, args, nargs, NULL, NULL, 0, fn->closure);
+    return shakti_call_fn(fn, name, NULL, args, nargs, NULL, NULL, 0, fn->closure);
 }
 
 typedef struct {
@@ -343,7 +343,7 @@ static V *dispatch_rpc(Env *global, const char *body) {
         V *a2 = id;
         if (!a2) { nili = v_nil(); a2 = nili; }
         V *args[3] = {method, a1, a2};
-        V *r = server_invoke_fn(handler, args, 3);
+        V *r = server_invoke_fn(handler, "handle_rpc", args, 3);
         if (nilp) v_free(nilp);
         if (nili) v_free(nili);
         if (notification) {
@@ -402,7 +402,7 @@ static V *dispatch_request(Env *global, const char *method, const char *path,
     V *a2 = v_str(body ? body : "");
     V *a3 = v_str(content_type ? content_type : "");
     V *args[4] = {a0, a1, a2, a3};
-    V *r = server_invoke_fn(handler, args, 4);
+    V *r = server_invoke_fn(handler, "handle_request", args, 4);
     v_free(a0);
     v_free(a1);
     v_free(a2);

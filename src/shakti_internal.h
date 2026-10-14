@@ -84,8 +84,16 @@ V *require_sql(Env *e);
 /* Call-site `*expr` parses as N_UNOP with this op. */
 #define OP_SPLAT OP_MUL
 
-void shakti_bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V **kwv, int nkw);
-V *shakti_call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw, Env *e);
+/* Bind a call's arguments to fn's parameters in ce; an error value (the call's arguments don't
+   fit, prefixed with name, or `function` without one) or NULL. */
+V *shakti_bind_params(Env *ce, V *fn, const char *name, V **args, int nargs, V **kwn, V **kwv,
+                      int nkw);
+/* Call fn, binding self when it isn't NULL; name, when known, is the one it was called by. */
+V *shakti_call_fn(V *fn, const char *name, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw,
+                  Env *e);
+/* Call fnv with the items of the list al as its positional arguments (each, f[x], __invoke__);
+   name is what calls it, for a binding error. */
+V *fn_invoke(V *fnv, V *al, const char *name, Env *e);
 int shakti_is_class(V *v);
 int shakti_is_instance(V *v);
 V *shakti_instance_str(V *v, Env *e);

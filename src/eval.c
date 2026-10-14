@@ -1322,6 +1322,10 @@ V *eval(Node *n, Env *e) {
                 V *r = table_set_col(obj, target->sval, &val);
                 v_free(obj); v_free(val);
                 return r;
+            } else {
+                V *r = v_errf("cannot set attribute '%s' of %s", target->sval, type_name(obj->t));
+                v_free(obj); v_free(val);
+                return r;
             }
             v_free(obj); v_free(val);
             return v_nil();

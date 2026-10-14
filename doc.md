@@ -361,8 +361,9 @@ An assignment to an item of a list, vector, matrix or table that can't be done i
 value, as the read would be: an index out of range (`x[5]: 3`, `m[0, 9]: 1`), an index of the
 wrong kind (`x["a"]: 3`), too many indices (two on anything but a matrix, `x[0, 1]: 3`, or
 three on a matrix, `m[0, 1, 2]: 3`), or an item of something that holds none
-(`n: 5; n["a"]: 1`, `s: "abc"; s[0]: "x"`). An error value put into a vector or matrix
-(`x: 1 2; x[0]: 1/0`) is given back, since it isn't stored.
+(`n: 5; n["a"]: 1`, `s: "abc"; s[0]: "x"`); so is `x.k: v` on anything but a dict or a table
+(`n.k: 1`). An error value put into a vector or matrix (`x: 1 2; x[0]: 1/0`) is given back,
+since it isn't stored.
 
 In a dict, `d["k"]: v` sets key `k`, an int `d[i]: v` sets the value at position `i` if there is
 one, and any other key does nothing, with no error; two indices (`d["a", 1]: 2`) are an error

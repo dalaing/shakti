@@ -487,6 +487,11 @@ Supported formats: **CSV**, **TSV**, and **XML**. `save` writes **CSV** and **TS
 ### CSV / TSV save
 
 - Numeric columns: `ivec` / `fvec` (and int/float cells in list columns).
+- A float is written rounded to 15 significant digits, or to 16 or 17 when fewer don't read back as
+  the same float (from one digit below the smallest normal float: `5e-324`), as `123456789.125`,
+  `0.1`, `1e+300`, always with a `.` or an exponent, so a float column loads back as floats, value
+  for value. A whole float below 10^15 is written with all its digits and `.0` (`2.0`,
+  `100000000000000.0`); infinities and NaN as `inf`, `-inf` and `nan`.
 - String columns: list-of-string columns write each cell as text; `None` / unsupported cell types emit an empty field.
 - Matrix columns are not supported (save fails).
 - Delimiter is `,` for `.csv` and tab for `.tsv`. Fields are not quoted; values must not contain the delimiter.

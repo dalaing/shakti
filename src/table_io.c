@@ -1,6 +1,7 @@
 #include "shakti_internal.h"
 #include <ctype.h>
 #include <fcntl.h>
+#include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -156,6 +157,22 @@ static int fputs_field(FILE *f, const char *s, char delim) {
     }
     return fputc('"', f) == EOF ? -1 : 0;
 }
+/* A float as saved: rounded to 15 significant digits, or to 16 or 17 when fewer don't read back as
+   the same float (a whole float below 1e15 in full), always with a '.' or an exponent so that load
+   reads its column back as floats; inf and nan as strtod reads them. */
+static void save_float_format(double d, char *buf, size_t cap) {
+    if (!isfinite(d)) { snprintf(buf, cap, "%g", d); return; }
+    if (d < 1e15 && d > -1e15 && d == (int64_t)d) { snprintf(buf, cap, "%.1f", d); return; }
+    /* Below DBL_MIN (subnormal) fewer than 15 digits may be all there are. */
+    for (int prec = fabs(d) < DBL_MIN ? 1 : 15; prec <= 17; prec++) {
+        snprintf(buf, cap, "%.*g", prec, d);
+        if (strtod(buf, NULL) == d) break;
+    }
+    if (!strpbrk(buf, ".e")) {
+        size_t l = strlen(buf);
+        if (l + 2 < cap) memcpy(buf + l, ".0", 3);
+    }
+}
 static int table_delim_save(V *table, const char *path, char c) {
     P(!table || table->t != T_TABLE || !table->keys || !table->vals, -1)
     int nc = (int)table->keys->n;
@@ -189,7 +206,7 @@ static int table_delim_save(V *table, const char *path, char c) {
             const char *out = "";
             if (!col || r >= col->n) goto fail;
             if (col->t == T_FVEC) {
-                snprintf(buf, sizeof buf, "%g", col->F[r]);
+                save_float_format(col->F[r], buf, sizeof buf);
                 out = buf;
             } else if (col->t == T_IVEC) {
                 snprintf(buf, sizeof buf, "%lld", (long long)col->J[r]);
@@ -206,7 +223,7 @@ static int table_delim_save(V *table, const char *path, char c) {
                     snprintf(buf, sizeof buf, "%lld", (long long)cell->j);
                     out = buf;
                 } else if (cell && cell->t == T_FLOAT) {
-                    snprintf(buf, sizeof buf, "%g", cell->f);
+                    save_float_format(cell->f, buf, sizeof buf);
                     out = buf;
                 }
             } else goto fail;

@@ -1,6 +1,6 @@
 # Shakti documentation
 
-Version **0.14.3**.
+Version **0.15.0**.
 
 Value type tags are layout 1: `char` is 4, `str` is 5, then vectors (`list[int]` … `list`), dict/table/function/datetime/time/input/subprocess, then matrices through `matrix[bool]`. IEFS writes that layout in header word 20 and rejects layout 0 (tag 4 was `str`); re-save those files.
 
@@ -33,6 +33,7 @@ Value type tags are layout 1: `char` is 4, `str` is 5, then vectors (`list[int]`
 - [`hdb` module](#hdb-module)
 - [`hld` module](#hld-module)
 - [`talk` module](#talk-module-macos)
+- [Security](#security)
 - [Third-party dependencies](#third-party-dependencies-and-optional-assets)
 
 ---
@@ -456,7 +457,7 @@ k : ktable(a:1, b:2)
   `waitpid` status, not a bash 0–255 exit code — test with
   `rc = 0` / `rc != 0`. Disabled when `SHAKTI_SAFE=1` or `SHAKTI_ALLOW_EXEC=0`.
   Not available on Windows or WASM builds.
-- `subprocess()` / `load(dir_with_run, …)` — spawn a directory `run` helper (PTY). Disabled when `SHAKTI_SAFE=1` or `SHAKTI_ALLOW_EXEC=0`. Untrusted `.ie` input is otherwise equivalent to an untrusted shell script; see README security notes.
+- `subprocess()` / `load(dir_with_run, …, exec:True)` — spawn a directory `run` helper (PTY). `load` on a directory runs nothing unless `exec:True` is passed; `__dir__:` is passed only to the child's environment. Disabled when `SHAKTI_SAFE=1` or `SHAKTI_ALLOW_EXEC=0`. Untrusted `.ie` input is otherwise equivalent to an untrusted shell script; see [Security](#security).
 - Parser nesting is capped at 40; interpreter call depth defaults to 3000 (`SHAKTI_CALL_MAX_DEPTH`).
 
 ## Process / REPL
@@ -1791,6 +1792,84 @@ Disable at build: `SHAKTI_TALK=0 make prod`.
 
 ---
 
+# Security
+
+Shakti trusts the `.ie` programs it runs: a script can read and write files, use the network, and (unless disabled) run processes. Treat an untrusted script like an untrusted shell script, and use OS isolation (containers, bwrap, landlock) for hostile code.
+
+## Safe mode
+
+| Setting | Effect |
+|---------|--------|
+| `SHAKTI_SAFE=1` | No process execution (`sh`, `subprocess`, `load(dir, exec:True)`); no network (`rest`, `ws`, `server_serve`, TCP/RDMA/multicast `ipc`, `sonicpi`); file access confined to `SHAKTI_FS_ROOT`. Unix-socket and shared-memory IPC still work. |
+| `SHAKTI_FS_ROOT=<dir>` | Root for safe-mode file access (default: working directory at first use). Paths are resolved with `realpath`, so symlinks pointing outside are rejected. `path_exists` / `path_isdir` / `path_isfile` return `False` outside the root. |
+| `SHAKTI_ALLOW_NET=1` | Re-enable network in safe mode. |
+| `SHAKTI_ALLOW_EXEC=0` | Disable process execution only (files and network unaffected). |
+
+Confined builtins: `read`, `write`, `readlines`, `listdir`, `walk`, `stat`, `mkdir`, `json_load`, `json_dump`, `load`, `save`, `iefs` save/load/map, `hdb.open`, `pdf_open`, `pdf_save`, `save_context`, `load_context`, `stem_*` file functions, `synth_load_sample`. The WASM host runs in safe mode; it must set `SHAKTI_ALLOW_NET=1` if a page needs `rest` / `ws`.
+
+## Module search path
+
+`import NAME` loads only `NAME.ie` (or `a/b.ie` for `import a.b`), searching in order:
+
+1. the running script's directory (absolute, symlinks resolved);
+2. the stdlib found next to the executable — first of `<exe>/lib`, `<exe>/../lib`, `<exe>/../../lib`, `<exe>/../lib/shakti`, `<exe>/../share/shakti/lib` that contains `json.ie`;
+3. `$SHAKTI_LIB`;
+4. the current directory — only when there is no script (REPL / `-c`), after the stdlib.
+
+## Resource limits
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SHAKTI_MAX_DECODE` | `1g` | Max decompressed size for in-memory decodes: `decompress`, `iefs.loads` (without `max_plain`), `hld.decode`. Accepts `k`/`m`/`g`. Clamped to the 16 GiB codec hard cap. `iefs.load` / `iefs.map` of local files keep the 64 GiB cap. |
+| `SHAKTI_REST_MAX_DECODE` | `268435456` | Max decoded size (bytes) of IEFS/HLD REST bodies. |
+| `SHAKTI_CALL_MAX_DEPTH` | `3000` | Interpreter call depth. |
+
+Also: parser nesting is capped at 40 (deeper input is a parse error, and the parser fits in under 256 KB of stack); expressions deeper than 4096 levels are rejected; f-string width and precision are capped at 100; `load_context` validates every length against the file size before allocating.
+
+## REST and WebSocket
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SHAKTI_REST_SERVER_TOKEN` | unset | Bearer token required by `rest.read`; required for non-loopback `rest.listen`. Compared in constant time; failures get `401`. |
+| `SHAKTI_REST_CLIENT_TOKEN` | unset | Bearer token the client sends, only to `https://` hosts in `SHAKTI_REST_TOKEN_HOSTS`. |
+| `SHAKTI_REST_TOKEN` | — | Deprecated fallback for both of the above (one-time warning). |
+| `SHAKTI_REST_ALLOWED_HOSTS` | unset | Extra `Host` names accepted by loopback listeners (e.g. behind a reverse proxy); `*` disables the check. |
+| `SHAKTI_REST_ALLOWED_ORIGINS` | unset | Exact Origins accepted by loopback listeners for state-changing requests and by `ws.accept`; `*` allows any. |
+| `SHAKTI_REST_READ_TIMEOUT_MS` | `10000` | Total time for `rest.read` (request line, headers and body). |
+| `SHAKTI_REST_TLS_TIMEOUT_MS` | `5000` | TLS handshake budget in `rest.accept`. |
+| `SHAKTI_NET_ALLOW_PRIVATE` | unset | `1` lets the REST client and `ws.connect` reach private / link-local / CGNAT addresses (loopback is always allowed). |
+| `SHAKTI_CURL` | unset | Absolute path to `curl`. |
+
+- Loopback `rest.listen` servers reject non-local `Host` headers (400, blocks DNS rebinding) and non-local `Origin` on non-GET/HEAD/OPTIONS requests (403, blocks CSRF). Requests without `Origin` (curl, scripts) are unaffected.
+- `ws.accept(conn, req, origins:[...])` rejects non-local Origins on loopback listeners unless allowed (`origins:["*"]` allows any). This blocks cross-site WebSocket hijacking.
+- IEFS/HLD bodies are decoded only when `Content-Type` is `application/iefs`, `application/x-iefs`, `application/hld` or `application/x-hld`. REST bodies are limited to 1 MB, which excludes IEFS format 3 (padded to 4 MB); use format 2.
+- The client runs curl with `-q` (ignores `~/.curlrc`) and a minimal environment (`LANG`/`LC_*`, `TZ`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, `LD_LIBRARY_PATH`). Proxies are not supported.
+- `ws.connect` applies the client address policy, requires a real `HTTP/1.1 101` response with a matching `Sec-WebSocket-Accept`, and verifies certificates (IP SANs for IP literals).
+
+## JSON-RPC daemon
+
+- The TLS handshake and headers must arrive within 5 s; the whole request within 10 s; response writes are bounded to 10 s. The server is single-threaded, so one idle client can still delay others by up to 5 s.
+- Non-loopback binds (`SHAKTI_SERVE_ALLOW_PUBLIC=1`) need TLS (`SHAKTI_TLS_CERT` / `SHAKTI_TLS_KEY`) unless `SHAKTI_SERVE_ALLOW_PLAINTEXT=1`.
+- Handler errors reach clients as `internal error`; set `SHAKTI_SERVE_DEBUG=1` to log details to stderr. A handler `content_type` with control characters, or a status outside 100–999, produces a 500.
+
+## IPC
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SHAKTI_IPC_TOKEN` | unset | Shared secret for TCP/RDMA IPC: mutual HMAC-SHA256 challenge-response on connect (token never sent; 5 s timeout). Required (with `SHAKTI_IPC_ALLOW_PUBLIC=1`) for non-loopback `ipc.listen`. Needs a TLS build. |
+| `SHAKTI_IPC_MCAST_KEY` | unset | Authenticates multicast datagrams (HMAC-SHA256 trailer with timestamp ±60 s and replay cache; payload limit shrinks by 48 bytes). All group members must share it. Needs a TLS build. |
+| `SHAKTI_IPC_MCAST_REPLY_RATE` | `100` | Max `ipc.reply` per second to one reply-to address (global cap 10×); `0` disables. |
+
+- `ipc.join` accepts only datagrams addressed to the joined group (on Linux the socket binds to the group); unicast to the port is dropped. A full reply-to table evicts the oldest entry; `ipc.reply` refuses multicast, broadcast, unspecified and port-0 destinations.
+- Shared memory: on Linux segments are named `shakti_ipc_<euid>_<name>`; attach refuses segments owned by another user, group/world-accessible, or smaller than the header. Sharing a channel between users is not supported.
+- The Unix-socket fallback directory `/tmp/shakti-<uid>` must be a real directory owned by the user with no group/other permissions.
+
+## Build hardening
+
+`SHAKTI_HARDEN=1` (default) adds `-fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2`, and on Linux `-fPIE -pie -Wl,-z,relro,-z,now,-z,noexecstack`. Append extra flags with `EXTRA_CFLAGS` / `EXTRA_LDFLAGS` instead of overriding `CFLAGS`. The Docker image (`alpine:3.22.6`) builds a static PIE without gfx/synth and sets `SHAKTI_LIB=/lib/shakti`. `lib/subspace/run` runs its container with `--network none` (opt in with `SHAKTI_SUBSPACE_NETWORK=1`), `--cap-drop ALL`, `no-new-privileges`, a read-only root, and pid/memory limits.
+
+---
+
 # Third-party dependencies and optional assets
 
 The standalone `shakti` binary has **no vendored C libraries** in the published tree.
@@ -1813,7 +1892,7 @@ The standalone `shakti` binary has **no vendored C libraries** in the published 
 | libomp | OpenMP (`brew install libomp`) | macOS |
 | libpthread, libm, librt, libdl | Runtime | Linux |
 
-`import rest` uses `curl` on `PATH` for HTTP client requests (not linked at build time). The in-process HTTP server uses BSD sockets; TLS uses OpenSSL when `SHAKTI_TLS=1`.
+`import rest` runs `curl` for HTTP client requests (not linked at build time). It is looked up at `SHAKTI_CURL` (absolute path) or `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/bin` — never via `PATH` — and run with `-q` and a minimal environment. The in-process HTTP server uses BSD sockets; TLS uses OpenSSL when `SHAKTI_TLS=1`.
 
 Disable optional components at build time: `SHAKTI_GFX=0`, `SHAKTI_SYNTH=0`, `SHAKTI_DSP=0`, `SHAKTI_STEM=0`, `SHAKTI_SONICPI=0`, `SHAKTI_PDF=0`, `SHAKTI_MIDI=0`, `SHAKTI_IEFS=0`, `SHAKTI_TALK=0`, `SHAKTI_IPC=0`, `SHAKTI_RDMA=0`, `SHAKTI_TLS=0`, `SHAKTI_WS=0`, `SHAKTI_SERVER=0`.
 

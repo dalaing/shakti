@@ -21,5 +21,11 @@ V *bi_rest_set_nonblock(V **a, int n);
 int rest_take_conn(int h, int *out_fd, void **out_ssl);
 int rest_peek_ws_key(int h, char *out, size_t out_cap);
 int rest_peek_ws_protocol(int h, char *out, size_t out_cap);
+/* Origin header captured by rest.read (empty if none); *loopback set when the listener is loopback-only. */
+int rest_peek_ws_origin(int h, char *out, size_t out_cap, int *loopback);
+struct sockaddr;
+/* Outbound address policy shared with ws.connect: private/link-local blocked unless SHAKTI_NET_ALLOW_PRIVATE=1. */
+int rest_addr_blocked(const struct sockaddr *sa);
+int rest_private_allowed(void);
 
 #endif

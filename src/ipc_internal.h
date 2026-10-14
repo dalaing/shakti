@@ -56,6 +56,10 @@
 #define IPC_SHM_HDR 256u
 #define IPC_SHM_FLAG_BCAST 1u
 #define IPC_BCAST_MAX_READERS 16
+#define IPC_MAC_LEN 32u
+#define IPC_MCAST_TRAILER (8u + 8u + IPC_MAC_LEN)
+#define IPC_MCAST_SEEN 64
+#define IPC_REPLY_RATE_SLOTS 16
 
 typedef enum {
     IPC_KIND_NONE = 0,
@@ -97,7 +101,15 @@ typedef struct {
     uint8_t addr[16];
     uint8_t cookie[8];
     time_t at;
+    uint64_t seq;
 } IpcReplyTo;
+
+typedef struct {
+    int af;
+    uint8_t addr[16];
+    double tokens;
+    struct timespec last;
+} IpcReplyRate;
 
 typedef struct {
     uint32_t magic;
@@ -146,6 +158,11 @@ typedef struct {
     int reply_fd;
     uint16_t reply_port;
     IpcReplyTo reply_to[IPC_REPLY_TO_MAX];
+    uint64_t reply_seq;
+    IpcReplyRate reply_rate[IPC_REPLY_RATE_SLOTS];
+    IpcReplyRate reply_rate_all;
+    uint8_t mcast_seen[IPC_MCAST_SEEN][16];
+    int mcast_seen_i;
     uint8_t sync_cookie[8];
     uint32_t sync_corr;
     int sync_cookie_set;
@@ -175,6 +192,13 @@ uint32_t ipc_rand_corr_seed(void);
 int ipc_valid_shm_user_name(const char *s);
 size_t ipc_posix_shm_name_max(void);
 int ipc_format_posix_shm_name(char *dst, size_t cap, const char *prefix, const char *user);
+int ipc_shm_chan_name(char *dst, size_t cap, const char *user);
+int ipc_shm_check_fd(int fd, size_t *size_out, char *err, size_t err_cap);
+int ipc_shm_create_fd(const char *posix, char *err, size_t err_cap);
+int ipc_hmac(const char *key, const unsigned char *data, size_t len, unsigned char out[IPC_MAC_LEN]);
+int ipc_mac_equal(const unsigned char *a, const unsigned char *b, size_t n);
+int ipc_random_bytes(unsigned char *buf, size_t n);
+const char *ipc_mcast_key(void);
 IpcHandle *ipc_slot(int h);
 IpcHandle *ipc_handle_at(int h);
 int ipc_alloc(void);
@@ -208,6 +232,8 @@ int ipc_mcast_publish(IpcHandle *s, const unsigned char *data, size_t len, char 
 int ipc_mcast_recv(IpcHandle *s, int block, char **out, size_t *out_len,
                    struct sockaddr_storage *peer, socklen_t *peer_len,
                    char *err, size_t err_cap);
+int ipc_mcast_send_reply(IpcHandle *s, int af, uint16_t port, const uint8_t addr[16],
+                         const unsigned char *data, size_t len, char *err, size_t err_cap);
 int ipc_reply_to_store(IpcHandle *s, uint32_t corr, int af, uint16_t port,
                        const uint8_t addr[16], const uint8_t cookie[8]);
 int ipc_reply_to_store_peer(IpcHandle *s, uint32_t corr, const struct sockaddr_storage *peer,

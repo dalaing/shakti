@@ -2,7 +2,7 @@
 
 [Discord](https://discord.gg/PkKwUk9Tf) · [tree-sitter grammar](https://github.com/avillega/tree-sitter-shakti) (unofficial)
 
-Small interpreted language (0.14.3) with vectors, matrices, tables, decorators,
+Small interpreted language (0.15.0) with vectors, matrices, tables, decorators,
 each (`f@`), table joins (`,` / `union` / `outer`), asof helpers, and optional SQL,
 graph, IPC, REST, gfx, pyplot, jupyter, synth, input, MIDI, PDF, DSP, Sonic Pi,
 and IEFS modules.
@@ -106,17 +106,25 @@ scalar `for`/`while` micros stay in the AST interpreter (`src/eval.c`).
 
 ## security
 
-Shakti trusts the `.ie` programs it runs. A script can spawn `subprocess()`,
-run `sh(cmd)`, read/write files, and use network builtins — treat untrusted
-input like an untrusted shell script.
+Shakti trusts the `.ie` programs it runs. A script can read/write files, use the
+network, and spawn `subprocess()` / `sh(cmd)` — treat untrusted input like an
+untrusted shell script, and use OS isolation (containers, bwrap) for hostile code.
 
-- Set `SHAKTI_SAFE=1` (or `SHAKTI_ALLOW_EXEC=0`) to disable `subprocess()` and
-  `sh()`.
-- Parser nesting and interpreter recursion are capped (defaults 40 / 3000;
-  override call depth with `SHAKTI_CALL_MAX_DEPTH`).
-- REST temps use `$XDG_RUNTIME_DIR` / `$TMPDIR` when set, mode `0600`.
-- Non-loopback `rest.listen` / `ipc.listen` require `SHAKTI_REST_ALLOW_PUBLIC=1` /
-  `SHAKTI_IPC_ALLOW_PUBLIC=1`.
+- `SHAKTI_SAFE=1` disables process execution and network, and confines file
+  access to `SHAKTI_FS_ROOT` (default: working directory). `SHAKTI_ALLOW_NET=1`
+  re-enables network; `SHAKTI_ALLOW_EXEC=0` disables only process execution.
+- `import` searches the script's directory, then the stdlib next to the binary,
+  then `SHAKTI_LIB` — not the current directory (except in the REPL / `-c`).
+- `load(dir)` never runs a directory's `./run` helper unless `exec:True` is passed.
+- In-memory decodes are capped at 1 GiB (`SHAKTI_MAX_DECODE`); parser nesting,
+  call depth (`SHAKTI_CALL_MAX_DEPTH`, default 3000) and f-string widths are capped.
+- Loopback REST/WebSocket servers reject non-local `Host` / `Origin`. Tokens:
+  `SHAKTI_REST_SERVER_TOKEN`, `SHAKTI_REST_CLIENT_TOKEN`, `SHAKTI_IPC_TOKEN`.
+- Non-loopback `rest.listen` / `ipc.listen` / `server_serve` require
+  `SHAKTI_REST_ALLOW_PUBLIC=1` (+ token) / `SHAKTI_IPC_ALLOW_PUBLIC=1` (+ token) /
+  `SHAKTI_SERVE_ALLOW_PUBLIC=1` (+ TLS).
+
+Full list of settings: [doc.md#security](doc.md#security).
 
 **`examples/example.ie` is a merged copy-paste catalog** — do **not** run the whole file as one program.
 It concatenates interactive demos (`gfx`, `synth`, `input`, …). Running it end-to-end

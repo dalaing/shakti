@@ -1,9 +1,13 @@
 /* tls — OpenSSL transport for long-lived sockets (wss, rest.listen_tls). */
 #include "tls.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <openssl/err.h>
@@ -20,7 +24,7 @@ static void tls_harden_ctx(SSL_CTX *ctx) {
 #endif
 }
 
-void tls_init(void) {
+void shakti_tls_init(void) {
     if (g_tls_inited) return;
     g_tls_inited = 1;
     OPENSSL_init_ssl(0, NULL);
@@ -43,8 +47,19 @@ static void tls_clear_err(void) {
     }
 }
 
-void *tls_connect(int fd, const char *hostname, int insecure) {
-    tls_init();
+static long tls_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static int tls_is_ip_literal(const char *s) {
+    unsigned char buf[16];
+    return inet_pton(AF_INET, s, buf) == 1 || inet_pton(AF_INET6, s, buf) == 1;
+}
+
+void *shakti_tls_connect(int fd, const char *hostname, int insecure) {
+    shakti_tls_init();
     if (fd < 0 || !g_client_ctx) return NULL;
     SSL *ssl = SSL_new(g_client_ctx);
     if (!ssl) return NULL;
@@ -52,14 +67,24 @@ void *tls_connect(int fd, const char *hostname, int insecure) {
         SSL_free(ssl);
         return NULL;
     }
-    if (hostname && hostname[0])
+    int ip = hostname && hostname[0] && tls_is_ip_literal(hostname);
+    if (hostname && hostname[0] && !ip)
         SSL_set_tlsext_host_name(ssl, hostname);
     if (insecure) {
         SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
     } else {
         SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
-        if (hostname && hostname[0])
-            SSL_set1_host(ssl, hostname);
+        int ok;
+        if (!hostname || !hostname[0])
+            ok = 0;
+        else if (ip)
+            ok = X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), hostname) == 1;
+        else
+            ok = SSL_set1_host(ssl, hostname) == 1;
+        if (!ok) {
+            SSL_free(ssl);
+            return NULL;
+        }
     }
     tls_clear_err();
     if (SSL_connect(ssl) != 1) {
@@ -69,8 +94,8 @@ void *tls_connect(int fd, const char *hostname, int insecure) {
     return ssl;
 }
 
-void *tls_server_ctx(const char *cert_path, const char *key_path) {
-    tls_init();
+void *shakti_tls_server_ctx(const char *cert_path, const char *key_path) {
+    shakti_tls_init();
     if (!cert_path || !key_path || !cert_path[0] || !key_path[0]) return NULL;
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) return NULL;
@@ -90,27 +115,55 @@ void *tls_server_ctx(const char *cert_path, const char *key_path) {
     return ctx;
 }
 
-void tls_server_ctx_free(void *ctx) {
+void shakti_tls_server_ctx_free(void *ctx) {
     if (ctx) SSL_CTX_free((SSL_CTX *)ctx);
 }
 
-void *tls_accept(int fd, void *server_ctx) {
-    if (fd < 0 || !server_ctx) return NULL;
+void *shakti_tls_accept_timeout(int fd, void *server_ctx, int timeout_ms) {
+    if (fd < 0 || !server_ctx || timeout_ms <= 0) return NULL;
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) return NULL;
     SSL *ssl = SSL_new((SSL_CTX *)server_ctx);
-    if (!ssl) return NULL;
-    if (SSL_set_fd(ssl, fd) != 1) {
-        SSL_free(ssl);
+    if (!ssl || SSL_set_fd(ssl, fd) != 1) {
+        if (ssl) SSL_free(ssl);
+        fcntl(fd, F_SETFL, fl);
         return NULL;
     }
+    long deadline = tls_now_ms() + timeout_ms;
+    int ok = 0;
     tls_clear_err();
-    if (SSL_accept(ssl) != 1) {
+    for (;;) {
+        int r = SSL_accept(ssl);
+        if (r == 1) {
+            ok = 1;
+            break;
+        }
+        int e = SSL_get_error(ssl, r);
+        short ev;
+        if (e == SSL_ERROR_WANT_READ) ev = POLLIN;
+        else if (e == SSL_ERROR_WANT_WRITE) ev = POLLOUT;
+        else if (e == SSL_ERROR_SYSCALL && errno == EINTR) continue;
+        else break;
+        long left = deadline - tls_now_ms();
+        if (left <= 0) break;
+        struct pollfd pfd = {.fd = fd, .events = ev, .revents = 0};
+        int pr = poll(&pfd, 1, (int)left);
+        if (pr < 0 && errno == EINTR) continue;
+        if (pr <= 0) break;
+    }
+    fcntl(fd, F_SETFL, fl);
+    if (!ok) {
         SSL_free(ssl);
         return NULL;
     }
     return ssl;
 }
 
-ssize_t tls_read(void *ssl, void *buf, size_t n) {
+void *shakti_tls_accept(int fd, void *server_ctx) {
+    return shakti_tls_accept_timeout(fd, server_ctx, 5000);
+}
+
+ssize_t shakti_tls_read(void *ssl, void *buf, size_t n) {
     if (!ssl || !buf) return -1;
     for (;;) {
         int r = SSL_read((SSL *)ssl, buf, (int)n);
@@ -126,7 +179,7 @@ ssize_t tls_read(void *ssl, void *buf, size_t n) {
     }
 }
 
-ssize_t tls_write(void *ssl, const void *buf, size_t n) {
+ssize_t shakti_tls_write(void *ssl, const void *buf, size_t n) {
     if (!ssl) return -1;
     if (!buf && n) return -1;
     size_t sent = 0;
@@ -147,18 +200,18 @@ ssize_t tls_write(void *ssl, const void *buf, size_t n) {
     return (ssize_t)sent;
 }
 
-int tls_pending(void *ssl) {
+int shakti_tls_pending(void *ssl) {
     if (!ssl) return 0;
     return SSL_pending((SSL *)ssl);
 }
 
-void tls_free(void *ssl) {
+void shakti_tls_free(void *ssl) {
     if (!ssl) return;
     SSL_shutdown((SSL *)ssl);
     SSL_free((SSL *)ssl);
 }
 
-void tls_close(void *ssl, int fd) {
-    tls_free(ssl);
+void shakti_tls_close(void *ssl, int fd) {
+    shakti_tls_free(ssl);
     if (fd >= 0) close(fd);
 }

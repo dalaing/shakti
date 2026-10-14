@@ -40,6 +40,22 @@ size_t ipc_bcast_total_size(size_t ring_cap, uint32_t max_readers) {
 
 #else
 
+/* Ring positions live in [0, wrap), wrap a multiple of cap, so pos % cap stays continuous. */
+static uint32_t ipc_shm_ring_wrap(uint32_t cap) {
+    return (UINT32_MAX / cap) * cap;
+}
+
+static uint32_t ipc_shm_ring_add(uint32_t pos, uint32_t n, uint32_t cap) {
+    return (uint32_t)(((uint64_t)pos + n) % ipc_shm_ring_wrap(cap));
+}
+
+static uint32_t ipc_shm_ring_dist(uint32_t from, uint32_t to, uint32_t cap) {
+    uint32_t wrap = ipc_shm_ring_wrap(cap);
+    from %= wrap;
+    to %= wrap;
+    return to >= from ? to - from : to + (wrap - from);
+}
+
 static void ipc_shm_ring_copy_out(uint8_t *ring, uint32_t cap, uint32_t pos, void *dst, uint32_t n) {
     uint32_t off = pos % cap;
     uint32_t first = cap - off;
@@ -73,7 +89,7 @@ int ipc_shm_push(IpcShmHdr *hdr, int which, const void *data, uint32_t len, uint
     uint8_t *ring = (uint8_t *)hdr + IPC_SHM_HDR + (size_t)which * (size_t)cap;
     uint32_t head = atomic_load_explicit(headp, memory_order_relaxed);
     uint32_t tail = atomic_load_explicit(tailp, memory_order_acquire);
-    uint32_t used = head - tail;
+    uint32_t used = ipc_shm_ring_dist(tail, head, cap);
     uint32_t need = len + 4;
     if (used > cap || used + need > cap) {
         snprintf(err, err_cap, "ipc: shm ring full");
@@ -81,8 +97,8 @@ int ipc_shm_push(IpcShmHdr *hdr, int which, const void *data, uint32_t len, uint
     }
     uint32_t be = htonl(len);
     ipc_shm_ring_copy_in(ring, cap, head, &be, 4);
-    ipc_shm_ring_copy_in(ring, cap, head + 4, data, len);
-    atomic_store_explicit(headp, head + need, memory_order_release);
+    ipc_shm_ring_copy_in(ring, cap, ipc_shm_ring_add(head, 4, cap), data, len);
+    atomic_store_explicit(headp, ipc_shm_ring_add(head, need, cap), memory_order_release);
     atomic_fetch_add_explicit(genp, 1, memory_order_release);
 #if defined(__linux__)
     syscall(SYS_futex, (int *)genp, FUTEX_WAKE, 1, NULL, NULL, 0);
@@ -109,8 +125,9 @@ int ipc_shm_pop(IpcShmHdr *hdr, int which, int block, int timeout_ms, uint32_t c
         uint32_t head = atomic_load_explicit(headp, memory_order_acquire);
         uint32_t tail = atomic_load_explicit(tailp, memory_order_relaxed);
         if (head != tail) {
-            uint32_t used = head - tail;
+            uint32_t used = ipc_shm_ring_dist(tail, head, cap);
             if (used < 4 || used > cap) {
+                atomic_store_explicit(tailp, head, memory_order_release);
                 snprintf(err, err_cap, "ipc: shm ring corrupt");
                 return -1;
             }
@@ -118,6 +135,7 @@ int ipc_shm_pop(IpcShmHdr *hdr, int which, int block, int timeout_ms, uint32_t c
             ipc_shm_ring_copy_out(ring, cap, tail, &be, 4);
             uint32_t len = ntohl(be);
             if (len > IPC_MAX_MSG || 4u + len > used || 4u + len > cap) {
+                atomic_store_explicit(tailp, head, memory_order_release);
                 snprintf(err, err_cap, "ipc: shm bad frame len");
                 return -1;
             }
@@ -126,9 +144,9 @@ int ipc_shm_pop(IpcShmHdr *hdr, int which, int block, int timeout_ms, uint32_t c
                 snprintf(err, err_cap, "ipc: oom");
                 return -1;
             }
-            ipc_shm_ring_copy_out(ring, cap, tail + 4, msg, len);
+            ipc_shm_ring_copy_out(ring, cap, ipc_shm_ring_add(tail, 4, cap), msg, len);
             msg[len] = 0;
-            atomic_store_explicit(tailp, tail + 4 + len, memory_order_release);
+            atomic_store_explicit(tailp, ipc_shm_ring_add(tail, 4 + len, cap), memory_order_release);
             *out = msg;
             *out_len = len;
             return 0;
@@ -190,15 +208,13 @@ int ipc_shm_send_side(IpcHandle *s, const void *data, size_t len, char *err, siz
         uint32_t max_r = s->shm_max_readers ? s->shm_max_readers : bh->max_readers;
         atomic_uint *actives = (atomic_uint *)((uint8_t *)bh + IPC_SHM_HDR + cap);
         atomic_uint *tails = actives + max_r;
-        uint32_t oldest = head;
-        int any = 0;
+        uint32_t used = 0;
         for (uint32_t r = 0; r < max_r; r++) {
             if (!atomic_load_explicit(&actives[r], memory_order_acquire)) continue;
             uint32_t t = atomic_load_explicit(&tails[r], memory_order_acquire);
-            if (!any || (int32_t)(t - oldest) < 0) oldest = t;
-            any = 1;
+            uint32_t d = ipc_shm_ring_dist(t, head, cap);
+            if (d > used) used = d;
         }
-        uint32_t used = any ? head - oldest : 0;
         uint32_t need = (uint32_t)len + 4;
         if (used > cap || used + need > cap) {
             snprintf(err, err_cap, "ipc: shm ring full");
@@ -206,8 +222,8 @@ int ipc_shm_send_side(IpcHandle *s, const void *data, size_t len, char *err, siz
         }
         uint32_t be = htonl((uint32_t)len);
         ipc_shm_ring_copy_in(ring, cap, head, &be, 4);
-        ipc_shm_ring_copy_in(ring, cap, head + 4, data, (uint32_t)len);
-        atomic_store_explicit(&bh->head, head + 4 + (uint32_t)len, memory_order_release);
+        ipc_shm_ring_copy_in(ring, cap, ipc_shm_ring_add(head, 4, cap), data, (uint32_t)len);
+        atomic_store_explicit(&bh->head, ipc_shm_ring_add(head, need, cap), memory_order_release);
         atomic_fetch_add_explicit(&bh->gen, 1, memory_order_release);
 #if defined(__linux__)
         syscall(SYS_futex, (int *)&bh->gen, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
@@ -250,7 +266,7 @@ int ipc_shm_recv_side(IpcHandle *s, int block, int timeout_ms,
             uint32_t head = atomic_load_explicit(&bh->head, memory_order_acquire);
             uint32_t tail = atomic_load_explicit(&tails[s->shm_side], memory_order_relaxed);
             if (head != tail) {
-                uint32_t used = head - tail;
+                uint32_t used = ipc_shm_ring_dist(tail, head, cap);
                 if (used < 4 || used > cap) {
                     atomic_store_explicit(&tails[s->shm_side], head, memory_order_release);
                     snprintf(err, err_cap, "ipc: shm broadcast: reader overrun");
@@ -269,9 +285,10 @@ int ipc_shm_recv_side(IpcHandle *s, int block, int timeout_ms,
                     snprintf(err, err_cap, "ipc: oom");
                     return -1;
                 }
-                ipc_shm_ring_copy_out(ring, cap, tail + 4, msg, len);
+                ipc_shm_ring_copy_out(ring, cap, ipc_shm_ring_add(tail, 4, cap), msg, len);
                 msg[len] = 0;
-                atomic_store_explicit(&tails[s->shm_side], tail + 4 + len, memory_order_release);
+                atomic_store_explicit(&tails[s->shm_side], ipc_shm_ring_add(tail, 4 + len, cap),
+                                      memory_order_release);
                 *out = msg;
                 *out_len = len;
                 return 0;
@@ -299,6 +316,51 @@ int ipc_shm_recv_side(IpcHandle *s, int block, int timeout_ms,
     return ipc_shm_pop(hdr, which, block, timeout_ms, s->shm_cap, out, out_len, err, err_cap);
 }
 
+int ipc_shm_chan_name(char *dst, size_t cap, const char *user) {
+#if defined(__linux__)
+    char prefix[48];
+    snprintf(prefix, sizeof prefix, "/shakti_ipc_%lu_", (unsigned long)geteuid());
+    return ipc_format_posix_shm_name(dst, cap, prefix, user);
+#else
+    return ipc_format_posix_shm_name(dst, cap, "/shakti_ipc_", user);
+#endif
+}
+
+int ipc_shm_check_fd(int fd, size_t *size_out, char *err, size_t err_cap) {
+    struct stat sb;
+    if (fstat(fd, &sb) != 0) {
+        snprintf(err, err_cap, "ipc: shm fstat: %s", strerror(errno));
+        return -1;
+    }
+    if (sb.st_uid != geteuid()) {
+        snprintf(err, err_cap, "ipc: shm segment is owned by another user");
+        return -1;
+    }
+    if ((sb.st_mode & 077) != 0) {
+        snprintf(err, err_cap, "ipc: shm segment has unsafe permissions (%03o)", (unsigned)(sb.st_mode & 0777));
+        return -1;
+    }
+    if (sb.st_size < (off_t)IPC_SHM_HDR || (uint64_t)sb.st_size > IPC_MAX_SHM) {
+        snprintf(err, err_cap, "ipc: shm segment size out of range");
+        return -1;
+    }
+    *size_out = (size_t)sb.st_size;
+    return 0;
+}
+
+int ipc_shm_create_fd(const char *posix, char *err, size_t err_cap) {
+    shm_unlink(posix);
+    int fd = shm_open(posix, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) {
+        if (errno == EEXIST)
+            snprintf(err, err_cap, "ipc: shm name already in use by another user (%s)", posix);
+        else
+            snprintf(err, err_cap, "ipc: shm_create: %s", strerror(errno));
+        return -1;
+    }
+    return fd;
+}
+
 int ipc_shm_chan_open(const char *user_name, size_t size, int create,
                       void **ptr_out, size_t *size_out, char *posix_out, size_t posix_cap,
                       int *owner, char *err, size_t err_cap) {
@@ -306,7 +368,7 @@ int ipc_shm_chan_open(const char *user_name, size_t size, int create,
         snprintf(err, err_cap, "ipc: bad shm name");
         return -1;
     }
-    if (ipc_format_posix_shm_name(posix_out, posix_cap, "/shakti_ipc_", user_name) != 0) {
+    if (ipc_shm_chan_name(posix_out, posix_cap, user_name) != 0) {
         snprintf(err, err_cap, "ipc: shm name too long (max %zu incl. prefix)",
                  ipc_posix_shm_name_max());
         return -1;
@@ -318,12 +380,8 @@ int ipc_shm_chan_open(const char *user_name, size_t size, int create,
     int fd;
     size_t map_size = size;
     if (create) {
-        shm_unlink(posix_out);
-        fd = shm_open(posix_out, O_RDWR | O_CREAT | O_EXCL, 0600);
-        if (fd < 0) {
-            snprintf(err, err_cap, "ipc: shm_create: %s", strerror(errno));
-            return -1;
-        }
+        fd = ipc_shm_create_fd(posix_out, err, err_cap);
+        if (fd < 0) return -1;
         if (ftruncate(fd, (off_t)map_size) != 0) {
             snprintf(err, err_cap, "ipc: shm ftruncate: %s", strerror(errno));
             close(fd);
@@ -338,18 +396,10 @@ int ipc_shm_chan_open(const char *user_name, size_t size, int create,
             return -1;
         }
         *owner = 0;
-        struct stat sb;
-        if (fstat(fd, &sb) != 0) {
-            snprintf(err, err_cap, "ipc: shm fstat: %s", strerror(errno));
+        if (ipc_shm_check_fd(fd, &map_size, err, err_cap) != 0) {
             close(fd);
             return -1;
         }
-        if (sb.st_size < 0 || (uint64_t)sb.st_size > IPC_MAX_SHM) {
-            snprintf(err, err_cap, "ipc: shm size too large");
-            close(fd);
-            return -1;
-        }
-        map_size = (size_t)sb.st_size;
     }
     void *ptr = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);

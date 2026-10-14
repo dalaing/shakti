@@ -72,6 +72,12 @@ static int i64_span_promotes(const int64_t *xs, const int64_t *ys, int64_t n,
     }
     return 0;
 }
+static void i64_arith_f(double *r, const int64_t *a, int64_t xa, const int64_t *b, int64_t yb, int64_t n, int op) {
+    for (int64_t i = 0; i < n; i++) {
+        double x = (double)(a ? a[i] : xa), y = (double)(b ? b[i] : yb);
+        r[i] = op == OP_ADD ? x + y : op == OP_SUB ? x - y : x * y;
+    }
+}
 V *mat_binop(V *a, V *b, int op) {
     if (!is_mat_t(a->t) && !is_mat_t(b->t)) return NULL;
     if (a->t == T_BMAT || b->t == T_BMAT)
@@ -90,7 +96,11 @@ V *mat_binop(V *a, V *b, int op) {
             mat_fmat_binop_scalar(r->F, a->F, y, ne, op);
         else if (out_t == T_IMAT && a->t == T_IMAT) {
             int64_t yi = b->t == T_INT ? b->j : (int64_t)y;
-            mat_imat_binop_scalar(r->J, a->J, yi, ne, op);
+            if (mat_imat_binop_scalar(r->J, a->J, yi, ne, op)) {
+                v_free(r);
+                r = v_fmat(rows, cols);
+                i64_arith_f(r->F, a->J, 0, NULL, yi, ne, op);
+            }
         } else {
             for (int64_t i = 0; i < ne; i++) {
                 double x = a->t == T_IMAT ? (double)a->J[i] : a->F[i];
@@ -139,7 +149,11 @@ V *mat_binop(V *a, V *b, int op) {
             }
             V *out = v_imat(rows, cols);
             int64_t x = a->j;
-            mat_imat_binop_scalar_rev(out->J, x, b->J, ne, op);
+            if (mat_imat_binop_scalar_rev(out->J, x, b->J, ne, op)) {
+                v_free(out);
+                out = v_fmat(rows, cols);
+                i64_arith_f(out->F, NULL, x, b->J, 0, ne, op);
+            }
             v_free(r);
             return out;
         }
@@ -158,8 +172,14 @@ V *mat_binop(V *a, V *b, int op) {
     V *r = out_t == T_FMAT ? (V *)v_fmat(a->n, mat_cols(a)) : (V *)v_imat(a->n, mat_cols(a));
     if (out_t == T_FMAT && a->t == T_FMAT && b->t == T_FMAT)
         mat_fmat_binop_mm(r->F, a->F, b->F, ne, op);
-    else if (out_t == T_IMAT && a->t == T_IMAT && b->t == T_IMAT)
-        mat_imat_binop_mm(r->J, a->J, b->J, ne, op);
+    else if (out_t == T_IMAT && a->t == T_IMAT && b->t == T_IMAT) {
+        if (mat_imat_binop_mm(r->J, a->J, b->J, ne, op)) {
+            int64_t rows = a->n, cols = mat_cols(a);
+            v_free(r);
+            r = v_fmat(rows, cols);
+            i64_arith_f(r->F, a->J, 0, b->J, 0, ne, op);
+        }
+    }
     else {
         for (int64_t i = 0; i < ne; i++) {
             if (out_t == T_FMAT) {
@@ -205,7 +225,11 @@ V *vec_binop(V *a, V *b, int op) {
         int64_t n = a->n;
         V *r = v_ivec(n);
         if (op == OP_ADD || op == OP_SUB || op == OP_MUL) {
-            mat_imat_binop_mm(r->J, a->J, b->J, n, op);
+            if (mat_imat_binop_mm(r->J, a->J, b->J, n, op)) {
+                v_free(r);
+                r = v_fvec(n);
+                i64_arith_f(r->F, a->J, 0, b->J, 0, n, op);
+            }
             return r;
         }
         const int64_t *aj = a->J, *bj = b->J;
@@ -246,7 +270,11 @@ V *vec_binop(V *a, V *b, int op) {
         int64_t n = a->n, y = b->j;
         V *r = v_ivec(n);
         if (op == OP_ADD || op == OP_SUB || op == OP_MUL) {
-            mat_imat_binop_scalar(r->J, a->J, y, n, op);
+            if (mat_imat_binop_scalar(r->J, a->J, y, n, op)) {
+                v_free(r);
+                r = v_fvec(n);
+                i64_arith_f(r->F, a->J, 0, NULL, y, n, op);
+            }
             return r;
         }
         const int64_t *aj = a->J;
@@ -274,9 +302,9 @@ V *vec_binop(V *a, V *b, int op) {
         const unsigned char *ac = a->B;
         unsigned char *rc = r->B;
         switch (op) {
-        case OP_ADD: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] + y; break;
-        case OP_SUB: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] - y; break;
-        case OP_MUL: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] * y; break;
+        case OP_ADD: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] + (uint64_t)y; break;
+        case OP_SUB: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] - (uint64_t)y; break;
+        case OP_MUL: for (int64_t i = 0; i < n; i++) rc[i] = ac[i] * (uint64_t)y; break;
         case OP_FLOORDIV: for (int64_t i = 0; i < n; i++) rc[i] = y ? ac[i] / y : 0; break;
         case OP_MOD: for (int64_t i = 0; i < n; i++) rc[i] = y ? ac[i] % y : 0; break;
         default: break;
@@ -287,7 +315,11 @@ V *vec_binop(V *a, V *b, int op) {
         int64_t n = b->n, x = a->j;
         V *r = v_ivec(n);
         if (op == OP_ADD || op == OP_SUB || op == OP_MUL) {
-            mat_imat_binop_scalar_rev(r->J, x, b->J, n, op);
+            if (mat_imat_binop_scalar_rev(r->J, x, b->J, n, op)) {
+                v_free(r);
+                r = v_fvec(n);
+                i64_arith_f(r->F, NULL, x, b->J, 0, n, op);
+            }
             return r;
         }
         const int64_t *bj = b->J;
@@ -315,9 +347,9 @@ V *vec_binop(V *a, V *b, int op) {
         const unsigned char *bc = b->B;
         unsigned char *rc = r->B;
         switch (op) {
-        case OP_ADD: for (int64_t i = 0; i < n; i++) rc[i] = x + bc[i]; break;
-        case OP_SUB: for (int64_t i = 0; i < n; i++) rc[i] = x - bc[i]; break;
-        case OP_MUL: for (int64_t i = 0; i < n; i++) rc[i] = x * bc[i]; break;
+        case OP_ADD: for (int64_t i = 0; i < n; i++) rc[i] = (uint64_t)x + bc[i]; break;
+        case OP_SUB: for (int64_t i = 0; i < n; i++) rc[i] = (uint64_t)x - bc[i]; break;
+        case OP_MUL: for (int64_t i = 0; i < n; i++) rc[i] = (uint64_t)x * bc[i]; break;
         case OP_FLOORDIV: for (int64_t i = 0; i < n; i++) rc[i] = bc[i] ? x / bc[i] : 0; break;
         case OP_MOD: for (int64_t i = 0; i < n; i++) rc[i] = bc[i] ? x % bc[i] : 0; break;
         default: break;

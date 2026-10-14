@@ -16,6 +16,7 @@ static V *each_invoke(V *fn, V **args, int nargs, Env *e) {
     return r;
 }
 static V *each_get_seq(V *v, int64_t i) {
+    if (v->t != T_STR && i >= v->n) return v_nil();
     if (v->t == T_IVEC) return v_int(v->J[i]);
     if (v->t == T_FVEC) return v_float(v->F[i]);
     if (v->t == T_BVEC) return v_bool(v->B[i] != 0);

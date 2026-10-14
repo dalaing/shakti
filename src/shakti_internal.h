@@ -7,6 +7,9 @@
 #ifndef SHAKTI_PARSE_MAX_DEPTH
 #define SHAKTI_PARSE_MAX_DEPTH 40
 #endif
+#ifndef SHAKTI_EXPR_MAX_DEPTH
+#define SHAKTI_EXPR_MAX_DEPTH  4096
+#endif
 #ifndef SHAKTI_CALL_MAX_DEPTH
 #define SHAKTI_CALL_MAX_DEPTH  3000
 #endif
@@ -34,6 +37,11 @@
 
 extern char g_lib_path[4096];
 extern char g_script_dir[4096];
+void shakti_set_file_vars(Env *e, const char *path);
+int shakti_safe_mode(void);
+int shakti_exec_allowed(void);
+int shakti_net_allowed(void);
+int shakti_fs_check(const char *path, int write, char *err, size_t err_cap);
 
 void shakti_oom(const char *where);
 void *x_malloc(size_t sz, const char *where);
@@ -72,6 +80,16 @@ int env_update(Env *e, const char *name, V *val);
 FILE *fopen_regular(const char *path, char *err, size_t err_cap);
 V *do_import(const char *name, Env *e);
 V *require_sql(Env *e);
+
+/* Call-site `*expr` parses as N_UNOP with this op. */
+#define OP_SPLAT OP_MUL
+
+void shakti_bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V **kwv, int nkw);
+V *shakti_call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw, Env *e);
+int shakti_is_class(V *v);
+int shakti_is_instance(V *v);
+V *shakti_instance_str(V *v, Env *e);
+int shakti_isinstance(V *obj, V *cls);
 
 int shakti_prog_silent_last(Node *prog);
 void run_repl(Env *e);

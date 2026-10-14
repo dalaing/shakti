@@ -165,6 +165,8 @@ V *hld_decode(const unsigned char *buf, size_t len) {
         return iefs_decode(payload, wire_len);
     }
 
+    if ((size_t)raw_len > shakti_decode_limit())
+        return v_err("hld_decode: payload too large (SHAKTI_MAX_DECODE)");
     if (shakti_decompress_max(codec, payload, wire_len, &plain, &plain_len, (size_t)raw_len,
                               err, sizeof err) != 0)
         return v_err(err[0] ? err : "hld_decode: decompress failed");

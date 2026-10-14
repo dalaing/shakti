@@ -7,6 +7,7 @@
 #include "iefs_map.h"
 #endif
 #include <stdlib.h>
+#include <limits.h>
 
 void shakti_clear_flow(void) {
     g_breaking = 0;
@@ -28,14 +29,27 @@ static V *assign_map_oom(V *a, V *b, V *c, V *d) {
     if (d) v_free(d);
     return v_nil();
 }
+#define FSTR_FMT_MAX_FIELD 100
+static int fstr_fmt_field(const char **pp) {
+    const char *p = *pp;
+    int v = 0;
+    while (*p >= '0' && *p <= '9') {
+        if (v <= FSTR_FMT_MAX_FIELD) v = v * 10 + (*p - '0');
+        p++;
+    }
+    *pp = p;
+    return v <= FSTR_FMT_MAX_FIELD;
+}
+/* 1 = valid, 0 = malformed, -1 = width or precision above FSTR_FMT_MAX_FIELD. */
 static int fstr_fmt_valid(const char *spec) {
     const char *p = spec;
+    int ok = 1;
     if (!p || !*p || strlen(spec) > 32) return 0;
     while (*p == '-' || *p == '+' || *p == ' ' || *p == '0' || *p == '#') p++;
-    while (*p >= '0' && *p <= '9') p++;
+    if (!fstr_fmt_field(&p)) ok = -1;
     if (*p == '.') {
         p++;
-        while (*p >= '0' && *p <= '9') p++;
+        if (!fstr_fmt_field(&p)) ok = -1;
     }
     switch (*p) {
     case 'e': case 'E': case 'f': case 'F':
@@ -45,7 +59,7 @@ static int fstr_fmt_valid(const char *spec) {
     default:
         return 0;
     }
-    return *p == '\0';
+    return *p == '\0' ? ok : 0;
 }
 static int slice_span_count(int64_t start, int64_t stop, int64_t step, int64_t *count) {
     int64_t span, sm1, q, nstep;
@@ -440,7 +454,7 @@ static int push_list_vals(V **vals, int n) {
     for (i = 0; i < n; i++) {
         V **tmp;
         int cap;
-        if (!vals[i] || vals[i]->t != T_LIST) continue;
+        if (!vals[i] || (vals[i]->t != T_LIST && vals[i]->t != T_IVEC)) continue;
         if (g_list_arg_n >= g_list_arg_cap) {
             cap = g_list_arg_cap ? g_list_arg_cap * 2 : 64;
             tmp = realloc(g_list_arg_stack, (size_t)cap * sizeof(V *));
@@ -467,8 +481,13 @@ static int list_is_call_arg(V *obj) {
 static int cow_list_arg(Env *e, Node *slot, V **objp) {
     V *obj = *objp;
     V *copy;
-    if (!obj || obj->t != T_LIST || obj->rc <= 2 || list_is_call_arg(obj)) return 0;
-    copy = list_shallow(obj);
+    if (!obj || (obj->t != T_LIST && obj->t != T_IVEC) || obj->rc <= 2 || list_is_call_arg(obj)) return 0;
+    if (obj->t == T_IVEC) {
+        copy = v_ivec(obj->n);
+        if (obj->n > 0 && obj->J)
+            memcpy(copy->J, obj->J, (size_t)obj->n * sizeof(int64_t));
+    } else
+        copy = list_shallow(obj);
     if (slot && slot->type == N_NAME && slot->sval) {
         if (!env_update(e, slot->sval, copy))
             env_set(e, slot->sval, copy);
@@ -534,6 +553,144 @@ V *eval_fn(Node *body, Env *e) {
     V *r = eval(body, e);
     g_call_depth--;
     return r;
+}
+
+static V *seq_item(V *v, int64_t i) {
+    switch (v->t) {
+    case T_LIST: return v->L[i] ? v_ref(v->L[i]) : v_nil();
+    case T_IVEC: return v_int(v->J[i]);
+    case T_FVEC: return v_float(v->F[i]);
+    case T_BVEC: return v_bool(v->B[i] != 0);
+    case T_CVEC: return v_char(v->B[i]);
+    default: return v_nil();
+    }
+}
+/* Evaluate one positional call argument, expanding `*seq`. reserve keeps room for the remaining arguments. */
+static inline int call_arg_eval(Node *a, Env *e, V ***args, int *nargs, int *cap, int reserve) {
+    if (a->type != N_UNOP || a->op != OP_SPLAT || a->nch < 1) {
+        (*args)[(*nargs)++] = eval(a, e);
+        return 0;
+    }
+    V *v = eval(a->ch[0], e);
+    if (v->t != T_LIST && v->t != T_IVEC && v->t != T_FVEC && v->t != T_BVEC && v->t != T_CVEC && !is_mat_t(v->t)) {
+        v_free(v);
+        return -1;
+    }
+    if (v->n > (int64_t)(INT_MAX / 2) - *nargs - reserve) { v_free(v); return -1; }
+    int need = *nargs + (int)v->n + reserve + 1;
+    if (need > *cap) {
+        V **t = realloc(*args, (size_t)need * sizeof(V *));
+        if (!t) { v_free(v); return -1; }
+        *args = t;
+        *cap = need;
+    }
+    for (int64_t i = 0; i < v->n; i++) (*args)[(*nargs)++] = is_mat_t(v->t) ? v_mat_row(v, i) : seq_item(v, i);
+    v_free(v);
+    return 0;
+}
+static inline void bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V **kwv, int nkw) {
+    V *params = fn->params;
+    int positional = 1;
+    if (!params || params->t != T_LIST) return;
+    for (int i = 0; i < params->n; i++) {
+        V *p = params->L[i];
+        if (!p || p->t != T_STR) continue;
+        const char *s = p->s;
+        if (s[0] == '*' && s[1] == '*') {
+            V *k = v_list(nkw), *vl = v_list(nkw);
+            for (int j = 0; j < nkw; j++) { k->L[j] = v_ref(kwn[j]); vl->L[j] = v_ref(kwv[j]); }
+            V *d = v_dict(k, vl);
+            v_free(k); v_free(vl);
+            env_set(ce, s + 2, d);
+            v_free(d);
+        } else if (s[0] == '*') {
+            V *rest = v_list(nargs > i ? nargs - i : 0);
+            for (int j = i; j < nargs; j++) rest->L[j - i] = v_ref(args[j]);
+            env_set(ce, s + 1, rest);
+            v_free(rest);
+            positional = 0;
+        } else if (positional && i < nargs) {
+            env_set(ce, s, args[i]);
+        } else if (fn->defaults && i < fn->defaults->n && fn->defaults->L[i]->t != T_NIL) {
+            env_set(ce, s, fn->defaults->L[i]);
+        }
+    }
+}
+void shakti_bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V **kwv, int nkw) {
+    bind_params(ce, fn, args, nargs, kwn, kwv, nkw);
+}
+static inline V *call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw, Env *e) {
+    if (!fn || fn->t != T_FN) return v_err("call: not a function");
+    if (fn->n == -1) return builtin_call(fn->s, args, nargs, kwn, kwv, nkw, e);
+    if (fn->j < 0 || fn->j >= fn_ast_n || !fn_ast[(int)fn->j]) return v_err("call: bad function");
+    Env *ce = env_new(fn->closure);
+    bind_params(ce, fn, args, nargs, kwn, kwv, nkw);
+    for (int i = 0; i < nkw; i++) env_set(ce, kwn[i]->s, kwv[i]);
+    if (self) env_set(ce, "self", self);
+    int npush = push_list_vals(args, nargs) + push_list_vals(kwv, nkw);
+    V *r = eval_fn(fn_ast[(int)fn->j], ce);
+    pop_list_vals(npush);
+    if (g_returning) {
+        g_returning = 0;
+        v_free(r);
+        r = g_retval ? g_retval : v_nil();
+        g_retval = NULL;
+    }
+    env_free(ce);
+    return r;
+}
+V *shakti_call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw, Env *e) {
+    return call_fn(fn, self, args, nargs, kwn, kwv, nkw, e);
+}
+/* Classes are dicts whose first key is "__bases__"; instances lead with "__class__". */
+static V *dict_lead(V *v, const char *key) {
+    V *k;
+    if (!v || v->t != T_DICT || !v->keys || !v->vals || v->keys->n < 1 || v->vals->n < 1) return NULL;
+    k = v->keys->L[0];
+    if (!k || k->t != T_STR || k->s[0] != '_' || strcmp(k->s, key)) return NULL;
+    return v->vals->L[0];
+}
+int shakti_is_class(V *v) {
+    V *b = dict_lead(v, "__bases__");
+    return b && b->t == T_LIST;
+}
+int shakti_is_instance(V *v) {
+    return shakti_is_class(dict_lead(v, "__class__"));
+}
+static int class_derives(V *cls, V *want, int depth) {
+    if (cls == want) return 1;
+    if (depth > 64 || !shakti_is_class(cls)) return 0;
+    V *bases = dict_lead(cls, "__bases__");
+    for (int64_t i = 0; i < bases->n; i++)
+        if (class_derives(bases->L[i], want, depth + 1)) return 1;
+    return 0;
+}
+int shakti_isinstance(V *obj, V *cls) {
+    if (!shakti_is_instance(obj) || !shakti_is_class(cls)) return 0;
+    return class_derives(dict_lead(obj, "__class__"), cls, 0);
+}
+static V *class_new(V *cls, V **args, int nargs, V **kwn, V **kwv, int nkw, Env *e) {
+    V *keys = v_list(0), *vals = v_list(0);
+    V *ck = v_str("__class__");
+    v_list_append(keys, ck);
+    v_list_append(vals, cls);
+    v_free(ck);
+    for (int64_t i = 1; i < cls->keys->n; i++) {
+        v_list_append(keys, cls->keys->L[i]);
+        v_list_append(vals, cls->vals->L[i]);
+    }
+    V *self = v_dict(keys, vals);
+    v_free(keys); v_free(vals);
+    V *init = v_dict_get(self, "__init__");
+    if (init && init->t == T_FN) {
+        init = v_ref(init);
+        V *r = call_fn(init, self, args, nargs, kwn, kwv, nkw, e);
+        v_free(init);
+        if (r && r->t == T_ERR) { v_free(self); return r; }
+        v_free(r);
+        if (g_error) { v_free(self); return v_nil(); }
+    }
+    return self;
 }
 
 V *eval(Node *n, Env *e) {
@@ -825,18 +982,22 @@ V *eval(Node *n, Env *e) {
                 }
                 if (fmt_spec && *fmt_spec) {
                     if (val->t == T_FLOAT || val->t == T_INT) {
-                        if (!fstr_fmt_valid(fmt_spec)) {
+                        int fv = fstr_fmt_valid(fmt_spec);
+                        if (fv != 1) {
                             char spec_copy[40];
                             snprintf(spec_copy, sizeof spec_copy, "%s", fmt_spec);
                             v_free(val);
                             free(expr);
                             free(raw);
                             free(result);
+                            if (fv < 0)
+                                return v_errf("f-string: format width/precision above %d in ':%s'",
+                                              FSTR_FMT_MAX_FIELD, spec_copy);
                             return v_errf("f-string: invalid format specifier ':%s'", spec_copy);
                         }
                         char fmt[64];
                         snprintf(fmt, sizeof fmt, "%%%s", fmt_spec);
-                        char buf[256];
+                        char buf[512];
                         double dv = val->t == T_FLOAT ? val->f : (double)val->j;
                         snprintf(buf, sizeof buf, fmt, dv);
                         vs = strdup(buf);
@@ -844,7 +1005,9 @@ V *eval(Node *n, Env *e) {
                         vs = v_to_str(val);
                     }
                 } else {
-                    vs = v_to_str(val);
+                    V *is = shakti_instance_str(val, e);
+                    if (is) { vs = strdup(is->s); v_free(is); }
+                    else vs = v_to_str(val);
                 }
                 if (!vs) {
                     v_free(val);
@@ -893,6 +1056,7 @@ V *eval(Node *n, Env *e) {
         for(int i=0;i<nch;i++) {
             elems[i] = eval(n->ch[i], e);
             if(g_error) { for(int j=0;j<=i;j++) v_free(elems[j]); free(elems); return v_nil(); }
+            if(elems[i]->t == T_ERR) { V *err = elems[i]; for(int j=0;j<i;j++) v_free(elems[j]); free(elems); return err; }
             if(elems[i]->t != T_INT && elems[i]->t != T_CHAR) all_int = 0;
             if(elems[i]->t != T_CHAR) all_u8 = 0;
             if(elems[i]->t != T_INT && elems[i]->t != T_FLOAT && elems[i]->t != T_CHAR) all_num = 0;
@@ -935,10 +1099,16 @@ V *eval(Node *n, Env *e) {
         int np = n->nch / 2;
         V *keys = v_list(np);
         V *vals = v_list(np);
-        i(np,{
+        for (int i = 0; i < np; i++) {
             keys->L[i] = eval(n->ch[i*2], e);
             vals->L[i] = eval(n->ch[i*2+1], e);
-        })
+            V *err = keys->L[i]->t == T_ERR ? keys->L[i] : vals->L[i]->t == T_ERR ? vals->L[i] : NULL;
+            if (err || g_error) {
+                if (err) v_ref(err);
+                v_free(keys); v_free(vals);
+                return err ? err : v_nil();
+            }
+        }
         V *r = v_dict(keys, vals);
         v_free(keys); v_free(vals);
         return r;
@@ -1093,9 +1263,21 @@ V *eval(Node *n, Env *e) {
                 v_free(a); return r;
             }
             if(a->t==T_FLOAT){ V *r=v_float(-a->f); v_free(a); return r; }
-            if(a->t==T_IVEC) { V *r=v_ivec(a->n); for(int64_t i=0;i<a->n;i++) r->J[i]=-a->J[i]; v_free(a); return r; }
+            if(a->t==T_IVEC || a->t==T_IMAT) {
+                int64_t ne = a->t==T_IVEC ? a->n : a->n*mat_cols(a);
+                int64_t lo = 0;
+                for(int64_t i=0;i<ne;i++) lo |= a->J[i]==INT64_MIN;
+                V *r;
+                if(lo) {
+                    r = a->t==T_IVEC ? v_fvec(a->n) : v_fmat(a->n,mat_cols(a));
+                    for(int64_t i=0;i<ne;i++) r->F[i]=-(double)a->J[i];
+                } else {
+                    r = a->t==T_IVEC ? v_ivec(a->n) : v_imat(a->n,mat_cols(a));
+                    for(int64_t i=0;i<ne;i++) r->J[i]=-a->J[i];
+                }
+                v_free(a); return r;
+            }
             if(a->t==T_FVEC) { V *r=v_fvec(a->n); for(int64_t i=0;i<a->n;i++) r->F[i]=-a->F[i]; v_free(a); return r; }
-            if(a->t==T_IMAT) { int64_t ne=a->n*mat_cols(a); V *r=v_imat(a->n,mat_cols(a)); for(int64_t i=0;i<ne;i++) r->J[i]=-a->J[i]; v_free(a); return r; }
             if(a->t==T_FMAT) { int64_t ne=a->n*mat_cols(a); V *r=v_fmat(a->n,mat_cols(a)); for(int64_t i=0;i<ne;i++) r->F[i]=-a->F[i]; v_free(a); return r; }
         }
         if(n->op == OP_NOT) { int r = !is_truthy(a); v_free(a); return v_bool(r); }
@@ -1378,7 +1560,7 @@ V *eval(Node *n, Env *e) {
                 next = v_errf("cannot index type %s with type %s", type_name(obj->t), type_name(idx->t));
             }
             v_free(obj); v_free(idx);
-            obj = next;
+            obj = next ? next : v_nil();
             if(obj->t == T_ERR) break;
         }
         return obj;
@@ -1448,12 +1630,12 @@ V *eval(Node *n, Env *e) {
                 case T_BVEC: return v_bvec(x);
                 case T_CVEC: return v_cvec(x);
                 case T_FVEC: return v_fvec(x);
-                case T_IVEC: return v_ivec(x);
+                case T_IVEC: { V *r = v_ivec(x); if (x > 0) memset(r->J, 0, (size_t)x * sizeof(int64_t)); return r; }
                 case T_BMAT: return v_bmat(x,0);
                 case T_CMAT: return v_cmat(x,0);
                 case T_FMAT: return v_fmat(x,0);
                 case T_IMAT: return v_imat(x,0);
-                case T_LIST: return v_list(x);
+                case T_LIST: { V *r = v_list(x); for (long long k = 0; k < x; k++) r->L[k] = v_nil(); return r; }
                 default: return v_err("bad typed constructor");
                 }
             }
@@ -1489,56 +1671,53 @@ V *eval(Node *n, Env *e) {
             P(obj->t == T_ERR,obj)
             const char *method = fn_node->sval;
             int nargs_total = n->nch - 1;
-            V **args = calloc(nargs_total+1, sizeof(V*));
+            int args_cap = nargs_total + 1;
+            V **args = calloc(args_cap, sizeof(V*));
             int nargs = 0;
             for(int i=1; i<n->nch; i++) {
-                if(n->ch[i]->type != N_KWARG)
-                    args[nargs++] = eval(n->ch[i], e);
+                if(n->ch[i]->type == N_KWARG) continue;
+                if(call_arg_eval(n->ch[i], e, &args, &nargs, &args_cap, n->nch - 1 - i) < 0) {
+                    v_free(obj);
+                    for(int j=0;j<nargs;j++) v_free(args[j]);
+                    free(args);
+                    return v_err("cannot unpack non-sequence");
+                }
             }
             V *attr = NULL;
             if(obj->t == T_DICT) {
                 attr = v_dict_get(obj, method);
             }
-            if(attr && attr->t == T_FN) {
-                Env *call_env = env_new(attr->closure);
-                V *params = attr->params;
-                for(int i=0; i<params->n; i++) {
-                    if(i < nargs) {
-                        env_set(call_env, params->L[i]->s, args[i]);
-                    } else if(attr->defaults && i < attr->defaults->n && attr->defaults->L[i]->t != T_NIL) {
-                        env_set(call_env, params->L[i]->s, attr->defaults->L[i]);
-                    }
-                }
-                int npush = 0;
+            if(attr && (attr->t == T_FN || shakti_is_class(attr))) {
+                int nkw = 0;
+                for(int i=1; i<n->nch; i++) nkw += n->ch[i]->type == N_KWARG;
+                V **kwnames = nkw ? calloc(nkw, sizeof(V*)) : NULL;
+                V **kwvals = nkw ? calloc(nkw, sizeof(V*)) : NULL;
+                nkw = 0;
                 for(int i=1; i<n->nch; i++) {
                     if(n->ch[i]->type == N_KWARG) {
-                        V *kv = eval(n->ch[i]->ch[0], e);
-                        env_set(call_env, n->ch[i]->sval, kv);
-                        npush += push_list_vals(&kv, 1);
-                        v_free(kv);
+                        kwnames[nkw] = v_str(n->ch[i]->sval);
+                        kwvals[nkw] = eval(n->ch[i]->ch[0], e);
+                        nkw++;
                     }
                 }
-                if (attr->j < 0 || attr->j >= fn_ast_n || !fn_ast[(int)attr->j]) {
-                    pop_list_vals(npush);
-                    env_free(call_env);
-                    v_free(obj);
-                    for (int i = 0; i < nargs; i++) v_free(args[i]);
-                    free(args);
-                    return v_err("call: bad function");
+                V *self = NULL;
+                V *lead = obj->keys && obj->keys->n > 0 ? obj->keys->L[0] : NULL;
+                if(lead && lead->t == T_STR && lead->s[0] == '_' && lead->s[1] == '_') {
+                    if(shakti_is_class(obj)) {
+                        V *cur = env_get(e, "self");
+                        if(cur && shakti_isinstance(cur, obj)) self = cur;
+                    } else if(shakti_is_instance(obj)) {
+                        self = obj;
+                    }
                 }
-                Node *body = fn_ast[(int)attr->j];
-                npush += push_list_vals(args, nargs);
-                V *result = eval_fn(body, call_env);
-                pop_list_vals(npush);
-                if(g_returning) {
-                    g_returning = 0; v_free(result);
-                    result = g_retval ? g_retval : v_nil();
-                    g_retval = NULL;
-                }
-                env_free(call_env);
+                attr = v_ref(attr);
+                V *result = attr->t == T_FN ? call_fn(attr, self, args, nargs, kwnames, kwvals, nkw, e)
+                                            : class_new(attr, args, nargs, kwnames, kwvals, nkw, e);
+                v_free(attr);
                 v_free(obj);
                 for(int i=0;i<nargs;i++) v_free(args[i]);
-                free(args);
+                for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
+                free(args); free(kwnames); free(kwvals);
                 return result;
             }
             if(obj->t == T_SUBPROCESS) {
@@ -1567,7 +1746,8 @@ V *eval(Node *n, Env *e) {
             return r;
         }
         int nargs_total = n->nch - 1;
-        V **args = calloc(nargs_total+1, sizeof(V*));
+        int args_cap = nargs_total + 1;
+        V **args = calloc(args_cap, sizeof(V*));
         V **kwnames = calloc(nargs_total+1, sizeof(V*));
         V **kwvals = calloc(nargs_total+1, sizeof(V*));
         int nargs = 0, nkw = 0;
@@ -1589,8 +1769,11 @@ V *eval(Node *n, Env *e) {
                 kwnames[nkw] = v_str(n->ch[i]->sval);
                 kwvals[nkw] = eval(n->ch[i], e);
                 nkw++;
-            } else {
-                args[nargs++] = eval(n->ch[i], e);
+            } else if(call_arg_eval(n->ch[i], e, &args, &nargs, &args_cap, n->nch - 1 - i) < 0) {
+                for(int j=0;j<nargs;j++) v_free(args[j]);
+                for(int j=0;j<nkw;j++) { v_free(kwnames[j]); v_free(kwvals[j]); }
+                free(args); free(kwnames); free(kwvals);
+                return v_err("cannot unpack non-sequence");
             }
         }
         if(fn_node->type == N_NAME && is_builtin(fn_node->sval)) {
@@ -1631,6 +1814,14 @@ V *eval(Node *n, Env *e) {
             free(args); free(kwnames); free(kwvals);
             return result;
         }
+        if(fn && shakti_is_class(fn)) {
+            V *result = class_new(fn, args, nargs, kwnames, kwvals, nkw, e);
+            v_free(fn);
+            for(int i=0;i<nargs;i++) v_free(args[i]);
+            for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
+            free(args); free(kwnames); free(kwvals);
+            return result;
+        }
         if(!fn || fn->t != T_FN) {
             if(fn) v_free(fn);
             for(int i=0;i<nargs;i++) v_free(args[i]);
@@ -1639,14 +1830,7 @@ V *eval(Node *n, Env *e) {
             return v_errf("'%s' is not callable", fn_node->sval ? fn_node->sval : "?");
         }
         Env *call_env = env_acquire(fn->closure);
-        V *params = fn->params;
-        for(int i=0; i<params->n; i++) {
-            if(i < nargs) {
-                env_set(call_env, params->L[i]->s, args[i]);
-            } else if(fn->defaults && i < fn->defaults->n && fn->defaults->L[i]->t != T_NIL) {
-                env_set(call_env, params->L[i]->s, fn->defaults->L[i]);
-            }
-        }
+        bind_params(call_env, fn, args, nargs, kwnames, kwvals, nkw);
         for(int i=0;i<nkw;i++)
             env_set(call_env, kwnames[i]->s, kwvals[i]);
         Node *body = fn_ast[(int)fn->j];
@@ -1697,7 +1881,7 @@ V *eval(Node *n, Env *e) {
         V *r = v_nil();
         if(iter->t == T_IVEC) {
             for(int64_t i=0;i<iter->n;i++) {
-                V *item = v_int(iter->J[i]);
+                V *item = iter->t == T_IVEC ? v_int(iter->J[i]) : iter->L[i] ? v_ref(iter->L[i]) : v_nil();
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
                 r = eval(n->ch[2], e);
@@ -1970,12 +2154,38 @@ V *eval(Node *n, Env *e) {
         Env *cls_env = env_new(e);
         V *r = eval(n->ch[0], cls_env);
         v_free(r);
-        V *keys = v_list(cls_env->len);
-        V *vals = v_list(cls_env->len);
+        V *bases = v_list(0);
+        V *keys = v_list(cls_env->len + 1);
+        V *vals = v_list(cls_env->len + 1);
+        keys->L[0] = v_str("__bases__");
+        vals->L[0] = v_ref(bases);
         i(cls_env->len,{
-            keys->L[i] = v_str(cls_env->names[i]);
-            vals->L[i] = v_ref(cls_env->vals[i]);
+            keys->L[i + 1] = v_str(cls_env->names[i]);
+            vals->L[i + 1] = v_ref(cls_env->vals[i]);
         })
+        if(n->nch > 1 && n->ch[1]->type == N_LIST) {
+            for(int b=0; b<n->ch[1]->nch; b++) {
+                V *base = eval(n->ch[1]->ch[b], e);
+                if(!shakti_is_class(base)) {
+                    v_free(base); v_free(bases); v_free(keys); v_free(vals);
+                    env_free(cls_env);
+                    return v_errf("class %s: base is not a class", n->sval);
+                }
+                for(int64_t j=0; j<base->keys->n; j++) {
+                    V *k = base->keys->L[j];
+                    if(j == 0 || !k || k->t != T_STR) continue;
+                    int dup = 0;
+                    for(int64_t m=0; m<keys->n && !dup; m++)
+                        dup = keys->L[m]->t == T_STR && !strcmp(keys->L[m]->s, k->s);
+                    if(dup) continue;
+                    v_list_append(keys, k);
+                    v_list_append(vals, base->vals->L[j]);
+                }
+                v_list_append(bases, base);
+                v_free(base);
+            }
+        }
+        v_free(bases);
         V *cls = v_dict(keys, vals);
         env_set(e, n->sval, cls);
         v_free(keys); v_free(vals);

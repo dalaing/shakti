@@ -1,4 +1,5 @@
 #include "sonicpi.h"
+#include "shakti_internal.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -79,6 +80,10 @@ static int sp_resolve_addr(char *err, size_t err_cap) {
 }
 
 static int sp_open_socket(char *err, size_t err_cap) {
+    if (!shakti_net_allowed()) {
+        snprintf(err, err_cap, "sonicpi: network disabled (SHAKTI_SAFE)");
+        return -1;
+    }
     if (g_fd >= 0) return 0;
     sp_env_defaults();
     if (sp_resolve_addr(err, err_cap) != 0) return -1;

@@ -11,6 +11,8 @@ extern "C" {
 
 /* Cap decompress output — hard cap on decompress output. */
 #define SHAKTI_CODEC_MAX_PLAIN (16ull << 30)
+/* Default cap for untrusted in-memory decodes (decompress, iefs.loads, hld.decode). */
+#define SHAKTI_DECODE_DEFAULT (1ull << 30)
 
 enum ShaktiCodec {
     SHAKTI_CODEC_NONE = 0,
@@ -41,8 +43,12 @@ int shakti_codec_is_residual(int codec);
 int shakti_compress(int codec, int level, const unsigned char *src, size_t src_len,
                     unsigned char **out, size_t *out_len, char *err, size_t err_cap);
 
+/* Default decode cap: SHAKTI_MAX_DECODE env (bytes, optional k/m/g suffix), else
+ * SHAKTI_DECODE_DEFAULT; clamped to SHAKTI_CODEC_MAX_PLAIN. */
+size_t shakti_decode_limit(void);
+
 /* Decompress src → malloc'd *out. Returns 0 on success.
- * Cap is SHAKTI_CODEC_MAX_PLAIN (see shakti_decompress_max for a tighter bound). */
+ * Cap is shakti_decode_limit() (see shakti_decompress_max for an explicit bound). */
 int shakti_decompress(int codec, const unsigned char *src, size_t src_len,
                       unsigned char **out, size_t *out_len, char *err, size_t err_cap);
 

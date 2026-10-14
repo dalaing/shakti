@@ -11,6 +11,10 @@
 #include <arm_neon.h>
 #endif
 
+static inline int64_t i64_wadd(int64_t x, int64_t y) { return (int64_t)((uint64_t)x + (uint64_t)y); }
+static inline int64_t i64_wsub(int64_t x, int64_t y) { return (int64_t)((uint64_t)x - (uint64_t)y); }
+static inline int64_t i64_wmul(int64_t x, int64_t y) { return (int64_t)((uint64_t)x * (uint64_t)y); }
+
 #ifndef SHAKTI_USE_ACCELERATE
 #define SHAKTI_USE_ACCELERATE 0
 #endif
@@ -110,8 +114,8 @@ static inline float64x2_t fmat_binop_vec_neon(float64x2_t x, float64x2_t y, int 
 
 static inline int64x2_t imat_mul_vec_neon(int64x2_t x, int64x2_t y) {
     int64x2_t z = vdupq_n_s64(0);
-    z = vsetq_lane_s64(vgetq_lane_s64(x, 0) * vgetq_lane_s64(y, 0), z, 0);
-    z = vsetq_lane_s64(vgetq_lane_s64(x, 1) * vgetq_lane_s64(y, 1), z, 1);
+    z = vsetq_lane_s64(i64_wmul(vgetq_lane_s64(x, 0), vgetq_lane_s64(y, 0)), z, 0);
+    z = vsetq_lane_s64(i64_wmul(vgetq_lane_s64(x, 1), vgetq_lane_s64(y, 1)), z, 1);
     return z;
 }
 
@@ -391,103 +395,80 @@ void mat_fmat_binop_scalar_rev(double *r, double x, const double *b, int64_t ne,
     }
 }
 
-static void imat_binop_mm_scalar(int64_t *r, const int64_t *a, const int64_t *b, int64_t ne, int op) {
+/* Wrapping + - * that also reports whether any element overflowed int64.
+ * a/b NULL means the scalar xa/yb is broadcast. */
+static inline __attribute__((always_inline)) int imat_arith(int64_t *r, const int64_t *a, int64_t xa,
+                                                            const int64_t *b, int64_t yb, int64_t ne, int op) {
+    uint64_t ovf = 0;
+    int64_t i = 0;
+#if defined(__aarch64__)
+    if (use_simd_elems(ne) && op != 11) {
+        int64x2_t vx = vdupq_n_s64(xa), vy = vdupq_n_s64(yb), vo = vdupq_n_s64(0);
+        for (; i + 2 <= ne; i += 2) {
+            int64x2_t x = a ? vld1q_s64(a + i) : vx;
+            int64x2_t y = b ? vld1q_s64(b + i) : vy;
+            int64x2_t z;
+            if (op == 0) {
+                z = vreinterpretq_s64_u64(vaddq_u64(vreinterpretq_u64_s64(x), vreinterpretq_u64_s64(y)));
+                vo = vorrq_s64(vo, vandq_s64(veorq_s64(x, z), veorq_s64(y, z)));
+            } else {
+                z = vreinterpretq_s64_u64(vsubq_u64(vreinterpretq_u64_s64(x), vreinterpretq_u64_s64(y)));
+                vo = vorrq_s64(vo, vandq_s64(veorq_s64(x, y), veorq_s64(x, z)));
+            }
+            vst1q_s64(r + i, z);
+        }
+        ovf = (uint64_t)(vgetq_lane_s64(vo, 0) | vgetq_lane_s64(vo, 1));
+    }
+#endif
+    if (op == 0) {
+        int nt = isl_vec_omp_threads(ne - i);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) reduction(|:ovf) if (ne - i >= ISL_OMP_VEC_MIN) num_threads(nt)
+#endif
+        for (int64_t k = i; k < ne; k++) {
+            int64_t x = a ? a[k] : xa, y = b ? b[k] : yb, z = i64_wadd(x, y);
+            r[k] = z;
+            ovf |= (uint64_t)((x ^ z) & (y ^ z));
+        }
+    } else if (op == 18) {
+        int nt = isl_vec_omp_threads(ne - i);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) reduction(|:ovf) if (ne - i >= ISL_OMP_VEC_MIN) num_threads(nt)
+#endif
+        for (int64_t k = i; k < ne; k++) {
+            int64_t x = a ? a[k] : xa, y = b ? b[k] : yb, z = i64_wsub(x, y);
+            r[k] = z;
+            ovf |= (uint64_t)((x ^ y) & (x ^ z));
+        }
+    } else {
+        int nt = isl_vec_omp_threads(ne - i);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) reduction(|:ovf) if (ne - i >= ISL_OMP_VEC_MIN) num_threads(nt)
+#endif
+        for (int64_t k = i; k < ne; k++) {
+            int64_t x = a ? a[k] : xa, y = b ? b[k] : yb, z;
+            if (__builtin_mul_overflow(x, y, &z)) { z = i64_wmul(x, y); ovf |= UINT64_C(1) << 63; }
+            r[k] = z;
+        }
+    }
+    return (int)(ovf >> 63);
+}
+
+int mat_imat_binop_mm(int64_t *r, const int64_t *a, const int64_t *b, int64_t ne, int op) {
+    if (op == 0 || op == 18 || op == 11) return imat_arith(r, a, 0, b, 0, ne, op);
     for (int64_t i = 0; i < ne; i++) {
         int64_t x = a[i], y = b[i];
         switch (op) {
-        case 0: r[i] = x + y; break;
-        case 18: r[i] = x - y; break;
-        case 11: r[i] = x * y; break;
         case 4: r[i] = i64_floordiv(x, y); break;
         case 10: r[i] = i64_mod(x, y); break;
         default: r[i] = x; break;
         }
     }
+    return 0;
 }
 
-void mat_imat_binop_mm(int64_t *r, const int64_t *a, const int64_t *b, int64_t ne, int op) {
-#if defined(__aarch64__)
-    if (use_simd_elems(ne) && (op == 0 || op == 18 || op == 11)) {
-        int64_t i = 0;
-        for (; i + 2 <= ne; i += 2) {
-            int64x2_t x = vld1q_s64(a + i);
-            int64x2_t y = vld1q_s64(b + i);
-            int64x2_t z;
-            switch (op) {
-            case 0: z = vaddq_s64(x, y); break;
-            case 18: z = vsubq_s64(x, y); break;
-            default: z = imat_mul_vec_neon(x, y); break;
-            }
-            vst1q_s64(r + i, z);
-        }
-        for (; i < ne; i++) {
-            int64_t x = a[i], y = b[i];
-            switch (op) {
-            case 0: r[i] = x + y; break;
-            case 18: r[i] = x - y; break;
-            case 11: r[i] = x * y; break;
-            default: break;
-            }
-        }
-        return;
-    }
-#endif
-    if (op == 0 || op == 18 || op == 11) {
-        int nt = isl_vec_omp_threads(ne);
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (ne >= ISL_OMP_VEC_MIN) num_threads(nt)
-#endif
-        for (int64_t i = 0; i < ne; i++) {
-            int64_t x = a[i], y = b[i];
-            if (op == 0) r[i] = x + y;
-            else if (op == 18) r[i] = x - y;
-            else r[i] = x * y;
-        }
-        return;
-    }
-    imat_binop_mm_scalar(r, a, b, ne, op);
-}
-
-void mat_imat_binop_scalar(int64_t *r, const int64_t *a, int64_t y, int64_t ne, int op) {
-#if defined(__aarch64__)
-    if (use_simd_elems(ne) && (op == 0 || op == 18 || op == 11)) {
-        int64x2_t vy = vdupq_n_s64(y);
-        int64_t i = 0;
-        for (; i + 2 <= ne; i += 2) {
-            int64x2_t x = vld1q_s64(a + i);
-            int64x2_t z;
-            switch (op) {
-            case 0: z = vaddq_s64(x, vy); break;
-            case 18: z = vsubq_s64(x, vy); break;
-            default: z = imat_mul_vec_neon(x, vy); break;
-            }
-            vst1q_s64(r + i, z);
-        }
-        for (; i < ne; i++) {
-            int64_t x = a[i];
-            switch (op) {
-            case 0: r[i] = x + y; break;
-            case 18: r[i] = x - y; break;
-            case 11: r[i] = x * y; break;
-            default: break;
-            }
-        }
-        return;
-    }
-#endif
-    if (op == 0 || op == 18 || op == 11) {
-        int nt = isl_vec_omp_threads(ne);
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (ne >= ISL_OMP_VEC_MIN) num_threads(nt)
-#endif
-        for (int64_t i = 0; i < ne; i++) {
-            int64_t x = a[i];
-            if (op == 0) r[i] = x + y;
-            else if (op == 18) r[i] = x - y;
-            else r[i] = x * y;
-        }
-        return;
-    }
+int mat_imat_binop_scalar(int64_t *r, const int64_t *a, int64_t y, int64_t ne, int op) {
+    if (op == 0 || op == 18 || op == 11) return imat_arith(r, a, 0, NULL, y, ne, op);
     for (int64_t i = 0; i < ne; i++) {
         int64_t x = a[i];
         switch (op) {
@@ -496,48 +477,11 @@ void mat_imat_binop_scalar(int64_t *r, const int64_t *a, int64_t y, int64_t ne, 
         default: break;
         }
     }
+    return 0;
 }
 
-void mat_imat_binop_scalar_rev(int64_t *r, int64_t x, const int64_t *b, int64_t ne, int op) {
-#if defined(__aarch64__)
-    if (use_simd_elems(ne) && (op == 0 || op == 18 || op == 11)) {
-        int64x2_t vx = vdupq_n_s64(x);
-        int64_t i = 0;
-        for (; i + 2 <= ne; i += 2) {
-            int64x2_t y = vld1q_s64(b + i);
-            int64x2_t z;
-            switch (op) {
-            case 0: z = vaddq_s64(vx, y); break;
-            case 18: z = vsubq_s64(vx, y); break;
-            default: z = imat_mul_vec_neon(vx, y); break;
-            }
-            vst1q_s64(r + i, z);
-        }
-        for (; i < ne; i++) {
-            int64_t y = b[i];
-            switch (op) {
-            case 0: r[i] = x + y; break;
-            case 18: r[i] = x - y; break;
-            case 11: r[i] = x * y; break;
-            default: break;
-            }
-        }
-        return;
-    }
-#endif
-    if (op == 0 || op == 18 || op == 11) {
-        int nt = isl_vec_omp_threads(ne);
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (ne >= ISL_OMP_VEC_MIN) num_threads(nt)
-#endif
-        for (int64_t i = 0; i < ne; i++) {
-            int64_t y = b[i];
-            if (op == 0) r[i] = x + y;
-            else if (op == 18) r[i] = x - y;
-            else r[i] = x * y;
-        }
-        return;
-    }
+int mat_imat_binop_scalar_rev(int64_t *r, int64_t x, const int64_t *b, int64_t ne, int op) {
+    if (op == 0 || op == 18 || op == 11) return imat_arith(r, NULL, x, b, 0, ne, op);
     for (int64_t i = 0; i < ne; i++) {
         int64_t y = b[i];
         switch (op) {
@@ -546,6 +490,7 @@ void mat_imat_binop_scalar_rev(int64_t *r, int64_t x, const int64_t *b, int64_t 
         default: break;
         }
     }
+    return 0;
 }
 
 static double fmat_at(const void *p, int64_t i) { return ((const double *)p)[i]; }

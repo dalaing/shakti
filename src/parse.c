@@ -82,30 +82,38 @@ static int probe_balanced(Lexer *p, int open_t, int close_t) {
 /* Token-only lookahead so ordinary expressions never emit speculative parse
  * diagnostics. Recognizes names/dotted paths, parenthesized callables, calls,
  * and indexing that are immediately followed by `@`. */
-static int peek_each_verb_at(Lexer *l) {
-    Lexer probe = *l;
-    Token first = lex_peek(&probe);
+static int probe_each_verb_at(Lexer *probe) {
+    Token first = lex_peek(probe);
     if (first.type == T_NAME_) {
-        lex_next(&probe);
+        lex_next(probe);
     } else if (first.type == T_LPAREN_) {
-        if (!probe_balanced(&probe, T_LPAREN_, T_RPAREN_)) return 0;
+        if (!probe_balanced(probe, T_LPAREN_, T_RPAREN_)) return 0;
     } else {
         return 0;
     }
     for (;;) {
-        int t = lex_peek(&probe).type;
+        int t = lex_peek(probe).type;
         if (t == T_DOT_) {
-            lex_next(&probe);
-            if (lex_next(&probe).type != T_NAME_) return 0;
+            lex_next(probe);
+            if (lex_next(probe).type != T_NAME_) return 0;
         } else if (t == T_LPAREN_) {
-            if (!probe_balanced(&probe, T_LPAREN_, T_RPAREN_)) return 0;
+            if (!probe_balanced(probe, T_LPAREN_, T_RPAREN_)) return 0;
         } else if (t == T_LBRACKET_) {
-            if (!probe_balanced(&probe, T_LBRACKET_, T_RBRACKET_)) return 0;
+            if (!probe_balanced(probe, T_LBRACKET_, T_RBRACKET_)) return 0;
         } else {
             break;
         }
     }
-    return lex_peek(&probe).type == T_AT_;
+    return lex_peek(probe).type == T_AT_;
+}
+static int peek_each_verb_at(Lexer *l) {
+    int t = lex_peek(l).type;
+    if (t != T_NAME_ && t != T_LPAREN_) return 0;
+    LexMark mark = lex_mark(l);
+    Lexer probe = *l;
+    int r = probe_each_verb_at(&probe);
+    lex_release(&probe, mark);
+    return r;
 }
 
 static Node *parse_each_verb(Lexer *l) {
@@ -132,7 +140,8 @@ static Node *parse_atom(Lexer *l);
 
 static int is_jux_arg_token(int tt) {
     return tt == T_NAME_ || tt == T_INT_ || tt == T_FLOAT_ || tt == T_DATETIME_
-        || tt == T_CHARZ_ || tt == T_CVECZ_ || tt == T_STR_ || tt == T_LPAREN_ || tt == T_LBRACKET_ || tt == T_MINUS_;
+        || tt == T_CHARZ_ || tt == T_CVECZ_ || tt == T_STR_ || tt == T_LPAREN_ || tt == T_LBRACKET_ || tt == T_MINUS_
+        || tt == T_SELECT_;
 }
 
 static int is_jux_arg_start(Lexer *l) {
@@ -153,6 +162,12 @@ static int is_call_arg_sep(Lexer *l, int table_call) {
     return t == T_COMMA_ || (table_call && t == T_SEMI_);
 }
 static Node *parse_call_arg(Lexer *l) {
+    if(lex_peek(l).type == T_STAR_) {
+        lex_next(l);
+        Node *splat = node_new(N_UNOP); splat->op = OP_SPLAT;
+        node_add(splat, parse_expr(l));
+        return splat;
+    }
     Node *arg = parse_expr(l);
     if(arg && arg->type == N_NAME && lex_peek(l).type == T_COLON_) {
         lex_next(l);
@@ -224,7 +239,7 @@ static Node *parse_atom_body(Lexer *l) {
             node_add(tup, n);
             W(lex_peek(l).type == T_COMMA_,{
                 lex_next(l);
-                if(lex_peek(l).type == T_RPAREN_) break;
+                if(lex_peek(l).type == T_RPAREN_ || l->failed) break;
                 node_add(tup, parse_expr(l));
             })
             expect(l, T_RPAREN_);
@@ -237,7 +252,7 @@ static Node *parse_atom_body(Lexer *l) {
         n = node_new(N_LIST);
         if(lex_peek(l).type != T_RBRACKET_) {
             node_add(n, parse_expr(l));
-            while(lex_peek(l).type != T_RBRACKET_ && lex_peek(l).type != T_EOF_) {
+            while(lex_peek(l).type != T_RBRACKET_ && lex_peek(l).type != T_EOF_ && !l->failed) {
                 if(lex_peek(l).type == T_COMMA_) lex_next(l);
                 if(lex_peek(l).type == T_RBRACKET_) break;
                 node_add(n, parse_expr(l));
@@ -252,7 +267,7 @@ static Node *parse_atom_body(Lexer *l) {
             Node *k = parse_expr(l); expect(l, T_COLON_); Node *v = parse_expr(l);
             node_add(n, k); node_add(n, v);
             W(lex_peek(l).type == T_COMMA_,{
-                lex_next(l); if(lex_peek(l).type==T_RBRACE_) break;
+                lex_next(l); if(lex_peek(l).type==T_RBRACE_ || l->failed) break;
                 k = parse_expr(l); expect(l, T_COLON_); v = parse_expr(l);
                 node_add(n, k); node_add(n, v);
             })
@@ -308,18 +323,27 @@ static Node *parse_atom_body(Lexer *l) {
     case T_SELECT_: case T_UPDATE_: case T_DELETE_:
         l->has_peek = 1; l->peek = t;
         return parse_query(l);
+    case T_VALUES_: {
+        Node *nm = node_new(N_NAME);
+        nm->sval = strdup("values");
+        return nm;
+    }
     default:
         parse_fail("parse error: unexpected token %d ('%s')", t.type, t.sval);
         return node_new(N_NONE);
     }
 }
-static Node *parse_atom(Lexer *l) {
-    if (l->failed) return NULL;
+static int parse_enter(Lexer *l) {
+    if (l->failed) return 0;
     if (l->parse_depth >= SHAKTI_PARSE_MAX_DEPTH) {
         lex_fail(l, "nesting too deep");
-        return NULL;
+        return 0;
     }
     l->parse_depth++;
+    return 1;
+}
+static Node *parse_atom(Lexer *l) {
+    if (!parse_enter(l)) return NULL;
     Node *n = parse_atom_body(l);
     l->parse_depth--;
     return n;
@@ -351,7 +375,7 @@ static Node *parse_postfix(Lexer *l) {
                 node_add(call, parse_call_arg(l));
                 W(is_call_arg_sep(l, table_call),{
                     lex_next(l);
-                    if(lex_peek(l).type == T_RPAREN_) break;
+                    if(lex_peek(l).type == T_RPAREN_ || l->failed) break;
                     node_add(call, parse_call_arg(l));
                 })
             }
@@ -452,7 +476,7 @@ static Node *parse_postfix(Lexer *l) {
                     Node *idx = node_new(N_INDEX);
                     node_add(idx, n);
                     node_add(idx, first);
-                    W(lex_peek(l).type == T_COMMA_,{
+                    W(lex_peek(l).type == T_COMMA_ && !l->failed,{
                         lex_next(l);
                         node_add(idx, parse_expr(l));
                     })
@@ -494,8 +518,10 @@ static Node *parse_power(Lexer *l) {
     Node *n = parse_postfix(l);
     if(lex_peek(l).type == T_DSTAR_) {
         lex_next(l);
+        if (!parse_enter(l)) return n;
         Node *r = node_new(N_BINOP); r->op = OP_POW;
         node_add(r, n); node_add(r, parse_power(l));
+        l->parse_depth--;
         return r;
     }
     return n;
@@ -503,10 +529,13 @@ static Node *parse_power(Lexer *l) {
 static Node *parse_each(Lexer *l) {
     /* Each: f@ xs or xs f@ ys. */
     Node *n = parse_power(l);
+    if (!n || l->failed) return n;
     if (peek_each_verb_at(l)) {
         Node *fn = parse_each_verb(l);
         expect(l, T_AT_);
+        if (!parse_enter(l)) { node_free(fn); return n; }
         Node *rhs = parse_each(l);
+        l->parse_depth--;
         Node *each = node_new(N_EACH);
         node_add(each, fn);
         node_add(each, n);
@@ -521,7 +550,9 @@ static Node *parse_each(Lexer *l) {
             node_free(n);
             n = node_new(N_NONE);
         }
+        if (!parse_enter(l)) return n;
         Node *rhs = parse_each(l);
+        l->parse_depth--;
         Node *each = node_new(N_EACH);
         node_add(each, n);
         node_add(each, rhs);
@@ -586,8 +617,10 @@ static Node *parse_cmp(Lexer *l) {
 static Node *parse_not(Lexer *l) {
     if(lex_peek(l).type == T_NOT_) {
         lex_next(l);
+        if (!parse_enter(l)) return NULL;
         Node *n = node_new(N_UNOP); n->op = OP_NOT;
         node_add(n, parse_not(l));
+        l->parse_depth--;
         return n;
     }
     return parse_cmp(l);
@@ -618,7 +651,9 @@ static Node *parse_ternary(Lexer *l) {
         lex_next(l);
         Node *cond = parse_or(l);
         expect(l, T_ELSE_);
+        if (!parse_enter(l)) { node_free(cond); return n; }
         Node *alt = parse_ternary(l);
+        l->parse_depth--;
         Node *r = node_new(N_IF);
         node_add(r, cond);
         node_add(r, n);
@@ -751,7 +786,6 @@ static Node *parse_query(Lexer *l) {
     node_add(n, cols);
     node_add(n, by);
     node_add(n, where);
-    W(lex_peek(l).type == T_NEWLINE_ || lex_peek(l).type == T_SEMI_,lex_next(l))
     return n;
 }
 static Node *parse_create_table(Lexer *l) {
@@ -866,7 +900,7 @@ static Node *parse_asof_comma(Lexer *l) {
 static Node *parse_block(Lexer *l) {
     expect(l, T_INDENT_);
     Node *block = node_new(N_BLOCK);
-    while(lex_peek(l).type != T_DEDENT_ && lex_peek(l).type != T_EOF_) {
+    while(lex_peek(l).type != T_DEDENT_ && lex_peek(l).type != T_EOF_ && !l->failed) {
         Node *s = parse_stmt(l);
         if(s) node_add(block, s);
     }
@@ -938,16 +972,25 @@ static Node *parse_for(Lexer *l) {
     node_add(n, body);
     return n;
 }
+/* `*a` / `**k` parameters keep their stars in the name so binding can find them. */
+static char *param_name(const char *star, const char *name) {
+    size_t ls = strlen(star), ln = strlen(name);
+    char *s = x_malloc(ls + ln + 1, "param_name");
+    memcpy(s, star, ls);
+    memcpy(s + ls, name, ln + 1);
+    return s;
+}
 static Node *parse_def(Lexer *l) {
     Token name = lex_next(l);
     expect(l, T_LPAREN_);
     Node *params = node_new(N_LIST);
     Node *defaults = node_new(N_LIST);
     if(lex_peek(l).type != T_RPAREN_) {
-        if(lex_peek(l).type == T_STAR_) { lex_next(l); }
-        if(lex_peek(l).type == T_DSTAR_) { lex_next(l); }
+        const char *star = "";
+        if(lex_peek(l).type == T_STAR_) { lex_next(l); star = "*"; }
+        else if(lex_peek(l).type == T_DSTAR_) { lex_next(l); star = "**"; }
         Token p = lex_next(l);
-        Node *pn = node_new(N_NAME); pn->sval = strdup(p.sval);
+        Node *pn = node_new(N_NAME); pn->sval = param_name(star, p.sval);
         node_add(params, pn);
         if(lex_peek(l).type == T_COLON_) {
             lex_next(l); node_add(defaults, parse_expr(l));
@@ -957,10 +1000,11 @@ static Node *parse_def(Lexer *l) {
         while(lex_peek(l).type == T_COMMA_) {
             lex_next(l);
             if(lex_peek(l).type == T_RPAREN_) break;
-            if(lex_peek(l).type == T_STAR_) { lex_next(l); }
-            if(lex_peek(l).type == T_DSTAR_) { lex_next(l); }
+            star = "";
+            if(lex_peek(l).type == T_STAR_) { lex_next(l); star = "*"; }
+            else if(lex_peek(l).type == T_DSTAR_) { lex_next(l); star = "**"; }
             p = lex_next(l);
-            pn = node_new(N_NAME); pn->sval = strdup(p.sval);
+            pn = node_new(N_NAME); pn->sval = param_name(star, p.sval);
             node_add(params, pn);
             if(lex_peek(l).type == T_COLON_) {
                 lex_next(l); node_add(defaults, parse_expr(l));
@@ -1025,9 +1069,14 @@ static Node *parse_try(Lexer *l) {
 }
 static Node *parse_class(Lexer *l) {
     Token name = lex_next(l);
+    Node *bases = node_new(N_LIST);
     if(lex_peek(l).type == T_LPAREN_) {
         lex_next(l);
-        W(lex_peek(l).type != T_RPAREN_ && lex_peek(l).type != T_EOF_,lex_next(l))
+        W(lex_peek(l).type != T_RPAREN_ && lex_peek(l).type != T_EOF_ && !l->failed,{
+            node_add(bases, parse_expr(l));
+            if(lex_peek(l).type != T_COMMA_) break;
+            lex_next(l);
+        })
         expect(l, T_RPAREN_);
     }
     expect(l, T_COLON_);
@@ -1036,6 +1085,7 @@ static Node *parse_class(Lexer *l) {
     Node *n = node_new(N_CLASS);
     n->sval = strdup(name.sval);
     node_add(n, body);
+    node_add(n, bases);
     return n;
 }
 /* Apply a decorator chain to a value expression.
@@ -1181,10 +1231,13 @@ static Node *parse_stmt(Lexer *l) {
         W(lex_peek(l).type == T_DOT_,{
             lex_next(l);
             Token sub = lex_next(l);
-            char buf[4096];
-            snprintf(buf, sizeof(buf), "%s.%s", n->sval, sub.sval);
+            size_t a = strlen(n->sval), b = strlen(sub.sval);
+            char *joined = x_malloc(a + b + 2, "parse_import");
+            memcpy(joined, n->sval, a);
+            joined[a] = '.';
+            memcpy(joined + a + 1, sub.sval, b + 1);
             free(n->sval);
-            n->sval = strdup(buf);
+            n->sval = joined;
         })
         W(lex_peek(l).type == T_NEWLINE_,lex_next(l))
         return n;
@@ -1258,6 +1311,33 @@ static Node *parse_stmt(Lexer *l) {
     W(lex_peek(l).type == T_NEWLINE_ || lex_peek(l).type == T_SEMI_,lex_next(l))
     return expr;
 }
+/* Eval recurses once per tree level, so cap depth here instead of checking on every eval. */
+typedef struct { Node *n; int d; } DepthItem;
+static int tree_too_deep(Node *root, int limit) {
+    DepthItem local[256];
+    DepthItem *stk = local;
+    size_t sn = 0, cap = 256;
+    int deep = 0;
+    if (!root) return 0;
+    stk[sn++] = (DepthItem){root, 1};
+    while (sn && !deep) {
+        DepthItem cur = stk[--sn];
+        if (cur.d > limit) { deep = 1; break; }
+        for (int k = 0; k < cur.n->nch; k++) {
+            if (!cur.n->ch[k]) continue;
+            if (sn == cap) {
+                DepthItem *grown = stk == local ? malloc(cap * 2 * sizeof *stk) : realloc(stk, cap * 2 * sizeof *stk);
+                if (!grown) { sn = 0; break; }
+                if (stk == local) memcpy(grown, local, sizeof local);
+                stk = grown;
+                cap *= 2;
+            }
+            stk[sn++] = (DepthItem){cur.n->ch[k], cur.d + 1};
+        }
+    }
+    if (stk != local) free(stk);
+    return deep;
+}
 Node *parse(const char *src) {
     Lexer l;
     lex_init(&l, src);
@@ -1291,10 +1371,13 @@ Node *parse(const char *src) {
         }
         if (!g_parse_quiet) fprintf(stderr, "%s\n", g_parse_err_msg);
     }
+    if(!l.failed && g_parse_error_count == 0 && tree_too_deep(prog, SHAKTI_EXPR_MAX_DEPTH))
+        lex_fail(&l, "expression nesting too deep");
     if(l.failed && !g_error) {
         g_error = 1;
         g_error_val = v_errf("parse: %s", l.error[0] ? l.error : "invalid input");
     }
+    lex_free(&l);
     if(g_parse_error_count > 0 && !g_error) {
         g_error = 1;
         g_error_val = v_errf("parse: %s", g_parse_err_msg[0] ? g_parse_err_msg : "invalid input");

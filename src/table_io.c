@@ -1,4 +1,4 @@
-#include "shakti.h"
+#include "shakti_internal.h"
 #include <ctype.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -20,6 +20,10 @@ static int ends_with(const char *s, const char *t) {
 
 V *table_load(const char *path, V *columns_opt) {
     P(!path, v_err("load: path"))
+    {
+        char err[512];
+        if (shakti_fs_check(path, 0, err, sizeof err) != 0) return v_errf("load: %s", err);
+    }
     if (ends_with(path, ".csv"))
         return table_csv_load(path, columns_opt);
     if (ends_with(path, ".xml"))
@@ -31,6 +35,7 @@ V *table_load(const char *path, V *columns_opt) {
 
 int table_save(V *table, const char *path) {
     P(!table || !path, -1)
+    if (shakti_fs_check(path, 1, NULL, 0) != 0) return -1;
     if (ends_with(path, ".csv"))
         return table_csv_save(table, path);
     if (ends_with(path, ".tsv"))

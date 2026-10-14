@@ -8,6 +8,8 @@
  * v3 save is sparse pwrite (holes, not O_DIRECT). Durability: fsync / fdatasync / none.
  */
 #include "iefs_io.h"
+/* Safe-mode path confinement (src/env.c). */
+int shakti_fs_check(const char *path, int write, char *err, size_t err_cap);
 
 #include <errno.h>
 #include <fcntl.h>
@@ -721,6 +723,8 @@ int iefs_io_read_all_mode(const char *path, unsigned char **out, size_t *out_len
     }
     *out = NULL;
     *out_len = 0;
+    if (shakti_fs_check(path, 0, err, err_cap) != 0)
+        return -1;
 
     int use_direct = 0;
     int fd = -1;
@@ -938,6 +942,8 @@ int iefs_io_write_atomic_ex(const char *path, const unsigned char *buf, size_t l
         set_err(err, err_cap, "iefs_io_write_atomic: bad args");
         return -1;
     }
+    if (shakti_fs_check(path, 1, err, err_cap) != 0)
+        return -1;
     char tmp[4096];
     if (make_temp_path(path, tmp, sizeof tmp) != 0) {
         set_err(err, err_cap, "iefs: path too long");
@@ -1007,6 +1013,8 @@ int iefs_io_write_atomic_regions(const char *path, uint64_t file_len, const Iefs
         set_err(err, err_cap, "iefs_io_write_atomic_regions: bad args");
         return -1;
     }
+    if (shakti_fs_check(path, 1, err, err_cap) != 0)
+        return -1;
     for (uint32_t i = 0; i < n_reg; i++) {
         if (regs[i].len == 0)
             continue;

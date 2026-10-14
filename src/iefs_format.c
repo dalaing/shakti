@@ -24,6 +24,9 @@
 #include <snappy-c.h>
 #endif
 
+/* v3 header flag: named extents rebuild a dict, not a table. v3 readers ignored flags before. */
+#define IEFS_FLAG_V3_DICT 0x0100u
+
 /* Shakti has no extra numeric/media types. Stubs keep leftover switch arms compiling. */
 #ifndef T_UINT
 enum {
@@ -675,6 +678,10 @@ static int iefs_bits_not_64(int type, int bits) {
 }
 static V *col_raw_import(int type, int bits, uint64_t nelem, uint64_t ncols,
                          const unsigned char *p, size_t nbytes, IefsMapRegion *reg, int alias_ok) {
+    /* Stub tags (unsigned/decimal/guid) are not Shakti values. Their constructors
+     * allocate one pointer and the old copy wrote the other. */
+    if (type == T_UVEC || type == T_DVEC || type == T_GVEC || type == T_UMAT || type == T_DMAT)
+        return v_err("iefs: unsupported extent type");
     if (nelem > IEFS_MAX_ELEMS || ncols > IEFS_MAX_ELEMS || ncols >= (1ull << 32))
         return v_err("iefs: extent too large");
     if (iefs_bits_not_64(type, bits))
@@ -756,13 +763,6 @@ static V *col_raw_import(int type, int bits, uint64_t nelem, uint64_t ncols,
             v = bits < 64 ? v_fmat_bits((int64_t)nelem, (int64_t)ncols, bits) : v_fmat((int64_t)nelem, (int64_t)ncols);
             if (bits < 64) { if (nbytes) memcpy(v->B, p, nbytes); }
             else copy_f64_le(v->F, p, cells);
-        } else if (type == T_DMAT) {
-            v = v_dmat((int64_t)nelem, (int64_t)ncols, bits);
-            if (nbytes) memcpy(v->B, p, nbytes);
-        } else if (type == T_UMAT) {
-            v = v_umat((int64_t)nelem, (int64_t)ncols, bits);
-            if (bits < 64) { if (nbytes) memcpy(v->B, p, nbytes); }
-            else copy_i64_le(v->J, p, cells);
         } else {
             v = bits < 64 ? v_imat_bits((int64_t)nelem, (int64_t)ncols, bits) : v_imat((int64_t)nelem, (int64_t)ncols);
             if (bits < 64) { if (nbytes) memcpy(v->B, p, nbytes); }
@@ -823,16 +823,6 @@ static V *col_raw_import(int type, int bits, uint64_t nelem, uint64_t ncols,
     } else if (type == T_BVEC) {
         v = v_bvec((int64_t)nelem);
         if (nbytes) unpack_bool_bytes(v->B, p, (int64_t)nelem);
-    } else if (type == T_DVEC) {
-        v = v_dvec((int64_t)nelem, bits);
-        if (nbytes) memcpy(v->B, p, nbytes);
-    } else if (type == T_GVEC) {
-        v = v_gvec((int64_t)nelem);
-        if (nbytes && v->B) memcpy(v->B, p, nbytes);
-    } else if (type == T_UVEC) {
-        v = v_uvec((int64_t)nelem, bits);
-        if (bits < 64) { if (nbytes) memcpy(v->B, p, nbytes); }
-        else copy_i64_le(v->J, p, nelem);
     } else if (type == T_IVEC && bits < 64) {
         return widen_packed_ivec(p, nelem, bits);
     } else {
@@ -933,6 +923,7 @@ static int iefs_v3_prepare(V *v, int codec, int outer, int level, V *codecs, Ief
     memset(prep, 0, sizeof *prep);
     IefsExtentW *ext = NULL;
     int n_ext = 0;
+    uint16_t v3_flags = 0;
 
     if ((v->t == T_TABLE || v->t == T_DICT) && v->keys && v->vals &&
         v->keys->t == T_LIST && v->vals->t == T_LIST && v->keys->n == v->vals->n) {
@@ -943,6 +934,8 @@ static int iefs_v3_prepare(V *v, int codec, int outer, int level, V *codecs, Ief
             }
         }
         if (ok && v->keys->n > 0) {
+            if (v->t == T_DICT)
+                v3_flags = IEFS_FLAG_V3_DICT;
             n_ext = (int)v->keys->n;
             ext = calloc((size_t)n_ext, sizeof(*ext));
             if (!ext) { set_err(err, err_cap, "iefs: out of memory"); return -1; }
@@ -1103,7 +1096,7 @@ static int iefs_v3_prepare(V *v, int codec, int outer, int level, V *codecs, Ief
     }
     memcpy(prefix, IEFS_MAGIC, 4);
     put_u16(prefix + 4, 3);
-    put_u16(prefix + 6, 0);
+    put_u16(prefix + 6, v3_flags);
     put_u64(prefix + 8, (uint64_t)(total - IEFS_HEADER_SIZE));
     put_u32(prefix + 20, IEFS_TYPE_LAYOUT);
 
@@ -1689,7 +1682,7 @@ static int iefs_want_col(V *colnames, const char *name) {
 static V *iefs_table_select_cols(V *tbl, V *colnames);
 
 static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *reg, int verify_crc,
-                         V *colnames) {
+                         V *colnames, uint64_t max_plain) {
     uint64_t payload_len = get_u64(buf + 8);
     uint32_t expect_crc = get_u32(buf + 16);
     if (payload_len > IEFS_MAX_PAYLOAD)
@@ -1770,12 +1763,12 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
             const unsigned char *cur = ep;
             size_t cur_len = (size_t)elen;
             if (outer != SHAKTI_CODEC_NONE) {
-                if (inflated >= IEFS_MAX_PAYLOAD) {
+                if (inflated >= max_plain) {
                     for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);} free(cols); free(keys);
                     return v_err("iefs: decompressed payload too large");
                 }
                 if (shakti_decompress_max(outer, ep, (size_t)elen, &mid, &mid_len,
-                                          (size_t)(IEFS_MAX_PAYLOAD - inflated), err, sizeof err) != 0) {
+                                          (size_t)(max_plain - inflated), err, sizeof err) != 0) {
                     for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);} free(cols); free(keys);
                     return v_err(err[0] ? err : "iefs: extent outer decompress failed");
                 }
@@ -1783,9 +1776,9 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
                 cur_len = mid_len;
             }
             if (codec != SHAKTI_CODEC_NONE) {
-                if (inflated >= IEFS_MAX_PAYLOAD ||
+                if (inflated >= max_plain ||
                     shakti_decompress_max(codec, cur, cur_len, &plain, &plain_len,
-                                          (size_t)(IEFS_MAX_PAYLOAD - inflated), err, sizeof err) != 0) {
+                                          (size_t)(max_plain - inflated), err, sizeof err) != 0) {
                     free(mid);
                     for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);} free(cols); free(keys);
                     return v_err(err[0] ? err : "iefs: extent decompress failed");
@@ -1799,7 +1792,7 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
             }
             pay = plain;
             pay_len = plain_len;
-            if (pay_len > IEFS_MAX_PAYLOAD - inflated) {
+            if (pay_len > max_plain - inflated) {
                 free(plain);
                 for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);} free(cols); free(keys);
                 return v_err("iefs: decompressed payload too large");
@@ -1882,7 +1875,7 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
         vlist->L[i] = cols[i];
     }
     free(cols); free(keys);
-    out = v_table_own(klist, vlist);
+    out = (get_u16(buf + 6) & IEFS_FLAG_V3_DICT) ? v_dict_own(klist, vlist) : v_table_own(klist, vlist);
     return out;
 }
 
@@ -1898,6 +1891,8 @@ V *iefs_decode_max(const unsigned char *buf, size_t len, size_t max_plain) {
         return v_err("iefs: truncated header");
     if (max_plain == 0)
         return v_err("iefs: max_plain=0");
+    if (max_plain > IEFS_MAX_PAYLOAD)
+        max_plain = (size_t)IEFS_MAX_PAYLOAD;
     if (memcmp(buf, IEFS_MAGIC, 4) != 0)
         return v_err("iefs: bad magic");
     V *layout_err = iefs_check_type_layout(buf);
@@ -1908,13 +1903,9 @@ V *iefs_decode_max(const unsigned char *buf, size_t len, size_t max_plain) {
         return v_errf("iefs: unsupported version %u", (unsigned)ver);
     if (ver == 3) {
         uint64_t v3_payload = get_u64(buf + 8);
-        /* Reject oversized TOC bodies; capped max_plain still unsupported for
-         * per-extent codecs (IPC uses format 2). */
         if (v3_payload > max_plain)
             return v_err("iefs: payload too large");
-        if (max_plain < IEFS_MAX_PAYLOAD)
-            return v_err("iefs: max_plain not supported for format 3");
-        return iefs_decode_v3(buf, len, NULL, 1, NULL);
+        return iefs_decode_v3(buf, len, NULL, 1, NULL, max_plain);
     }
     uint16_t flags = get_u16(buf + 6);
     int codec = iefs_codec_from_flags(flags);
@@ -1984,6 +1975,10 @@ V *iefs_decode_max(const unsigned char *buf, size_t len, size_t max_plain) {
 }
 
 V *iefs_decode(const unsigned char *buf, size_t len) {
+    return iefs_decode_max(buf, len, shakti_decode_limit());
+}
+
+static V *iefs_decode_file(const unsigned char *buf, size_t len) {
     return iefs_decode_max(buf, len, (size_t)IEFS_MAX_PAYLOAD);
 }
 
@@ -2150,7 +2145,7 @@ V *iefs_decode_mapped_cols(const unsigned char *buf, size_t len, IefsMapRegion *
     if (ver != 1 && ver != 2 && ver != 3)
         return v_errf("iefs: unsupported version %u", (unsigned)ver);
     if (ver == 3)
-        return iefs_decode_v3(buf, len, reg, 0, colnames);
+        return iefs_decode_v3(buf, len, reg, 0, colnames, IEFS_MAX_PAYLOAD);
     uint16_t flags = get_u16(buf + 6);
     if (flags & IEFS_FLAG_CODEC_MASK)
         return v_err("iefs.map: compressed IEFS requires iefs.load");
@@ -2314,7 +2309,7 @@ V *iefs_store_read(const char *path) {
             free(offs);
             free(lens);
             if (rc == 0) {
-                V *v = iefs_decode(buf, len);
+                V *v = iefs_decode_file(buf, len);
                 free(buf);
                 if (v->t == T_ERR)
                     iefs_set_last_error(v->s);
@@ -2335,7 +2330,7 @@ V *iefs_store_read(const char *path) {
         iefs_set_last_error(err);
         return v_err(err);
     }
-    V *v = iefs_decode(buf, len);
+    V *v = iefs_decode_file(buf, len);
     free(buf);
     if (v->t == T_ERR)
         iefs_set_last_error(v->s);
@@ -2627,7 +2622,7 @@ V *bi_iefs_loads(V **a, int n) {
         return v_err("iefs_loads(list[char][, max_plain])");
     size_t len = a[0]->n > 0 ? (size_t)a[0]->n : 0;
     const unsigned char *p = (len && a[0]->B) ? a[0]->B : (const unsigned char *)"";
-    size_t max_plain = (size_t)IEFS_MAX_PAYLOAD;
+    size_t max_plain = shakti_decode_limit();
     if (n > 1) {
         if (!a[1] || a[1]->t != T_INT)
             return v_err("iefs_loads: max_plain must be int");

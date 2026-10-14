@@ -237,3 +237,78 @@ int env_load(Env *e, const char *path) {
     fclose(fp);
     return 1;
 }
+
+static int env_flag_on(const char *name) {
+    const char *v = getenv(name);
+    return v && v[0] && strcmp(v, "0") != 0;
+}
+int shakti_safe_mode(void) {
+    return env_flag_on("SHAKTI_SAFE");
+}
+int shakti_exec_allowed(void) {
+    const char *allow = getenv("SHAKTI_ALLOW_EXEC");
+    if (shakti_safe_mode()) return 0;
+    return !(allow && allow[0] == '0' && allow[1] == '\0');
+}
+int shakti_net_allowed(void) {
+    return !shakti_safe_mode() || env_flag_on("SHAKTI_ALLOW_NET");
+}
+/* Safe mode confines file access to SHAKTI_FS_ROOT (default: the working
+ * directory at first use). Paths are resolved with realpath, so symlinks that
+ * point outside the root are rejected. */
+int shakti_fs_check(const char *path, int write, char *err, size_t err_cap) {
+#ifdef _WIN32
+    (void)path; (void)write; (void)err; (void)err_cap;
+    return 0;
+#else
+    static char root[4096];
+    char full[8192];
+    if (!shakti_safe_mode()) return 0;
+    if (!path || !path[0]) {
+        if (err && err_cap) snprintf(err, err_cap, "safe mode: empty path");
+        return -1;
+    }
+    if (!root[0]) {
+        const char *r = getenv("SHAKTI_FS_ROOT");
+        char *rp = realpath(r && r[0] ? r : ".", NULL);
+        if (!rp) {
+            if (err && err_cap) snprintf(err, err_cap, "safe mode: bad SHAKTI_FS_ROOT");
+            return -1;
+        }
+        snprintf(root, sizeof root, "%s", rp);
+        free(rp);
+    }
+    char *rp = realpath(path, NULL);
+    if (rp) {
+        snprintf(full, sizeof full, "%s", rp);
+        free(rp);
+    } else {
+        char dir[8192];
+        const char *slash = strrchr(path, '/');
+        const char *base = slash ? slash + 1 : path;
+        if (slash == path) snprintf(dir, sizeof dir, "/");
+        else if (slash) snprintf(dir, sizeof dir, "%.*s", (int)(slash - path), path);
+        else snprintf(dir, sizeof dir, ".");
+        if (!base[0] || !strcmp(base, ".") || !strcmp(base, "..")) {
+            if (err && err_cap) snprintf(err, err_cap, "safe mode: bad path '%s'", path);
+            return -1;
+        }
+        char *dp = realpath(dir, NULL);
+        if (!dp) {
+            if (err && err_cap) snprintf(err, err_cap, "safe mode: cannot resolve '%s'", path);
+            return -1;
+        }
+        snprintf(full, sizeof full, "%s/%s", dp, base);
+        free(dp);
+    }
+    size_t rl = strlen(root);
+    int inside = !strcmp(root, "/") ||
+                 (!strncmp(full, root, rl) && (full[rl] == 0 || full[rl] == '/'));
+    if (!inside) {
+        if (err && err_cap)
+            snprintf(err, err_cap, "safe mode: %s outside SHAKTI_FS_ROOT: %s", write ? "write" : "read", path);
+        return -1;
+    }
+    return 0;
+#endif
+}

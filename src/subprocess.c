@@ -1,4 +1,4 @@
-#include "shakti.h"
+#include "shakti_internal.h"
 
 #include <spawn.h>
 #include <fcntl.h>
@@ -12,20 +12,20 @@
 #include <string.h>
 
 #if defined(_WIN32)
-V*subprocess(V**a,in){
+V*subprocess_ex(V**a,in,const char*dir_env){
+  (void)a;(void)n;(void)dir_env;
   return v_err("nyi");
 }
-#else // linux, apple, etc
 V*subprocess(V**a,in){
+  return subprocess_ex(a,n,NULL);
+}
+#else // linux, apple, etc
+/* dir_env, when non-NULL, is exported to the child only as __dir__ (the
+ * parent's environment is left untouched). */
+V*subprocess_ex(V**a,in,const char*dir_env){
   extern char **environ;
-  {
-    const char *safe = getenv("SHAKTI_SAFE");
-    const char *allow = getenv("SHAKTI_ALLOW_EXEC");
-    if ((safe && safe[0] && strcmp(safe, "0") != 0) ||
-        (allow && allow[0] == '0' && allow[1] == '\0')) {
-      return v_err("subprocess: disabled (SHAKTI_SAFE or SHAKTI_ALLOW_EXEC=0)");
-    }
-  }
+  if (!shakti_exec_allowed())
+    return v_err("subprocess: disabled (SHAKTI_SAFE or SHAKTI_ALLOW_EXEC=0)");
   struct stat sb;
   if(n>9)return NULL;
   int runfd = open("run", O_RDONLY|O_NOFOLLOW);
@@ -62,11 +62,18 @@ V*subprocess(V**a,in){
   char **envp = NULL;
   int envn = 0;
   for(char **e = environ; e && *e; e++) envn++;
-  envp = malloc((size_t)(envn + 1) * sizeof(char *));
-  if(!envp){ close(runfd); close(t); posix_spawn_file_actions_destroy(&file_actions); return v_err("subprocess: oom"); }
+  char *dir_kv = NULL;
+  if(dir_env){
+    size_t dl = strlen(dir_env);
+    dir_kv = malloc(dl + sizeof "__dir__=");
+    if(dir_kv){ memcpy(dir_kv, "__dir__=", 8); memcpy(dir_kv + 8, dir_env, dl + 1); }
+  }
+  envp = malloc((size_t)(envn + 2) * sizeof(char *));
+  if(!envp || (dir_env && !dir_kv)){ free(envp); free(dir_kv); close(runfd); close(t); posix_spawn_file_actions_destroy(&file_actions); return v_err("subprocess: oom"); }
   int ek = 0;
   for(char **e = environ; e && *e; e++){
-    if(!strncmp(*e, "SHAKTI_SERVE_TOKEN=", 19) ||
+    if(!strncmp(*e, "__dir__=", 8) ||
+       !strncmp(*e, "SHAKTI_SERVE_TOKEN=", 19) ||
        !strncmp(*e, "SHAKTI_REST_TOKEN=", 18) ||
        !strncmp(*e, "SHAKTI_REST_TOKEN_HOSTS=", 24) ||
        !strncmp(*e, "SHAKTI_TLS_KEY=", 15) ||
@@ -74,13 +81,18 @@ V*subprocess(V**a,in){
       continue;
     envp[ek++] = *e;
   }
+  if(dir_kv) envp[ek++] = dir_kv;
   envp[ek] = NULL;
   int r = posix_spawn(&pid, runpath, &file_actions, NULL, (char*const*)argv, envp);
   free(envp);
+  free(dir_kv);
   close(runfd);
   posix_spawn_file_actions_destroy(&file_actions);
   if(r) return close(t),v_err("subprocess");
   return v_subprocess(t, pid);
+}
+V*subprocess(V**a,in){
+  return subprocess_ex(a,n,NULL);
 }
 V *subprocess_next(V*p, double to) {
   unsigned char buffer[16536];

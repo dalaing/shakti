@@ -15,18 +15,36 @@ void node_add(Node *n, Node *child) {
     }
     n->ch[n->nch++] = child;
 }
+/* Iterative so very deep left-nested trees (1+1+...) don't exhaust the C stack. */
 void node_free(Node *n) {
-    if (!n) return;
-    if (n->fn_ast_i >= 0) {
-        n->fn_detached = 1;
-        return;
+    Node *local[64];
+    Node **stack = local;
+    size_t sn = 0, scap = 64;
+    while (n) {
+        if (n->fn_ast_i >= 0) {
+            n->fn_detached = 1;
+        } else {
+            if (n->fn_ast_i == -2)
+                n->fn_ast_i = -1;
+            free(n->sval);
+            for (int i = 0; i < n->nch; i++) {
+                if (!n->ch[i]) continue;
+                if (sn == scap) {
+                    Node **grown = stack == local ? malloc(scap * 2 * sizeof(Node *))
+                                                  : realloc(stack, scap * 2 * sizeof(Node *));
+                    if (!grown) { node_free(n->ch[i]); continue; }
+                    if (stack == local) memcpy(grown, local, sizeof local);
+                    stack = grown;
+                    scap *= 2;
+                }
+                stack[sn++] = n->ch[i];
+            }
+            free(n->ch);
+            free(n);
+        }
+        n = sn ? stack[--sn] : NULL;
     }
-    if (n->fn_ast_i == -2)
-        n->fn_ast_i = -1;
-    free(n->sval);
-    for (int i = 0; i < n->nch; i++) node_free(n->ch[i]);
-    free(n->ch);
-    free(n);
+    if (stack != local) free(stack);
 }
 static const char *node_op_name(int op) {
     switch (op) {

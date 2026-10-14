@@ -6,6 +6,7 @@
 #include "iefs_io.h"
 #include "iefs_map.h"
 #endif
+#include <sys/stat.h>
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
@@ -188,6 +189,10 @@ static void print_mat_pretty(V *v, FILE *fp) {
         return;
     }
     int *widths = calloc((size_t)cols, sizeof(int));
+    if (!widths) {
+        print_mat_compact(v, fp);
+        return;
+    }
     char buf[64];
     for (int64_t c = 0; c < cols; c++) {
         int w = 1;
@@ -711,7 +716,7 @@ void v_dict_set(V *d, const char *key, V *val) {
     if (d->n > DICT_HT_MIN) dict_ht_rebuild(d);
 }
 V *v_dict_get(V *d, const char *key) {
-    P(d->t != T_DICT,NULL)
+    P(!d || d->t != T_DICT,NULL)
     if (d->_ht) {
         uint32_t mask = d->_ht_cap - 1, slot = fnv1a(key) & mask;
         W(d->_ht[slot] != DICT_HT_EMPTY,{
@@ -793,55 +798,76 @@ void v_serialize(V *v, FILE *fp) {
         break;
     }
 }
-static int deser_read_i64(FILE *fp, int64_t *out) {
-    return fread(out, 8, 1, fp) == 1;
+/* Counts are checked against the bytes left in the file so a short file
+ * cannot request large allocations. */
+typedef struct {
+    FILE *fp;
+    int64_t left;
+} Deser;
+static int deser_getc(Deser *d) {
+    int c = fgetc(d->fp);
+    if (c != EOF) d->left--;
+    return c;
 }
-static int deser_len_ok(int64_t len) {
-    return len >= 0 && len <= SHAKTI_DESER_MAX_LEN;
+static int deser_read(Deser *d, void *out, size_t size, int64_t n) {
+    if (n <= 0) return 1;
+    if ((uint64_t)n > (uint64_t)d->left / size) return 0;
+    if (fread(out, size, (size_t)n, d->fp) != (size_t)n) return 0;
+    d->left -= (int64_t)size * n;
+    return 1;
 }
-static int deser_count_ok(int64_t n) {
-    return n >= 0 && n <= SHAKTI_DESER_MAX_LEN;
+static int deser_read_i64(Deser *d, int64_t *out) {
+    return deser_read(d, out, 8, 1);
 }
-static int deser_mat_dims_ok(int64_t rows, int64_t cols, int64_t *cells_out) {
+static int deser_fits(Deser *d, int64_t n, int64_t elem_size) {
+    return n <= d->left / elem_size;
+}
+static int deser_len_ok(Deser *d, int64_t len) {
+    return len >= 0 && len <= SHAKTI_DESER_MAX_LEN && deser_fits(d, len, 1);
+}
+static int deser_count_ok(Deser *d, int64_t n, int64_t elem_size) {
+    return n >= 0 && n <= SHAKTI_DESER_MAX_LEN && deser_fits(d, n, elem_size);
+}
+static int deser_mat_dims_ok(Deser *d, int64_t rows, int64_t cols, int64_t elem_size, int64_t *cells_out) {
     if (rows < 0 || cols < 0 || rows > SHAKTI_DESER_MAX_LEN || cols > SHAKTI_DESER_MAX_LEN) return 0;
     if (rows == 0 || cols == 0) { *cells_out = 0; return 1; }
     if (rows > INT64_MAX / cols) return 0;
     *cells_out = rows * cols;
-    return *cells_out <= SHAKTI_DESER_MAX_LEN;
+    return *cells_out <= SHAKTI_DESER_MAX_LEN && deser_fits(d, *cells_out, elem_size);
 }
-static V *v_deserialize_depth(FILE *fp, int depth);
+static V *v_deserialize_depth(Deser *d, int depth);
 
-static V *v_deserialize_depth(FILE *fp, int depth) {
-    int t = fgetc(fp);
+static V *v_deserialize_depth(Deser *d, int depth) {
+    int t = deser_getc(d);
     P(t == EOF || t == T_NIL, v_nil())
     P(depth >= SHAKTI_DESER_MAX_DEPTH, v_err("deserialize: nesting too deep"))
     switch (t) {
     case T_BOOL: {
-        int b = fgetc(fp);
+        int b = deser_getc(d);
         P(b == EOF, v_err("deserialize: truncated bool"))
         return v_bool(b);
     }
     case T_INT: {
         int64_t j;
-        P(!deser_read_i64(fp, &j), v_err("deserialize: truncated int"))
+        P(!deser_read_i64(d, &j), v_err("deserialize: truncated int"))
         return v_int(j);
     }
     case T_CHAR: {
-        int b = fgetc(fp);
+        int b = deser_getc(d);
         P(b == EOF, v_err("deserialize: truncated char"))
         return v_char((unsigned char)b);
     }
     case T_FLOAT: {
         double f;
-        P(fread(&f, 8, 1, fp) != 1, v_err("deserialize: truncated float"))
+        P(!deser_read(d, &f, 8, 1), v_err("deserialize: truncated float"))
         return v_float(f);
     }
     case T_STR: {
         int64_t len;
-        P(!deser_read_i64(fp, &len) || !deser_len_ok(len), v_err("deserialize: bad string length"))
+        P(!deser_read_i64(d, &len) || !deser_len_ok(d, len), v_err("deserialize: bad string length"))
         char *s = malloc((size_t)len + 1);
         P(!s, v_err("deserialize: oom"))
-        if (len > 0 && fread(s, 1, (size_t)len, fp) != (size_t)len) {
+        if (!deser_read(d, s, 1, len)) {
             free(s);
             return v_err("deserialize: truncated string");
         }
@@ -852,85 +878,85 @@ static V *v_deserialize_depth(FILE *fp, int depth) {
     }
     case T_DATE: {
         int64_t j;
-        P(!deser_read_i64(fp, &j), v_err("deserialize: truncated date"))
+        P(!deser_read_i64(d, &j), v_err("deserialize: truncated date"))
         return v_date(j);
     }
     case T_TIME: {
         int64_t j;
-        P(!deser_read_i64(fp, &j), v_err("deserialize: truncated time"))
+        P(!deser_read_i64(d, &j), v_err("deserialize: truncated time"))
         return v_time(j);
     }
     case T_DATETIME: {
         int64_t j;
-        P(!deser_read_i64(fp, &j), v_err("deserialize: truncated datetime"))
+        P(!deser_read_i64(d, &j), v_err("deserialize: truncated datetime"))
         return v_datetime(j);
     }
     case T_IVEC: {
         int64_t n;
-        P(!deser_read_i64(fp, &n) || !deser_count_ok(n), v_err("deserialize: bad ivec length"))
+        P(!deser_read_i64(d, &n) || !deser_count_ok(d, n, 8), v_err("deserialize: bad ivec length"))
         V *r = v_ivec(n);
-        if (n > 0 && fread(r->J, 8, (size_t)n, fp) != (size_t)n) { v_free(r); return v_err("deserialize: truncated ivec"); }
+        if (!deser_read(d, r->J, 8, n)) { v_free(r); return v_err("deserialize: truncated ivec"); }
         return r;
     }
     case T_FVEC: {
         int64_t n;
-        P(!deser_read_i64(fp, &n) || !deser_count_ok(n), v_err("deserialize: bad fvec length"))
+        P(!deser_read_i64(d, &n) || !deser_count_ok(d, n, 8), v_err("deserialize: bad fvec length"))
         V *r = v_fvec(n);
-        if (n > 0 && fread(r->F, 8, (size_t)n, fp) != (size_t)n) { v_free(r); return v_err("deserialize: truncated fvec"); }
+        if (!deser_read(d, r->F, 8, n)) { v_free(r); return v_err("deserialize: truncated fvec"); }
         return r;
     }
     case T_BVEC: {
         int64_t n;
-        P(!deser_read_i64(fp, &n) || !deser_count_ok(n), v_err("deserialize: bad bvec length"))
+        P(!deser_read_i64(d, &n) || !deser_count_ok(d, n, 1), v_err("deserialize: bad bvec length"))
         V *r = v_bvec(n);
-        if (n > 0 && fread(r->B, 1, (size_t)n, fp) != (size_t)n) { v_free(r); return v_err("deserialize: truncated bvec"); }
+        if (!deser_read(d, r->B, 1, n)) { v_free(r); return v_err("deserialize: truncated bvec"); }
         return r;
     }
     case T_CVEC: {
         int64_t n;
-        P(!deser_read_i64(fp, &n) || !deser_count_ok(n), v_err("deserialize: bad cvec length"))
+        P(!deser_read_i64(d, &n) || !deser_count_ok(d, n, 1), v_err("deserialize: bad cvec length"))
         V *r = v_cvec(n);
-        if (n > 0 && fread(r->B, 1, (size_t)n, fp) != (size_t)n) { v_free(r); return v_err("deserialize: truncated cvec"); }
+        if (!deser_read(d, r->B, 1, n)) { v_free(r); return v_err("deserialize: truncated cvec"); }
         return r;
     }
     case T_IMAT: {
         int64_t rows, cols, cells;
-        P(!deser_read_i64(fp, &rows) || !deser_read_i64(fp, &cols) || !deser_mat_dims_ok(rows, cols, &cells),
+        P(!deser_read_i64(d, &rows) || !deser_read_i64(d, &cols) || !deser_mat_dims_ok(d, rows, cols, 8, &cells),
           v_err("deserialize: bad imat shape"))
         V *r = v_imat(rows, cols);
-        if (cells > 0 && fread(r->J, 8, (size_t)cells, fp) != (size_t)cells) { v_free(r); return v_err("deserialize: truncated imat"); }
+        if (!deser_read(d, r->J, 8, cells)) { v_free(r); return v_err("deserialize: truncated imat"); }
         return r;
     }
     case T_FMAT: {
         int64_t rows, cols, cells;
-        P(!deser_read_i64(fp, &rows) || !deser_read_i64(fp, &cols) || !deser_mat_dims_ok(rows, cols, &cells),
+        P(!deser_read_i64(d, &rows) || !deser_read_i64(d, &cols) || !deser_mat_dims_ok(d, rows, cols, 8, &cells),
           v_err("deserialize: bad fmat shape"))
         V *r = v_fmat(rows, cols);
-        if (cells > 0 && fread(r->F, 8, (size_t)cells, fp) != (size_t)cells) { v_free(r); return v_err("deserialize: truncated fmat"); }
+        if (!deser_read(d, r->F, 8, cells)) { v_free(r); return v_err("deserialize: truncated fmat"); }
         return r;
     }
     case T_BMAT: {
         int64_t rows, cols, cells;
-        P(!deser_read_i64(fp, &rows) || !deser_read_i64(fp, &cols) || !deser_mat_dims_ok(rows, cols, &cells),
+        P(!deser_read_i64(d, &rows) || !deser_read_i64(d, &cols) || !deser_mat_dims_ok(d, rows, cols, 1, &cells),
           v_err("deserialize: bad bmat shape"))
         V *r = v_bmat(rows, cols);
-        if (cells > 0 && fread(r->B, 1, (size_t)cells, fp) != (size_t)cells) { v_free(r); return v_err("deserialize: truncated bmat"); }
+        if (!deser_read(d, r->B, 1, cells)) { v_free(r); return v_err("deserialize: truncated bmat"); }
         return r;
     }
     case T_CMAT: {
         int64_t rows, cols, cells;
-        P(!deser_read_i64(fp, &rows) || !deser_read_i64(fp, &cols) || !deser_mat_dims_ok(rows, cols, &cells),
+        P(!deser_read_i64(d, &rows) || !deser_read_i64(d, &cols) || !deser_mat_dims_ok(d, rows, cols, 1, &cells),
           v_err("deserialize: bad cmat shape"))
         V *r = v_cmat(rows, cols);
-        if (cells > 0 && fread(r->B, 1, (size_t)cells, fp) != (size_t)cells) { v_free(r); return v_err("deserialize: truncated cmat"); }
+        if (!deser_read(d, r->B, 1, cells)) { v_free(r); return v_err("deserialize: truncated cmat"); }
         return r;
     }
     case T_LIST: {
         int64_t n;
-        P(!deser_read_i64(fp, &n) || !deser_count_ok(n), v_err("deserialize: bad list length"))
+        P(!deser_read_i64(d, &n) || !deser_count_ok(d, n, 1), v_err("deserialize: bad list length"))
         V *r = v_list(n);
         for (int64_t i = 0; i < n; i++) {
-            r->L[i] = v_deserialize_depth(fp, depth + 1);
+            r->L[i] = v_deserialize_depth(d, depth + 1);
             if (r->L[i]->t == T_ERR) {
                 V *err = r->L[i];
                 r->L[i] = NULL;
@@ -942,9 +968,9 @@ static V *v_deserialize_depth(FILE *fp, int depth) {
         return r;
     }
     case T_DICT: {
-        V *k = v_deserialize_depth(fp, depth + 1);
+        V *k = v_deserialize_depth(d, depth + 1);
         if (k->t == T_ERR) return k;
-        V *v = v_deserialize_depth(fp, depth + 1);
+        V *v = v_deserialize_depth(d, depth + 1);
         if (v->t == T_ERR) { v_free(k); return v; }
         V *r = v_dict(k, v);
         v_free(k);
@@ -952,9 +978,9 @@ static V *v_deserialize_depth(FILE *fp, int depth) {
         return r;
     }
     case T_TABLE: {
-        V *k = v_deserialize_depth(fp, depth + 1);
+        V *k = v_deserialize_depth(d, depth + 1);
         if (k->t == T_ERR) return k;
-        V *v = v_deserialize_depth(fp, depth + 1);
+        V *v = v_deserialize_depth(d, depth + 1);
         if (v->t == T_ERR) { v_free(k); return v; }
         V *r = v_table(k, v);
         v_free(k);
@@ -965,7 +991,12 @@ static V *v_deserialize_depth(FILE *fp, int depth) {
     return v_nil();
 }
 V *v_deserialize(FILE *fp) {
-    return v_deserialize_depth(fp, 0);
+    Deser d = {fp, (int64_t)SHAKTI_DESER_MAX_LEN * 8};
+    struct stat sb;
+    long pos = ftell(fp);
+    if (fstat(fileno(fp), &sb) == 0 && S_ISREG(sb.st_mode) && pos >= 0)
+        d.left = sb.st_size > (off_t)pos ? (int64_t)(sb.st_size - pos) : 0;
+    return v_deserialize_depth(&d, 0);
 }
 static void table_cell_buf(V *col, int64_t r, char *buf, size_t cap) {
     buf[0] = 0;

@@ -7,6 +7,7 @@
  *   pdf.save(w, "out.pdf")
  */
 #include "pdf.h"
+#include "shakti_internal.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -1058,8 +1059,9 @@ static int pdf_extract_text_from_content(const unsigned char *data, size_t len, 
             continue;
         }
         if (c == '<' && !(p.pos + 1 < p.len && p.data[p.pos + 1] == '<')) {
+            size_t before = p.pos;
             PdfObj *str = pp_parse_hex_string(&p);
-            if (!str) return -1;
+            if (!str) { p.pos = before + 1; continue; }
             pp_skip_ws(&p);
             if (pp_startswith(&p, "Tj") || pp_startswith(&p, "'")) {
                 if (extract_append_str(out, str->s, str->slen) < 0) { po_free(str); return -1; }
@@ -1070,8 +1072,9 @@ static int pdf_extract_text_from_content(const unsigned char *data, size_t len, 
             continue;
         }
         if (c == '[') {
+            size_t before = p.pos;
             PdfObj *arr = pp_parse_array(&p);
-            if (!arr) return -1;
+            if (!arr) { p.pos = before + 1; continue; }
             pp_skip_ws(&p);
             if (pp_startswith(&p, "TJ")) {
                 for (int i = 0; i < arr->nitems; i++) {
@@ -1185,6 +1188,11 @@ V *bi_pdf_save(V **a, int n) {
     PdfDoc *d = pdf_at(a[0]->j);
     P(!d || d->mode != PDF_WRITE, v_err("pdf_save: bad write handle"))
     P(d->npages < 1, v_err("pdf_save: no pages"))
+    {
+        char ferr[512];
+        if (shakti_fs_check(a[1]->s, 1, ferr, sizeof ferr) != 0)
+            return v_errf("pdf_save: %s", ferr);
+    }
 
     /* inline write with correct length tracking */
     int n_pages = d->npages;
@@ -1253,6 +1261,11 @@ oom:
 
 V *bi_pdf_open(V **a, int n) {
     P(n < 1 || a[0]->t != T_STR, v_err("pdf_open(path)"))
+    {
+        char ferr[512];
+        if (shakti_fs_check(a[0]->s, 0, ferr, sizeof ferr) != 0)
+            return v_errf("pdf_open: %s", ferr);
+    }
     FILE *fp = fopen(a[0]->s, "rb");
     P(!fp, v_errf("pdf_open: cannot open '%s'", a[0]->s))
     if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return v_err("pdf_open: seek failed"); }

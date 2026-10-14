@@ -17,6 +17,7 @@
 #   conn : rest.accept(srv)
 #   req : rest.read(conn)
 #   w : ws.accept(conn)          # or ws.accept(conn, req)
+#   w : ws.accept(conn, req, origins:["https://app.example"])  # allow extra Origins ("*" = any)
 #
 # TLS server:
 #   srv : rest.listen_tls(9443, "server.crt", "server.key")
@@ -24,7 +25,9 @@
 def connect(url, insecure:0):
     return ws_connect(url, insecure)
 
-def accept(conn, req:0):
+def accept(conn, req:0, origins:0):
+    if origins:
+        return ws_accept(conn, req, origins)
     if req:
         return ws_accept(conn, req)
     return ws_accept(conn)

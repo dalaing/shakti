@@ -72,7 +72,7 @@ endif
 
 LDFLAGS := -lm $(OMP_LDFLAGS)
 ifneq ($(filter Linux,$(UNAME_S)),)
-  LDFLAGS += -lrt -ldl -Wl,-export-dynamic
+  LDFLAGS += -lrt -ldl
 endif
 ifeq ($(UNAME_S),Darwin)
   ifeq ($(SHAKTI_USE_ACCELERATE),1)
@@ -326,6 +326,24 @@ ifeq ($(UNAME_S),Darwin)
   endif
 endif
 
+# Explicit hardening (do not rely on distro compiler defaults). Disable with
+# SHAKTI_HARDEN=0. Pass extra flags via EXTRA_CFLAGS / EXTRA_LDFLAGS (appended
+# last) instead of overriding CFLAGS, which would drop these and -O2.
+SHAKTI_HARDEN ?= 1
+FORTIFY_LEVEL ?= 2
+ifeq ($(SHAKTI_HARDEN),1)
+  HARDEN_CFLAGS := -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=$(FORTIFY_LEVEL)
+  HARDEN_LDFLAGS :=
+  ifeq ($(UNAME_S),Linux)
+    HARDEN_CFLAGS += -fPIE
+    HARDEN_LDFLAGS += -pie -Wl,-z,relro,-z,now,-z,noexecstack
+  endif
+  CFLAGS += $(HARDEN_CFLAGS)
+  LDFLAGS += $(HARDEN_LDFLAGS)
+endif
+CFLAGS += $(EXTRA_CFLAGS)
+LDFLAGS += $(EXTRA_LDFLAGS)
+
 $(BUILD)/shakti_version.h: src/VERSION
 	@mkdir -p $(BUILD)
 	@sed 's/.*/#define SHAKTI_PKG_VERSION "&"/' src/VERSION > $@
@@ -453,7 +471,7 @@ $(SHAKTI): $(BUILD)/shakti_version.h src/a.h src/shakti.h src/shakti_internal.h 
 # Optional JNI object for Java/Android hosts (tests/build_guards.sh).
 # Lives under $(BUILD)/ so `make test` does not drop a .o in the repo root.
 $(BUILD)/shakti_jni.o: src/shakti_jni.c src/a.h | $(BUILD)
-	$(CC) $(CFLAGS) $(JNI_CFLAGS) -DSHAKTI_STANDALONE=1 -c -o $@ src/shakti_jni.c
+	$(CC) $(CFLAGS) -fPIC $(JNI_CFLAGS) -DSHAKTI_STANDALONE=1 -c -o $@ src/shakti_jni.c
 shakti_jni.o: $(BUILD)/shakti_jni.o
 
 SHAKTI_LIB_DIR := lib

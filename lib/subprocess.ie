@@ -9,9 +9,15 @@ def flatten(a):
 	flat2(b,a)
 	return b
 
+# Commands are typed into a PTY: the tty line discipline acts on control
+# characters (^U kill-line, ^C, ^D, erase, ...) before the shell sees them, so a
+# backslash cannot neutralise them. Reject them outright.
 def quote(x):
 	a:""
 	for c in x:
+		o:ord(c)
+		if o < 32 or o = 127:
+			raise "subprocess: control character in argument"
 		if(c in "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_"):
 			a:a+c
 		else:
@@ -37,7 +43,7 @@ class Popen:
 			if len(args)>2: raise "Popen(shell:True) requires a single arg"
 		if not executable=None: args:insert(args,executable)
 		if cwd=None:cwd:default_cwd
-		comm: load(__dir__ + "/subspace/",*args,__dir__:cwd)
+		comm: load(__dir__ + "/subspace/",*args,exec:True,__dir__:cwd)
 		if(type(comm)="dict"):raise "Failed to open subspace"
 		for k,v in env:
 			comm(f"export {quote(k)}={quote(string(v))};")

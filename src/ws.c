@@ -1,6 +1,8 @@
 /* ws — RFC6455 WebSocket client/server (ws:// and wss://). */
 #include "ws.h"
+#include "http_line.h"
 #include "rest.h"
+#include "shakti_internal.h"
 #include "tls.h"
 
 #include <arpa/inet.h>
@@ -136,7 +138,7 @@ static int ws_rx_need(WsIo *io, size_t need) {
         if (!space) return -1;
         ssize_t r;
         if (io->ssl)
-            r = tls_read(io->ssl, h->rx + h->rx_len, space);
+            r = shakti_tls_read(io->ssl, h->rx + h->rx_len, space);
         else
             r = read(io->fd, h->rx + h->rx_len, space);
         if (r < 0) {
@@ -165,7 +167,7 @@ static ssize_t ws_io_read(WsIo *io, void *buf, size_t n) {
     while (got < n) {
         ssize_t r;
         if (io->ssl)
-            r = tls_read(io->ssl, (char *)buf + got, n - got);
+            r = shakti_tls_read(io->ssl, (char *)buf + got, n - got);
         else
             r = read(io->fd, (char *)buf + got, n - got);
         if (r < 0) {
@@ -197,7 +199,7 @@ static ssize_t ws_io_write(WsIo *io, const void *buf, size_t n) {
     while (sent < n) {
         ssize_t w;
         if (io->ssl)
-            w = tls_write(io->ssl, (const char *)buf + sent, n - sent);
+            w = shakti_tls_write(io->ssl, (const char *)buf + sent, n - sent);
         else
             w = write(io->fd, (const char *)buf + sent, n - sent);
         if (w > 0) {
@@ -521,7 +523,7 @@ static int ws_alloc(int fd, void *ssl, int is_client) {
 static void ws_free_handle(WsHandle *s) {
     if (!s) return;
     if (s->ssl) {
-        tls_close(s->ssl, s->fd);
+        shakti_tls_close(s->ssl, s->fd);
     } else if (s->fd >= 0) {
         close(s->fd);
     }
@@ -565,7 +567,13 @@ static int ws_parse_url(const char *url, int *use_tls, char *host, size_t host_c
     if (hlen == 0 || hlen >= host_cap) return -1;
     memcpy(host, p, hlen);
     host[hlen] = 0;
-    if (colon && (!slash || colon < slash)) *port = atoi(colon + 1);
+    if (colon && (!slash || colon < slash)) {
+        char *end = NULL;
+        long pv = strtol(colon + 1, &end, 10);
+        if (end == colon + 1 || (slash ? end != slash : *end != 0) || pv < 1 || pv > 65535)
+            return -1;
+        *port = (int)pv;
+    }
     /* Reject CR/LF (and other CTL) in host/path to prevent header injection. */
     for (const char *q = host; *q; q++) {
         if ((unsigned char)*q < 0x20 || *q == 0x7f) return -1;
@@ -584,6 +592,12 @@ static int ws_tcp_connect(const char *host, int port) {
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(host, port_s, &hints, &res) != 0) return -1;
+    for (rp = res; rp; rp = rp->ai_next) {
+        if (rest_addr_blocked(rp->ai_addr)) {
+            freeaddrinfo(res);
+            return -2;
+        }
+    }
     int fd = -1;
     for (rp = res; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
@@ -681,11 +695,15 @@ static int ws_client_handshake(WsIo *io, const char *host, int port, const char 
         resp[got] = 0;
         if (got >= 4 && strstr(resp, "\r\n\r\n")) break;
     }
-    if (got == 0 || !strstr(resp, "101")) return -1;
+    if (got < 13 || strncmp(resp, "HTTP/1.1 101", 12) != 0 || (resp[12] != ' ' && resp[12] != '\r'))
+        return -1;
+    if (!strstr(resp, "\r\n\r\n")) return -1;
+    const char *hdrs = strstr(resp, "\r\n") + 2;
+    if (!ws_header_has(hdrs, "Upgrade", "websocket")) return -1;
+    if (!ws_header_has(hdrs, "Connection", "upgrade")) return -1;
     char accept[64];
-    if (ws_extract_header(resp, "Sec-WebSocket-Accept", accept, sizeof accept) != 0) return -1;
+    if (ws_extract_header(hdrs, "Sec-WebSocket-Accept", accept, sizeof accept) != 0) return -1;
     if (strcmp(accept, expect) != 0) return -1;
-    (void)ws_header_has;
     return 0;
 }
 
@@ -743,15 +761,19 @@ void ws_raw_set_recv_timeout_ms(int fd, int ms) {
 #ifndef SHAKTI_WASM
 
 static V *ws_do_connect(const char *url, int insecure) {
+    if (!shakti_net_allowed())
+        return v_err("ws_connect: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
     int use_tls = 0, port = 80;
     char host[256], path[1024];
     if (ws_parse_url(url, &use_tls, host, sizeof host, &port, path, sizeof path) != 0)
         return v_err("ws_connect: url must be ws:// or wss://");
     int fd = ws_tcp_connect(host, port);
+    if (fd == -2)
+        return v_err("ws_connect: private/link-local address blocked (set SHAKTI_NET_ALLOW_PRIVATE=1)");
     if (fd < 0) return v_err("ws_connect: tcp connect failed");
     void *ssl = NULL;
     if (use_tls) {
-        ssl = tls_connect(fd, host, insecure);
+        ssl = shakti_tls_connect(fd, host, insecure);
         if (!ssl) {
             close(fd);
             return v_err("ws_connect: tls handshake failed");
@@ -759,7 +781,7 @@ static V *ws_do_connect(const char *url, int insecure) {
     }
     unsigned char key_raw[16];
     if (ws_fill_random(key_raw, sizeof key_raw) != 0) {
-        if (ssl) tls_close(ssl, fd);
+        if (ssl) shakti_tls_close(ssl, fd);
         else close(fd);
         return v_err("ws_connect: random failed");
     }
@@ -767,13 +789,13 @@ static V *ws_do_connect(const char *url, int insecure) {
     ws_b64_encode(key_raw, 16, key_b64, sizeof key_b64);
     WsIo io = {.fd = fd, .ssl = ssl};
     if (ws_client_handshake(&io, host, port, path, key_b64) != 0) {
-        if (ssl) tls_close(ssl, fd);
+        if (ssl) shakti_tls_close(ssl, fd);
         else close(fd);
         return v_err("ws_connect: websocket handshake failed");
     }
     int h = ws_alloc(fd, ssl, 1);
     if (h < 0) {
-        if (ssl) tls_close(ssl, fd);
+        if (ssl) shakti_tls_close(ssl, fd);
         else close(fd);
         return v_err("ws_connect: too many handles");
     }
@@ -793,11 +815,32 @@ static int ws_hdr_get_ci(V *headers, const char *name, char *out, size_t out_cap
     return -1;
 }
 
-static V *ws_do_accept(int rest_h, V *req_or_headers) {
+static int ws_origin_in(V *origins, const char *origin) {
+    if (!origins || origins->t != T_LIST) return 0;
+    for (int64_t i = 0; i < origins->n; i++) {
+        V *o = origins->L[i];
+        if (!o || o->t != T_STR || !o->s) continue;
+        if (!strcmp(o->s, "*") || !strcasecmp(o->s, origin)) return 1;
+    }
+    return 0;
+}
+
+static V *ws_do_accept(int rest_h, V *req_or_headers, V *origins) {
+    if (!shakti_net_allowed())
+        return v_err("ws_accept: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
     char key[128];
     char proto[128];
+    char origin[512];
+    int loopback = 0;
     key[0] = 0;
     proto[0] = 0;
+    origin[0] = 0;
+    if (origins && origins->t == T_STR) {
+        if (!origins->s || strcmp(origins->s, "*") != 0)
+            return v_err("ws_accept: origins must be a list of origins or \"*\"");
+    } else if (origins && origins->t != T_LIST) {
+        origins = NULL;
+    }
     V *headers = req_or_headers;
     if (headers && headers->t == T_DICT) {
         V *inner = v_dict_get(headers, "headers");
@@ -807,6 +850,33 @@ static V *ws_do_accept(int rest_h, V *req_or_headers) {
     if (rest_peek_ws_key(rest_h, key, sizeof key) != 0 || !key[0]) {
         if (!headers || ws_hdr_get_ci(headers, "Sec-WebSocket-Key", key, sizeof key) != 0)
             return v_err("ws_accept: missing Sec-WebSocket-Key");
+    }
+    if (rest_peek_ws_origin(rest_h, origin, sizeof origin, &loopback) != 0)
+        return v_err("ws_accept: invalid rest connection");
+    if (!origin[0] && headers)
+        ws_hdr_get_ci(headers, "Origin", origin, sizeof origin);
+    if (origin[0]) {
+        int ok;
+        if (origins && origins->t == T_STR)
+            ok = 1;
+        else if (origins)
+            ok = ws_origin_in(origins, origin) || (loopback && http_origin_is_local(origin));
+        else
+            ok = !loopback || http_origin_is_local(origin) ||
+                 http_origin_allowed(origin, getenv("SHAKTI_REST_ALLOWED_ORIGINS"));
+        if (!ok) {
+            int fd = -1;
+            void *ssl = NULL;
+            if (rest_take_conn(rest_h, &fd, &ssl) == 0) {
+                static const char forbid[] = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n"
+                                             "Connection: close\r\n\r\n";
+                WsIo io = {.fd = fd, .ssl = ssl};
+                (void)ws_io_write(&io, forbid, sizeof forbid - 1);
+                if (ssl) shakti_tls_close(ssl, fd);
+                else close(fd);
+            }
+            return v_err("ws_accept: Origin not allowed (pass origins: or set SHAKTI_REST_ALLOWED_ORIGINS)");
+        }
     }
     rest_peek_ws_protocol(rest_h, proto, sizeof proto);
     if (!proto[0] && headers)
@@ -856,13 +926,13 @@ static V *ws_do_accept(int rest_h, V *req_or_headers) {
     }
     WsIo io = {.fd = fd, .ssl = ssl};
     if (n < 0 || (size_t)n >= sizeof resp || ws_io_write(&io, resp, (size_t)n) != n) {
-        if (ssl) tls_close(ssl, fd);
+        if (ssl) shakti_tls_close(ssl, fd);
         else close(fd);
         return v_err("ws_accept: write 101 failed");
     }
     int h = ws_alloc(fd, ssl, 0);
     if (h < 0) {
-        if (ssl) tls_close(ssl, fd);
+        if (ssl) shakti_tls_close(ssl, fd);
         else close(fd);
         return v_err("ws_accept: too many handles");
     }
@@ -904,9 +974,10 @@ V *bi_ws_accept(V **a, int n) {
     (void)n;
     return v_err("ws: not available in WASM");
 #else
-    P(n < 1 || a[0]->t != T_INT, v_err("ws_accept(conn[, req_or_headers])"))
+    P(n < 1 || a[0]->t != T_INT, v_err("ws_accept(conn[, req_or_headers, origins])"))
     V *hdrs = (n > 1 && a[1]->t == T_DICT) ? a[1] : NULL;
-    return ws_do_accept((int)a[0]->j, hdrs);
+    V *origins = (n > 2 && (a[2]->t == T_LIST || a[2]->t == T_STR)) ? a[2] : NULL;
+    return ws_do_accept((int)a[0]->j, hdrs, origins);
 #endif
 }
 
@@ -1057,7 +1128,7 @@ V *bi_ws_poll(V **a, int n) {
         else continue;
         WsHandle *s = ws_slot(h);
         if (!s) continue;
-        if (s->ssl && tls_pending(s->ssl) > 0) {
+        if (s->ssl && shakti_tls_pending(s->ssl) > 0) {
             v_list_append_own(ready, v_int(h));
             continue;
         }

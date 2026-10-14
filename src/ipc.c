@@ -1,7 +1,18 @@
+#ifdef SHAKTI_HAVE_TLS
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#endif
 #include "ipc_internal.h"
 #include "shakti_internal.h"
 
 #include <netdb.h>
+
+#define IPC_AUTH_MAGIC "SHKA1"
+#define IPC_AUTH_MAGIC_LEN 5u
+#define IPC_AUTH_NONCE 32u
+#define IPC_AUTH_TIMEOUT_MS 5000
 
 static IpcHandle g_handles[IPC_MAX_HANDLES];
 static IpcShmSlot g_shm[IPC_MAX_HANDLES];
@@ -41,6 +52,71 @@ uint32_t ipc_rand_corr_seed(void) {
     if (v == 0) v = ((uint32_t)getpid() << 16) ^ (uint32_t)time(NULL);
     if (v == 0) v = 0xA5A5u;
     return v;
+}
+
+int ipc_random_bytes(unsigned char *buf, size_t n) {
+#ifdef SHAKTI_HAVE_TLS
+    if (n <= INT_MAX && RAND_bytes(buf, (int)n) == 1) return 0;
+#endif
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t off = 0;
+    while (off < n) {
+        ssize_t r = read(fd, buf + off, n - off);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) {
+            close(fd);
+            return -1;
+        }
+        off += (size_t)r;
+    }
+    close(fd);
+    return 0;
+}
+
+int ipc_hmac(const char *key, const unsigned char *data, size_t len, unsigned char out[IPC_MAC_LEN]) {
+#ifdef SHAKTI_HAVE_TLS
+    unsigned int olen = 0;
+    size_t klen = strlen(key);
+    if (klen > INT_MAX) return -1;
+    if (!HMAC(EVP_sha256(), key, (int)klen, data, len, out, &olen) || olen != IPC_MAC_LEN)
+        return -1;
+    return 0;
+#else
+    (void)key; (void)data; (void)len; (void)out;
+    return -1;
+#endif
+}
+
+int ipc_mac_equal(const unsigned char *a, const unsigned char *b, size_t n) {
+#ifdef SHAKTI_HAVE_TLS
+    return CRYPTO_memcmp(a, b, n) == 0;
+#else
+    unsigned char d = 0;
+    for (size_t i = 0; i < n; i++) d |= (unsigned char)(a[i] ^ b[i]);
+    return d == 0;
+#endif
+}
+
+static const char *ipc_env_secret(const char *name) {
+    const char *v = getenv(name);
+    return (v && v[0]) ? v : NULL;
+}
+
+static const char *ipc_token(void) {
+    return ipc_env_secret("SHAKTI_IPC_TOKEN");
+}
+
+const char *ipc_mcast_key(void) {
+    return ipc_env_secret("SHAKTI_IPC_MCAST_KEY");
+}
+
+static int ipc_crypto_available(void) {
+#ifdef SHAKTI_HAVE_TLS
+    return 1;
+#else
+    return 0;
+#endif
 }
 
 int ipc_valid_shm_user_name(const char *s) {
@@ -214,9 +290,15 @@ static int sock_read_some(int fd, void *buf, size_t n, int block, size_t *got) {
         ssize_t r = block ? read(fd, (char *)buf + off, n - off)
                           : recv(fd, (char *)buf + off, n - off, MSG_DONTWAIT);
         if (r < 0) {
-            if (!block && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                *got = off;
-                return off ? 0 : -2;
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (!block) {
+                    *got = off;
+                    return off ? 0 : -2;
+                }
+                struct pollfd pfd = {.fd = fd, .events = POLLIN, .revents = 0};
+                if (poll(&pfd, 1, -1) < 0 && errno != EINTR) return -1;
+                continue;
             }
             return -1;
         }
@@ -293,7 +375,8 @@ static int ipc_uds_path(int port, char *out, size_t cap) {
         if (mkdir(owned, 0700) != 0 && errno != EEXIST)
             return -1;
         struct stat dir_st;
-        if (stat(owned, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) || dir_st.st_uid != getuid())
+        if (lstat(owned, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) || dir_st.st_uid != getuid() ||
+            (dir_st.st_mode & 077) != 0)
             return -1;
         dir = owned;
     }
@@ -320,6 +403,133 @@ IpcTransport ipc_parse_transport(const char *s) {
     return IPC_TR_AUTO;
 }
 
+static int ipc_token_check(char *err, size_t err_cap) {
+    if (ipc_token() && !ipc_crypto_available()) {
+        snprintf(err, err_cap, "ipc: SHAKTI_IPC_TOKEN requires a build with TLS (libcrypto)");
+        return -1;
+    }
+    return 0;
+}
+
+static int ipc_public_bind_check(char *err, size_t err_cap) {
+    const char *allow = getenv("SHAKTI_IPC_ALLOW_PUBLIC");
+    if (!allow || strcmp(allow, "1") != 0) {
+        snprintf(err, err_cap, "ipc: non-loopback bind requires SHAKTI_IPC_ALLOW_PUBLIC=1");
+        return -1;
+    }
+    if (!ipc_token()) {
+        snprintf(err, err_cap, "ipc: non-loopback bind requires SHAKTI_IPC_TOKEN");
+        return -1;
+    }
+    return ipc_token_check(err, err_cap);
+}
+
+static int ipc_auth_mac(const char *token, char role, const unsigned char *n1, const unsigned char *n2,
+                        unsigned char out[IPC_MAC_LEN]) {
+    unsigned char buf[IPC_AUTH_MAGIC_LEN + 1 + 2 * IPC_AUTH_NONCE];
+    memcpy(buf, IPC_AUTH_MAGIC, IPC_AUTH_MAGIC_LEN);
+    buf[IPC_AUTH_MAGIC_LEN] = (unsigned char)role;
+    memcpy(buf + IPC_AUTH_MAGIC_LEN + 1, n1, IPC_AUTH_NONCE);
+    memcpy(buf + IPC_AUTH_MAGIC_LEN + 1 + IPC_AUTH_NONCE, n2, IPC_AUTH_NONCE);
+    return ipc_hmac(token, buf, sizeof buf, out);
+}
+
+static int ipc_auth_recv(IpcHandle *s, size_t want, unsigned char *out, char *err, size_t err_cap) {
+    char *msg = NULL;
+    size_t len = 0;
+    int rc;
+#ifdef SHAKTI_HAVE_RDMA
+    if (s->kind == IPC_KIND_RDMA_CONN) {
+        struct timespec start, now;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (;;) {
+            rc = ipc_rdma_recv(s->rdma, 0, &msg, &len, err, err_cap);
+            if (rc != -2) break;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed = (now.tv_sec - start.tv_sec) * 1000L +
+                           (now.tv_nsec - start.tv_nsec) / 1000000L;
+            if (elapsed >= IPC_AUTH_TIMEOUT_MS) break;
+            struct timespec ts = {0, 1000000L};
+            nanosleep(&ts, NULL);
+        }
+    } else
+#endif
+    rc = ipc_raw_recv(s, 1, IPC_AUTH_TIMEOUT_MS, &msg, &len, err, err_cap);
+    if (rc == -2) {
+        snprintf(err, err_cap, "ipc: auth handshake timeout");
+        return -1;
+    }
+    if (rc != 0) {
+        free(msg);
+        snprintf(err, err_cap, "ipc: auth handshake failed");
+        return -1;
+    }
+    if (len != IPC_AUTH_MAGIC_LEN + want || memcmp(msg, IPC_AUTH_MAGIC, IPC_AUTH_MAGIC_LEN) != 0) {
+        free(msg);
+        snprintf(err, err_cap, "ipc: auth handshake: bad message");
+        return -1;
+    }
+    memcpy(out, msg + IPC_AUTH_MAGIC_LEN, want);
+    free(msg);
+    return 0;
+}
+
+static int ipc_auth_send(IpcHandle *s, const unsigned char *a, size_t na, const unsigned char *b, size_t nb,
+                         char *err, size_t err_cap) {
+    unsigned char buf[IPC_AUTH_MAGIC_LEN + IPC_AUTH_NONCE + IPC_MAC_LEN];
+    if (IPC_AUTH_MAGIC_LEN + na + nb > sizeof buf) return -1;
+    memcpy(buf, IPC_AUTH_MAGIC, IPC_AUTH_MAGIC_LEN);
+    if (na) memcpy(buf + IPC_AUTH_MAGIC_LEN, a, na);
+    if (nb) memcpy(buf + IPC_AUTH_MAGIC_LEN + na, b, nb);
+    return ipc_raw_send(s, buf, IPC_AUTH_MAGIC_LEN + na + nb, err, err_cap);
+}
+
+static int ipc_auth_server(IpcHandle *s, const char *token, char *err, size_t err_cap) {
+    unsigned char ns[IPC_AUTH_NONCE], nc[IPC_AUTH_NONCE];
+    unsigned char got[IPC_AUTH_NONCE + IPC_MAC_LEN], mac[IPC_MAC_LEN];
+    if (ipc_random_bytes(ns, sizeof ns) != 0) {
+        snprintf(err, err_cap, "ipc: auth: no randomness");
+        return -1;
+    }
+    if (ipc_auth_send(s, ns, sizeof ns, NULL, 0, err, err_cap) != 0) return -1;
+    if (ipc_auth_recv(s, sizeof got, got, err, err_cap) != 0) return -1;
+    memcpy(nc, got, IPC_AUTH_NONCE);
+    if (ipc_auth_mac(token, 'c', ns, nc, mac) != 0 ||
+        !ipc_mac_equal(mac, got + IPC_AUTH_NONCE, IPC_MAC_LEN)) {
+        snprintf(err, err_cap, "ipc_accept: auth token mismatch");
+        return -1;
+    }
+    if (ipc_auth_mac(token, 's', nc, ns, mac) != 0) {
+        snprintf(err, err_cap, "ipc: auth: hmac failed");
+        return -1;
+    }
+    return ipc_auth_send(s, mac, sizeof mac, NULL, 0, err, err_cap);
+}
+
+static int ipc_auth_client(IpcHandle *s, const char *token, char *err, size_t err_cap) {
+    unsigned char ns[IPC_AUTH_NONCE], nc[IPC_AUTH_NONCE];
+    unsigned char mac[IPC_MAC_LEN], got[IPC_MAC_LEN];
+    if (ipc_auth_recv(s, sizeof ns, ns, err, err_cap) != 0) return -1;
+    if (ipc_random_bytes(nc, sizeof nc) != 0) {
+        snprintf(err, err_cap, "ipc: auth: no randomness");
+        return -1;
+    }
+    if (ipc_auth_mac(token, 'c', ns, nc, mac) != 0) {
+        snprintf(err, err_cap, "ipc: auth: hmac failed");
+        return -1;
+    }
+    if (ipc_auth_send(s, nc, sizeof nc, mac, sizeof mac, err, err_cap) != 0) return -1;
+    if (ipc_auth_recv(s, sizeof got, got, err, err_cap) != 0) {
+        snprintf(err, err_cap, "ipc_connect: auth rejected by server (SHAKTI_IPC_TOKEN mismatch?)");
+        return -1;
+    }
+    if (ipc_auth_mac(token, 's', nc, ns, mac) != 0 || !ipc_mac_equal(mac, got, IPC_MAC_LEN)) {
+        snprintf(err, err_cap, "ipc_connect: server failed auth (SHAKTI_IPC_TOKEN mismatch)");
+        return -1;
+    }
+    return 0;
+}
+
 static int sock_listen_tcp(const char *host, int port, char *err, size_t err_cap) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
@@ -339,14 +549,10 @@ static int sock_listen_tcp(const char *host, int port, char *err, size_t err_cap
         snprintf(err, err_cap, "ipc: bad host '%s'", host);
         close(s);
         return -1;
-    } else {
-        const char *allow = getenv("SHAKTI_IPC_ALLOW_PUBLIC");
-        if (!allow || strcmp(allow, "1") != 0) {
-            snprintf(err, err_cap,
-                     "ipc: non-loopback bind requires SHAKTI_IPC_ALLOW_PUBLIC=1");
-            close(s);
-            return -1;
-        }
+    } else if (addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK) &&
+               ipc_public_bind_check(err, err_cap) != 0) {
+        close(s);
+        return -1;
     }
     if (bind(s, (struct sockaddr *)&addr, sizeof addr) < 0) {
         snprintf(err, err_cap, "ipc: bind: %s", strerror(errno));
@@ -369,7 +575,7 @@ static int sock_listen_uds(int port, char *path_out, char *err, size_t err_cap) 
     return -1;
 #else
     if (ipc_uds_path(port, path_out, 108) != 0) {
-        snprintf(err, err_cap, "ipc: uds path too long");
+        snprintf(err, err_cap, "ipc: uds path too long or socket dir unsafe");
         return -1;
     }
     unlink(path_out);
@@ -448,7 +654,7 @@ static int sock_connect_uds(int port, char *err, size_t err_cap) {
 #else
     char path[108];
     if (ipc_uds_path(port, path, sizeof path) != 0) {
-        snprintf(err, err_cap, "ipc: uds path too long");
+        snprintf(err, err_cap, "ipc: uds path too long or socket dir unsafe");
         return -1;
     }
     int s = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -728,17 +934,25 @@ int ipc_raw_recv(IpcHandle *s, int block, int timeout_ms,
         return ipc_rdma_recv(s->rdma, block, out, out_len, err, err_cap);
 #endif
     if (s->kind == IPC_KIND_SOCK_CONN) {
-        if (timeout_ms >= 0 && s->fd >= 0) {
+        if (timeout_ms < 0 || s->fd < 0)
+            return ipc_sock_recv_msg(s, block, out, out_len, err, err_cap);
+        struct timespec start, now;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (;;) {
+            int rc = ipc_sock_recv_msg(s, 0, out, out_len, err, err_cap);
+            if (rc != -2) return rc;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed = (now.tv_sec - start.tv_sec) * 1000L +
+                           (now.tv_nsec - start.tv_nsec) / 1000000L;
+            if (elapsed >= timeout_ms) return -2;
             struct pollfd pfd = {.fd = s->fd, .events = POLLIN, .revents = 0};
-            int pr = poll(&pfd, 1, timeout_ms);
+            int pr = poll(&pfd, 1, (int)(timeout_ms - elapsed));
             if (pr == 0) return -2;
-            if (pr < 0) {
+            if (pr < 0 && errno != EINTR) {
                 snprintf(err, err_cap, "ipc: recv: poll failed");
                 return -1;
             }
-            block = 1;
         }
-        return ipc_sock_recv_msg(s, block, out, out_len, err, err_cap);
     }
     if (s->kind == IPC_KIND_MCAST)
         return ipc_mcast_recv(s, block, out, out_len, NULL, NULL, err, err_cap);
@@ -900,14 +1114,16 @@ V *bi_ipc_listen(V **a, int n) {
     tr = ipc_resolve_listen(port, host, tr);
     char err[512];
     err[0] = 0;
+    if (tr != IPC_TR_UDS) {
+        if (!shakti_net_allowed())
+            return v_err("ipc_listen: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
+        if (ipc_token_check(err, sizeof err) != 0) return v_err(err);
+    }
 
 #ifdef SHAKTI_HAVE_RDMA
     if (tr == IPC_TR_RDMA) {
-        if (host && host[0] && !ipc_is_localhost(host)) {
-            const char *allow = getenv("SHAKTI_IPC_ALLOW_PUBLIC");
-            if (!allow || strcmp(allow, "1") != 0)
-                return v_err("ipc: non-loopback bind requires SHAKTI_IPC_ALLOW_PUBLIC=1");
-        }
+        if (host && host[0] && !ipc_is_localhost(host) && ipc_public_bind_check(err, sizeof err) != 0)
+            return v_err(err);
         IpcRdmaConn *rdma = NULL;
         if (ipc_rdma_listen(host, port, &rdma, err, sizeof err) != 0)
             return v_err(err[0] ? err : "ipc_listen: rdma failed");
@@ -966,6 +1182,11 @@ V *bi_ipc_accept(V **a, int n) {
         }
         g_handles[h].kind = IPC_KIND_RDMA_CONN;
         g_handles[h].rdma = rdma;
+        const char *token = ipc_token();
+        if (token && ipc_auth_server(&g_handles[h], token, err, sizeof err) != 0) {
+            ipc_free_handle(h);
+            return v_err(err[0] ? err : "ipc_accept: auth failed");
+        }
         return v_int(h);
     }
 #endif
@@ -993,6 +1214,15 @@ V *bi_ipc_accept(V **a, int n) {
     }
     g_handles[h].kind = IPC_KIND_SOCK_CONN;
     g_handles[h].fd = cfd;
+    if (!ls->uds_path[0]) {
+        const char *token = ipc_token();
+        char aerr[512];
+        aerr[0] = 0;
+        if (token && ipc_auth_server(&g_handles[h], token, aerr, sizeof aerr) != 0) {
+            ipc_free_handle(h);
+            return v_err(aerr[0] ? aerr : "ipc_accept: auth failed");
+        }
+    }
     return v_int(h);
 }
 
@@ -1000,6 +1230,12 @@ static V *ipc_do_connect(const char *host, int port, IpcTransport req) {
     char err[512];
     err[0] = 0;
     IpcTransport tr = ipc_resolve_connect(host, req);
+    const char *token = ipc_token();
+    if (tr != IPC_TR_UDS) {
+        if (!shakti_net_allowed())
+            return v_err("ipc_connect: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
+        if (ipc_token_check(err, sizeof err) != 0) return v_err(err);
+    }
 
 #ifdef SHAKTI_HAVE_RDMA
     if (tr == IPC_TR_RDMA) {
@@ -1018,6 +1254,10 @@ static V *ipc_do_connect(const char *host, int port, IpcTransport req) {
             }
             g_handles[h].kind = IPC_KIND_RDMA_CONN;
             g_handles[h].rdma = rdma;
+            if (token && ipc_auth_client(&g_handles[h], token, err, sizeof err) != 0) {
+                ipc_free_handle(h);
+                return v_err(err[0] ? err : "ipc_connect: auth failed");
+            }
             return v_int(h);
         }
     }
@@ -1037,6 +1277,10 @@ static V *ipc_do_connect(const char *host, int port, IpcTransport req) {
     }
     g_handles[h].kind = IPC_KIND_SOCK_CONN;
     g_handles[h].fd = fd;
+    if (tr != IPC_TR_UDS && token && ipc_auth_client(&g_handles[h], token, err, sizeof err) != 0) {
+        ipc_free_handle(h);
+        return v_err(err[0] ? err : "ipc_connect: auth failed");
+    }
     return v_int(h);
 }
 
@@ -1054,6 +1298,10 @@ V *bi_ipc_join(V **a, int n) {
     const char *source = (n > 3 && a[3]->t == T_STR) ? a[3]->s : NULL;
     char err[512];
     err[0] = 0;
+    if (!shakti_net_allowed())
+        return v_err("ipc_join: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
+    if (ipc_mcast_key() && !ipc_crypto_available())
+        return v_err("ipc_join: SHAKTI_IPC_MCAST_KEY requires a build with TLS (libcrypto)");
     int af = 0;
     struct sockaddr_storage grp;
     socklen_t grp_len = 0;
@@ -1217,26 +1465,9 @@ V *bi_ipc_reply(V **a, int n) {
         ipc_env_pack(buf, IPC_ENV_REP, corr);
         memcpy(buf + IPC_ENV_HDR, cookie, IPC_REPLY_COOKIE);
         if (len) memcpy(buf + IPC_ENV_HDR + IPC_REPLY_COOKIE, data, len);
-        struct sockaddr_storage dest;
-        socklen_t dlen;
-        memset(&dest, 0, sizeof dest);
-        if (af == AF_INET6) {
-            struct sockaddr_in6 *d = (struct sockaddr_in6 *)&dest;
-            d->sin6_family = AF_INET6;
-            d->sin6_port = htons(port);
-            memcpy(&d->sin6_addr, addr, 16);
-            dlen = sizeof *d;
-        } else {
-            struct sockaddr_in *d = (struct sockaddr_in *)&dest;
-            d->sin_family = AF_INET;
-            d->sin_port = htons(port);
-            memcpy(&d->sin_addr, addr, 4);
-            dlen = sizeof *d;
-        }
-        ssize_t wn = sendto(s->reply_fd >= 0 ? s->reply_fd : s->fd, buf, total, 0,
-                            (struct sockaddr *)&dest, dlen);
+        int rc = ipc_mcast_send_reply(s, af, port, addr, buf, total, err, sizeof err);
         free(buf);
-        if (wn < 0 || (size_t)wn != total) return v_err("ipc_reply: sendto failed");
+        if (rc != 0) return v_err(err[0] ? err : "ipc_reply: sendto failed");
         return v_nil();
     }
 
@@ -1272,10 +1503,7 @@ static V *ipc_mcast_recv_msg_body(IpcHandle *s, int block) {
         if (kind == IPC_ENV_REQ && plen >= IPC_REPLY_INFO) {
             uint8_t cookie[IPC_REPLY_COOKIE];
             memcpy(cookie, pay + 3, IPC_REPLY_COOKIE);
-            if (ipc_reply_to_store_peer(s, corr, &peer, cookie) != 0) {
-                free(msg);
-                return v_err("ipc_recv_msg: reply-to table full");
-            }
+            (void)ipc_reply_to_store_peer(s, corr, &peer, cookie);
             V *d = ipc_msg_dict(kind, corr, pay + IPC_REPLY_INFO, plen - IPC_REPLY_INFO, 1);
             free(msg);
             return d;
@@ -1532,10 +1760,7 @@ static V *ipc_do_recv_bin(IpcHandle *s, int block) {
             if (kind == IPC_ENV_REQ && plen >= IPC_REPLY_INFO) {
                 uint8_t cookie[IPC_REPLY_COOKIE];
                 memcpy(cookie, pay + 3, IPC_REPLY_COOKIE);
-                if (ipc_reply_to_store_peer(s, corr, &peer, cookie) != 0) {
-                    free(msg);
-                    return v_err("ipc_recv_bin: reply-to table full");
-                }
+                (void)ipc_reply_to_store_peer(s, corr, &peer, cookie);
                 pay += IPC_REPLY_INFO;
                 plen -= IPC_REPLY_INFO;
             }
@@ -1913,14 +2138,10 @@ V *bi_ipc_shm_broadcast_create(V **a, int n) {
     err[0] = 0;
     if (!ipc_valid_shm_user_name(a[0]->s)) return v_err("ipc_shm_broadcast_create: bad name");
     char posix[256];
-    if (ipc_format_posix_shm_name(posix, sizeof posix, "/shakti_ipc_", a[0]->s) != 0)
+    if (ipc_shm_chan_name(posix, sizeof posix, a[0]->s) != 0)
         return v_err("ipc_shm_broadcast_create: name too long");
-    shm_unlink(posix);
-    int fd = shm_open(posix, O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) {
-        snprintf(err, sizeof err, "ipc_shm_broadcast_create: shm_open: %s", strerror(errno));
-        return v_err(err);
-    }
+    int fd = ipc_shm_create_fd(posix, err, sizeof err);
+    if (fd < 0) return v_err(err);
     if (ftruncate(fd, (off_t)map_size) != 0) {
         close(fd); shm_unlink(posix);
         return v_err("ipc_shm_broadcast_create: ftruncate failed");
@@ -1973,17 +2194,17 @@ V *bi_ipc_shm_broadcast_attach(V **a, int n) {
 #else
     if (!ipc_valid_shm_user_name(a[0]->s)) return v_err("ipc_shm_broadcast_attach: bad name");
     char posix[256];
-    if (ipc_format_posix_shm_name(posix, sizeof posix, "/shakti_ipc_", a[0]->s) != 0)
+    if (ipc_shm_chan_name(posix, sizeof posix, a[0]->s) != 0)
         return v_err("ipc_shm_broadcast_attach: name too long");
     int fd = shm_open(posix, O_RDWR, 0600);
     if (fd < 0) return v_err("ipc_shm_broadcast_attach: not found");
-    struct stat sb;
-    if (fstat(fd, &sb) != 0) { close(fd); return v_err("ipc_shm_broadcast_attach: fstat"); }
-    if (sb.st_size < 0 || (uint64_t)sb.st_size > IPC_MAX_SHM) {
+    char err[512];
+    err[0] = 0;
+    size_t map_size = 0;
+    if (ipc_shm_check_fd(fd, &map_size, err, sizeof err) != 0) {
         close(fd);
-        return v_err("ipc_shm_broadcast_attach: size too large");
+        return v_err(err);
     }
-    size_t map_size = (size_t)sb.st_size;
     void *ptr = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     if (ptr == MAP_FAILED) return v_err("ipc_shm_broadcast_attach: mmap failed");

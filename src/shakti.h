@@ -28,13 +28,14 @@ extern "C" {
 typedef struct Node Node;
 typedef struct Env Env;
 typedef struct V V;
+typedef struct LexChunk LexChunk;
 
 typedef struct {
     int type;
     int line;
     int64_t ival;
     double fval;
-    char sval[SHAKTI_TOKEN_TEXT];
+    const char *sval;
 } Token;
 
 typedef struct Lexer {
@@ -54,7 +55,14 @@ typedef struct Lexer {
     Token peek;
     /* 1 after a noun/literal/closer: next '-' before a digit is subtract, not sign. */
     int noun_pos;
+    LexChunk *chunk;
+    char *text;
 } Lexer;
+
+typedef struct {
+    LexChunk *chunk;
+    size_t used;
+} LexMark;
 
 struct Node {
     int type;
@@ -318,6 +326,9 @@ enum {
 };
 
 void lex_init(Lexer *l, const char *src);
+void lex_free(Lexer *l);
+LexMark lex_mark(const Lexer *l);
+void lex_release(Lexer *l, LexMark m);
 Token lex_next(Lexer *l);
 Token lex_peek(Lexer *l);
 Node *node_new(int type);

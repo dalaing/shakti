@@ -13,9 +13,9 @@ void mat_fmat_binop_mm(double *r, const double *a, const double *b, int64_t ne, 
 void mat_fmat_binop_scalar(double *r, const double *a, double y, int64_t ne, int op);
 void mat_fmat_binop_scalar_rev(double *r, double x, const double *b, int64_t ne, int op);
 
-void mat_imat_binop_mm(int64_t *r, const int64_t *a, const int64_t *b, int64_t ne, int op);
-void mat_imat_binop_scalar(int64_t *r, const int64_t *a, int64_t y, int64_t ne, int op);
-void mat_imat_binop_scalar_rev(int64_t *r, int64_t x, const int64_t *b, int64_t ne, int op);
+int mat_imat_binop_mm(int64_t *r, const int64_t *a, const int64_t *b, int64_t ne, int op);
+int mat_imat_binop_scalar(int64_t *r, const int64_t *a, int64_t y, int64_t ne, int op);
+int mat_imat_binop_scalar_rev(int64_t *r, int64_t x, const int64_t *b, int64_t ne, int op);
 
 void mat_fmat_cmp_bmat_scalar(unsigned char *r, const double *a, double y, int64_t ne, int op);
 void mat_fmat_cmp_bmat_mm(unsigned char *r, const double *a, const double *b, int64_t ne, int op);

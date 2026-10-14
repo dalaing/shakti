@@ -1,4 +1,4 @@
-#include "shakti.h"
+#include "shakti_internal.h"
 #include "json_parse.h"
 #include <errno.h>
 #include <math.h>
@@ -74,8 +74,18 @@ static int v_truthy(V *v) {
     P(v->t == T_STR,v->s[0] != 0)
     return 1;
 }
+/* Safe mode: confine file paths to SHAKTI_FS_ROOT (no-op otherwise). */
+#define FS_GUARD(who, path, w) do { \
+    char fs_err_[512]; \
+    if (shakti_fs_check((path), (w), fs_err_, sizeof fs_err_) != 0) \
+        return v_errf("%s: %s", (who), fs_err_); \
+} while (0)
+#define FS_GUARD_BOOL(path) do { \
+    if (shakti_fs_check((path), 0, NULL, 0) != 0) return v_bool(0); \
+} while (0)
 V *bi_fread(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("read(path)"))
+    FS_GUARD("read", a[0]->s, 0);
     FILE *f = fopen(a[0]->s, "rb");
     P(!f,v_errf("read: %s", strerror(errno)))
     fseek(f, 0, SEEK_END);
@@ -97,6 +107,7 @@ V *bi_fread(V **a, in) {
 }
 V *bi_fwrite(V **a, in) {
     P(n < 2 || a[0]->t != T_STR || a[1]->t != T_STR,v_err("write(path, data)"))
+    FS_GUARD("write", a[0]->s, 1);
     FILE *f = fopen(a[0]->s, "wb");
     P(!f,v_errf("write: %s", strerror(errno)))
     size_t w = fwrite(a[1]->s, 1, strlen(a[1]->s), f);
@@ -105,6 +116,7 @@ V *bi_fwrite(V **a, in) {
 }
 V *bi_readlines(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("readlines(path)"))
+    FS_GUARD("readlines", a[0]->s, 0);
     FILE *f = fopen(a[0]->s, "r");
     P(!f,v_errf("readlines: %s", strerror(errno)))
     V *r = v_list(0);
@@ -127,6 +139,7 @@ static int win_join_path(const char *base, const char *name, char *out, size_t c
 #endif
 V *bi_listdir(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("listdir(path)"))
+    FS_GUARD("listdir", a[0]->s, 0);
 #if defined(SHAKTI_HAVE_DIRENT)
     DIR *d = opendir(a[0]->s);
     P(!d,v_errf("listdir: %s", strerror(errno)))
@@ -199,6 +212,15 @@ static void walk_inner_paths(const char *base, WalkPaths *wp) {
 #endif
 }
 #if defined(SHAKTI_HAVE_DIRENT)
+/* Like DT_DIR: do not descend through symlinked directories. */
+static int walk_is_real_dir(const char *path) {
+    struct stat sb;
+#if defined(__MINGW32__) || defined(__MINGW64__)
+    return stat(path, &sb) == 0 && S_ISDIR(sb.st_mode);
+#else
+    return lstat(path, &sb) == 0 && S_ISDIR(sb.st_mode);
+#endif
+}
 static void walk_inner_paths_d(const char *base, WalkPaths *wp, int depth) {
     if (depth >= 64) return;
     DIR *d = opendir(base);
@@ -218,12 +240,10 @@ static void walk_inner_paths_d(const char *base, WalkPaths *wp, int depth) {
         if (e->d_type == DT_DIR) {
             walk_inner_paths_d(path, wp, depth + 1);
         } else if (e->d_type == DT_UNKNOWN) {
-            struct stat sb;
-            if (stat(path, &sb) == 0 && S_ISDIR(sb.st_mode)) walk_inner_paths_d(path, wp, depth + 1);
+            if (walk_is_real_dir(path)) walk_inner_paths_d(path, wp, depth + 1);
         }
 #else
-        struct stat sb;
-        if (stat(path, &sb) == 0 && S_ISDIR(sb.st_mode)) walk_inner_paths_d(path, wp, depth + 1);
+        if (walk_is_real_dir(path)) walk_inner_paths_d(path, wp, depth + 1);
 #endif
         walk_paths_add(wp, path);
     }
@@ -270,6 +290,7 @@ static void walk_inner(const char *base, V *out) {
 }
 V *bi_walk(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("walk(path)"))
+    FS_GUARD("walk", a[0]->s, 0);
 #if defined(SHAKTI_HAVE_DIRENT) || defined(SHAKTI_WIN32_NATIVE)
     V *r = v_list(0);
     walk_inner(a[0]->s, r);
@@ -281,6 +302,7 @@ V *bi_walk(V **a, in) {
 }
 V *bi_stat(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("stat(path)"))
+    FS_GUARD("stat", a[0]->s, 0);
     struct stat sb;
     P(stat(a[0]->s, &sb) != 0,v_errf("stat: %s", strerror(errno)))
     V *k = v_list(3);
@@ -319,16 +341,19 @@ V *bi_path_join(V **a, in) {
 }
 V *bi_path_exists(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("path_exists"))
+    FS_GUARD_BOOL(a[0]->s);
     struct stat sb;
     return v_bool(stat(a[0]->s, &sb) == 0);
 }
 V *bi_path_isdir(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("path_isdir"))
+    FS_GUARD_BOOL(a[0]->s);
     struct stat sb;
     return v_bool(stat(a[0]->s, &sb) == 0 && S_ISDIR(sb.st_mode));
 }
 V *bi_path_isfile(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("path_isfile"))
+    FS_GUARD_BOOL(a[0]->s);
     struct stat sb;
     return v_bool(stat(a[0]->s, &sb) == 0 && S_ISREG(sb.st_mode));
 }
@@ -390,6 +415,7 @@ V *bi_getcwd(V **a, in) {
 }
 V *bi_mkdir(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("mkdir"))
+    FS_GUARD("mkdir", a[0]->s, 1);
 #if defined(SHAKTI_WIN32_NATIVE)
     int rc = _mkdir(a[0]->s);
 #elif defined(__MINGW32__) || defined(__MINGW64__)
@@ -422,14 +448,8 @@ static int shakti_run_shell(const char *cmd) {
 #endif
 V *bi_sh(V **a, in) {
     P(n < 1 || a[0]->t != T_STR,v_err("sh(cmd)"))
-    {
-        const char *safe = getenv("SHAKTI_SAFE");
-        const char *allow = getenv("SHAKTI_ALLOW_EXEC");
-        if ((safe && safe[0] && strcmp(safe, "0") != 0) ||
-            (allow && allow[0] == '0' && allow[1] == '\0')) {
-            return v_err("sh: disabled (SHAKTI_SAFE or SHAKTI_ALLOW_EXEC=0)");
-        }
-    }
+    if (!shakti_exec_allowed())
+        return v_err("sh: disabled (SHAKTI_SAFE or SHAKTI_ALLOW_EXEC=0)");
 #if defined(__EMSCRIPTEN__)
     return v_err("sh: not available in WASM builds");
 #elif defined(SHAKTI_WIN32_NATIVE) || defined(__MINGW32__) || defined(__MINGW64__)

@@ -13,6 +13,10 @@
 # envelope-free. Envelope RPC (send_async / send_sync / recv_req / reply) puts
 # an 8-byte header inside the payload: magic 0x49, kind, corr_id.
 # send_sync is not supported on multicast handles.
+#
+# TCP/RDMA: set SHAKTI_IPC_TOKEN on both ends for an HMAC challenge-response
+# handshake (required for non-loopback listen). SHAKTI_IPC_MCAST_KEY
+# authenticates multicast datagrams.
 
 def listen(port, host:"127.0.0.1", transport:"auto"):
     return ipc_listen(port, host, transport)

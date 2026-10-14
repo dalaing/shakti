@@ -2,6 +2,7 @@
  * IEFS mmap region + iefs_store_map entry (pages / GPU warm hint).
  */
 #include "iefs_map.h"
+#include "shakti_internal.h"
 #include "iefs_format.h"
 
 #include <errno.h>
@@ -175,6 +176,13 @@ V *iefs_store_map(const char *path, int pages_mode) {
 V *iefs_store_map_cols(const char *path, int pages_mode, V *colnames) {
     if (!path || !path[0])
         return v_err("iefs.map: path");
+    {
+        char ferr[512];
+        if (shakti_fs_check(path, 0, ferr, sizeof ferr) != 0) {
+            iefs_set_last_error(ferr);
+            return v_err(ferr);
+        }
+    }
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
         char err[256];

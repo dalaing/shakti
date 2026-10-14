@@ -1,4 +1,4 @@
-#include "shakti.h"
+#include "shakti_internal.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +56,7 @@ static void xml_ch(void*ud,const XML_Char*s,int len){
 #define SHAKTI_XML_MAX_FILE (256u * 1024u * 1024u)
 V*table_xml_load(const char*path,V*columns_opt){
  (void)columns_opt;
+ {char fe[512];if(shakti_fs_check(path,0,fe,sizeof fe)!=0)return v_errf("xml: %s",fe);}
  FILE*f=fopen(path,"rb");
  P(!f,v_errf("xml: open '%s'",path))
  fseek(f,0,SEEK_END);

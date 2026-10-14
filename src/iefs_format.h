@@ -46,8 +46,10 @@ int iefs_encode_ex(V *v, int codec, int level, unsigned ver, unsigned char **out
 /* outer: optional LZ after residual (v3 er[3]). codecs: optional dict name→codec string (v3). */
 int iefs_encode_full(V *v, int codec, int outer, int level, unsigned ver, V *codecs,
                      unsigned char **out, size_t *out_len, char *err, size_t err_cap);
+/* In-memory decode capped at shakti_decode_limit(); file loads use IEFS_MAX_PAYLOAD. */
 V *iefs_decode(const unsigned char *buf, size_t len);
-/* Like iefs_decode, but rejects uncompressed/compressed payloads larger than max_plain. */
+/* Like iefs_decode, but rejects uncompressed/compressed payloads larger than max_plain
+ * (clamped to IEFS_MAX_PAYLOAD). */
 V *iefs_decode_max(const unsigned char *buf, size_t len, size_t max_plain);
 V *iefs_decode_mapped(const unsigned char *buf, size_t len, struct IefsMapRegion *reg);
 /* colnames: list[str] of table columns to materialize (v3 skips other extents). NULL/empty = all. */

@@ -2,6 +2,7 @@
  * Shakti HDB: partitioned IEFS v3 tables with prune/scan.
  */
 #include "hdb.h"
+#include "shakti_internal.h"
 #include "iefs_format.h"
 #include "iefs_map.h"
 #include "pack.h"
@@ -46,6 +47,35 @@ static int hdb_mkdir_p(const char *path) {
     }
     if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
     return 0;
+}
+
+/* Safe mode: the hdb root (possibly not yet created) must resolve inside
+ * SHAKTI_FS_ROOT. Check the nearest existing ancestor; the missing tail may
+ * not contain "..". */
+static int hdb_root_allowed(const char *root, char *err, size_t err_cap) {
+    char tmp[HDB_PATH_MAX];
+    struct stat sb;
+    size_t len = strlen(root);
+    if (!shakti_safe_mode()) return 0;
+    if (len == 0 || len >= sizeof tmp) {
+        snprintf(err, err_cap, "safe mode: bad path");
+        return -1;
+    }
+    memcpy(tmp, root, len + 1);
+    while (len > 1 && tmp[len - 1] == '/') tmp[--len] = 0;
+    for (;;) {
+        if (stat(tmp, &sb) == 0)
+            return shakti_fs_check(tmp, 1, err, err_cap);
+        char *slash = strrchr(tmp, '/');
+        const char *comp = slash ? slash + 1 : tmp;
+        if (!strcmp(comp, "..") || !strcmp(comp, ".")) {
+            snprintf(err, err_cap, "safe mode: bad path '%s'", root);
+            return -1;
+        }
+        if (!slash) return shakti_fs_check(".", 1, err, err_cap);
+        if (slash == tmp) return shakti_fs_check("/", 1, err, err_cap);
+        *slash = 0;
+    }
 }
 
 static int hdb_safe_name(const char *s) {
@@ -393,6 +423,11 @@ V *bi_hdb_open(V **a, int n) {
     if (n < 1 || !a[0] || a[0]->t != T_STR)
         return v_err("hdb_open(root)");
     const char *root = a[0]->s;
+    {
+        char ferr[512];
+        if (hdb_root_allowed(root, ferr, sizeof ferr) != 0)
+            return v_errf("hdb.open: %s", ferr);
+    }
     if (hdb_mkdir_p(root) != 0)
         return v_errf("hdb.open: mkdir %s: %s", root, strerror(errno));
 
@@ -442,6 +477,7 @@ V *bi_hdb_create(V **a, int n) {
     if (n > 3 && a[3] && a[3]->t == T_STR && a[3]->s[0]) part_key = a[3]->s;
 
     V *meta = hdb_handle_meta(a[0]);
+    if (!meta) return v_err("hdb_create: bad meta");
     V *tables = v_dict_get(meta, "tables");
     if (!tables || tables->t != T_DICT) return v_err("hdb_create: bad meta");
 
@@ -486,6 +522,7 @@ V *bi_hdb_write(V **a, int n) {
         return v_err("hdb_write: bad table/part name");
 
     V *meta = hdb_handle_meta(a[0]);
+    if (!meta) return v_err("hdb_write: bad meta");
     V *tables = v_dict_get(meta, "tables");
     if (!tables || tables->t != T_DICT) return v_err("hdb_write: bad meta");
     V *entry = v_dict_get(tables, a[1]->s);

@@ -5,7 +5,7 @@
 #endif
 #endif
 #ifndef SHAKTI_PKG_VERSION
-#define SHAKTI_PKG_VERSION "0.14.3"
+#define SHAKTI_PKG_VERSION "0.15.0"
 #endif
 #if defined(_WIN32) && defined(_MSC_VER)
 #include <io.h>
@@ -14,6 +14,10 @@
 #endif
 #else
 #include <unistd.h>
+#include <sys/stat.h>
+#endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
 #endif
 
 #ifdef _WIN32
@@ -102,34 +106,60 @@ static void shakti_print_usage(FILE *out) {
         "\n"
         "REPL (bare shakti / -i): \\d docs  \\v vars  \\w names  \\q [N]  quit|exit\n");
 }
-int shakti_lang_main(int argc, char **argv) {
-#if defined(__linux__) && !defined(__EMSCRIPTEN__)
-    {
-        /* Prefer realpath over readlink to avoid Level-5 TOCTOU findings. */
-        char *exe = realpath("/proc/self/exe", NULL);
-        if (exe) {
-            char *slash = strrchr(exe, '/');
-            if (slash) {
-                *slash = 0;
-                /* Binaries under .build/ (or build/) load modules from the
-                 * sibling ../lib next to that build dir — same layout as when
-                 * the CLI lived at the repo root. */
-                {
-                    char *leaf_slash = strrchr(exe, '/');
-                    const char *leaf = leaf_slash ? leaf_slash + 1 : exe;
-                    int under_build = leaf_slash &&
-                        (!strcmp(leaf, ".build") || !strcmp(leaf, "build"));
-                    if (under_build)
-                        snprintf(g_lib_path, sizeof(g_lib_path), "%.*s/lib",
-                                 (int)(leaf_slash - exe), exe);
-                    else
-                        snprintf(g_lib_path, sizeof(g_lib_path), "%s/lib", exe);
-                }
-            }
-            free(exe);
-        }
-    }
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+/* Directory of the running executable (symlinks resolved), or NULL. */
+static char *shakti_exe_dir(void) {
+    char *exe = NULL;
+#if defined(__linux__)
+    exe = realpath("/proc/self/exe", NULL);
+#elif defined(__APPLE__)
+    char raw[4096];
+    uint32_t sz = (uint32_t)sizeof raw;
+    if (_NSGetExecutablePath(raw, &sz) == 0)
+        exe = realpath(raw, NULL);
 #endif
+    if (!exe) return NULL;
+    char *slash = strrchr(exe, '/');
+    if (!slash) { free(exe); return NULL; }
+    if (slash == exe) slash[1] = 0;
+    else *slash = 0;
+    return exe;
+}
+/* A stdlib dir must contain json.ie so generic dirs such as /usr/lib are not
+ * mistaken for the module tree. */
+static int shakti_lib_dir_ok(const char *dir) {
+    char marker[4200];
+    struct stat sb;
+    if (snprintf(marker, sizeof marker, "%s/json.ie", dir) >= (int)sizeof marker) return 0;
+    return stat(marker, &sb) == 0 && S_ISREG(sb.st_mode);
+}
+/* Locate lib/ next to the binary: <exe>/lib, <exe>/../lib (.build/),
+ * <exe>/../../lib (build/<os>-<arch>/), <exe>/../lib/shakti and
+ * <exe>/../share/shakti/lib (installed layouts). */
+static void shakti_find_lib(void) {
+    static const char *const rel[] = {
+        "lib", "../lib", "../../lib", "../lib/shakti", "../share/shakti/lib",
+    };
+    char *exe = shakti_exe_dir();
+    if (!exe) return;
+    for (size_t k = 0; k < sizeof rel / sizeof rel[0]; k++) {
+        char cand[4200];
+        if (snprintf(cand, sizeof cand, "%s/%s", exe, rel[k]) >= (int)sizeof cand) continue;
+        if (!shakti_lib_dir_ok(cand)) continue;
+        char *rp = realpath(cand, NULL);
+        snprintf(g_lib_path, sizeof g_lib_path, "%s", rp ? rp : cand);
+        free(rp);
+        break;
+    }
+    free(exe);
+}
+#endif
+int shakti_lang_main(int argc, char **argv) {
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+    shakti_find_lib();
+#endif
+    /* Empty script dir = no script (REPL / -c); import then searches cwd. */
+    g_script_dir[0] = 0;
     Env *global = env_new(NULL);
     builtin_register(global);
     int i = 1;
@@ -249,10 +279,23 @@ int shakti_lang_main(int argc, char **argv) {
         if(interactive) run_repl(global);
     } else if(i < argc) {
         if (shakti_require_ie(argv[i])) { env_free(global); return 2; }
-        strncpy(g_script_dir, argv[i], sizeof(g_script_dir)-1);
-        g_script_dir[sizeof(g_script_dir)-1] = 0;
-        char *slash = strrchr(g_script_dir, '/');
-        if(slash) *slash = 0; else { g_script_dir[0] = '.'; g_script_dir[1] = 0; }
+        {
+#ifndef _WIN32
+            char *rp = realpath(argv[i], NULL);
+            snprintf(g_script_dir, sizeof g_script_dir, "%s", rp ? rp : argv[i]);
+            free(rp);
+#else
+            snprintf(g_script_dir, sizeof g_script_dir, "%s", argv[i]);
+#endif
+            char *slash = strrchr(g_script_dir, '/');
+#ifdef _WIN32
+            char *bs = strrchr(g_script_dir, '\\');
+            if (bs && (!slash || bs > slash)) slash = bs;
+#endif
+            if (slash == g_script_dir) g_script_dir[1] = 0;
+            else if (slash) *slash = 0;
+            else { g_script_dir[0] = '.'; g_script_dir[1] = 0; }
+        }
         {
             /* Script argv[0..]: script path then remaining CLI args. */
             int narg = argc - i;
@@ -261,6 +304,7 @@ int shakti_lang_main(int argc, char **argv) {
             env_set_kind(global, "argv", av, ENV_BIND_INTERNAL);
             v_free(av);
         }
+        shakti_set_file_vars(global, argv[i]);
         char *src = read_file(argv[i]);
         P(!src,1)
         Node *prog = parse(src);

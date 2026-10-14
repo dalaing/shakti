@@ -4,6 +4,7 @@
  */
 #include "codec.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1248,11 +1249,96 @@ int shakti_compress(int codec, int level, const unsigned char *src, size_t src_l
     return -1;
 }
 
+size_t shakti_decode_limit(void) {
+    const char *ev = getenv("SHAKTI_MAX_DECODE");
+    unsigned long long lim = SHAKTI_DECODE_DEFAULT;
+    if (ev && *ev) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long long v = strtoull(ev, &end, 10);
+        unsigned shift = 0;
+        if (end && (*end == 'k' || *end == 'K')) { shift = 10; end++; }
+        else if (end && (*end == 'm' || *end == 'M')) { shift = 20; end++; }
+        else if (end && (*end == 'g' || *end == 'G')) { shift = 30; end++; }
+        if (errno == 0 && end != ev && *end == 0 && v > 0) {
+            if (v > (SHAKTI_CODEC_MAX_PLAIN >> shift))
+                lim = SHAKTI_CODEC_MAX_PLAIN;
+            else
+                lim = v << shift;
+        }
+    }
+    if (lim > SHAKTI_CODEC_MAX_PLAIN)
+        lim = SHAKTI_CODEC_MAX_PLAIN;
+    return (size_t)lim;
+}
+
 int shakti_decompress(int codec, const unsigned char *src, size_t src_len,
                       unsigned char **out, size_t *out_len, char *err, size_t err_cap) {
-    return shakti_decompress_max(codec, src, src_len, out, out_len, (size_t)SHAKTI_CODEC_MAX_PLAIN,
+    return shakti_decompress_max(codec, src, src_len, out, out_len, shakti_decode_limit(),
                                  err, err_cap);
 }
+
+#if defined(SHAKTI_HAVE_ZSTD)
+/* Frames without a content size: stream into a doubling buffer, stop at max_plain. */
+static int zstd_decompress_stream(const unsigned char *src, size_t src_len, size_t max_plain,
+                                  unsigned char **out, size_t *out_len, char *err, size_t err_cap) {
+    size_t cap = src_len > max_plain / 4 ? max_plain : src_len * 4;
+    if (cap < 64)
+        cap = 64;
+    if (cap > max_plain)
+        cap = max_plain;
+    ZSTD_DStream *ds = ZSTD_createDStream();
+    unsigned char *buf = malloc(cap);
+    if (!ds || !buf) {
+        ZSTD_freeDStream(ds);
+        free(buf);
+        set_err(err, err_cap, "decompress: out of memory");
+        return -1;
+    }
+    size_t rc = ZSTD_initDStream(ds);
+    ZSTD_inBuffer zin = {src, src_len, 0};
+    ZSTD_outBuffer zout = {buf, cap, 0};
+    while (!ZSTD_isError(rc)) {
+        rc = ZSTD_decompressStream(ds, &zout, &zin);
+        if (ZSTD_isError(rc))
+            break;
+        if (rc == 0 && zin.pos == zin.size) {
+            ZSTD_freeDStream(ds);
+            *out = buf;
+            *out_len = zout.pos;
+            return 0;
+        }
+        if (zout.pos == zout.size) {
+            if (zout.size >= max_plain) {
+                ZSTD_freeDStream(ds);
+                free(buf);
+                set_err(err, err_cap, "zstd: payload too large");
+                return -1;
+            }
+            size_t ncap = zout.size > max_plain / 2 ? max_plain : zout.size * 2;
+            unsigned char *nb = realloc(buf, ncap);
+            if (!nb) {
+                ZSTD_freeDStream(ds);
+                free(buf);
+                set_err(err, err_cap, "decompress: out of memory");
+                return -1;
+            }
+            buf = nb;
+            zout.dst = buf;
+            zout.size = ncap;
+        } else if (zin.pos == zin.size) {
+            ZSTD_freeDStream(ds);
+            free(buf);
+            set_err(err, err_cap, "zstd: truncated frame");
+            return -1;
+        }
+    }
+    ZSTD_freeDStream(ds);
+    free(buf);
+    set_err(err, err_cap, ZSTD_getErrorName(rc));
+    return -1;
+}
+#endif
 
 static int residual_count_over_cap(const unsigned char *src, size_t src_len, size_t hdr,
                                    size_t max_plain) {
@@ -1341,53 +1427,8 @@ int shakti_decompress_max(int codec, const unsigned char *src, size_t src_len,
             set_err(err, err_cap, "zstd: invalid frame");
             return -1;
         }
-        if (need == ZSTD_CONTENTSIZE_UNKNOWN) {
-            size_t cap;
-            if (src_len == 0)
-                cap = 64;
-            else if (src_len > max_plain / 4)
-                cap = max_plain;
-            else {
-                cap = src_len * 4;
-                if (cap < 64)
-                    cap = 64;
-            }
-            if (cap > max_plain)
-                cap = max_plain;
-            for (int attempt = 0; attempt < 8; attempt++) {
-                unsigned char *buf = malloc(cap);
-                if (!buf) {
-                    set_err(err, err_cap, "decompress: out of memory");
-                    return -1;
-                }
-                size_t nn = ZSTD_decompress(buf, cap, src, src_len);
-                if (!ZSTD_isError(nn)) {
-                    if (nn > max_plain) {
-                        free(buf);
-                        set_err(err, err_cap, "zstd: payload too large");
-                        return -1;
-                    }
-                    *out = buf;
-                    *out_len = nn;
-                    return 0;
-                }
-                free(buf);
-                if (ZSTD_getErrorCode(nn) != ZSTD_error_dstSize_tooSmall) {
-                    set_err(err, err_cap, ZSTD_getErrorName(nn));
-                    return -1;
-                }
-                if (cap >= max_plain) {
-                    set_err(err, err_cap, "zstd: payload too large");
-                    return -1;
-                }
-                if (cap > (max_plain / 2))
-                    cap = max_plain;
-                else
-                    cap *= 2;
-            }
-            set_err(err, err_cap, "zstd: payload too large");
-            return -1;
-        }
+        if (need == ZSTD_CONTENTSIZE_UNKNOWN)
+            return zstd_decompress_stream(src, src_len, max_plain, out, out_len, err, err_cap);
         if (need > max_plain) {
             set_err(err, err_cap, "zstd: payload too large");
             return -1;

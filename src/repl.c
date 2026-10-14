@@ -10,7 +10,7 @@
 #endif
 #endif
 #ifndef SHAKTI_PKG_VERSION
-#define SHAKTI_PKG_VERSION "0.14.3"
+#define SHAKTI_PKG_VERSION "0.15.0"
 #endif
 
 static int shakti_stmt_silent(Node *s) {
@@ -139,7 +139,7 @@ static const char *HL_BIS[] = {
     "getcwd","mkdir","getenv","sh","machine",
     "re_findall","re_sub","re_match","re_split",
     "json_loads","json_dumps","json_load","json_dump",
-    "sorted","any","all","isinstance","hasattr","getattr",
+    "sorted","any","all","isinstance","instanceof","hasattr","getattr",
     "chr","ord","hex","dict","set","next","assert",
     "int64","float64",
     NULL

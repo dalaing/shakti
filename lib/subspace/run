@@ -1,5 +1,45 @@
 #!/bin/sh
-[ "x`docker images -q shakti`" \!= "x" ] || docker build -t shakti ../../
-docker run --rm -e TERM=dumb -i \
-  -e LOGNAME="$USER" -w /shakti  \
-	-v "$__dir__:/shakti:ro" shakti "$@"
+# Spawned by subprocess.Popen via load(dir, ..., exec:True, __dir__:cwd).
+# The working directory is this subspace/ directory; $__dir__ is the host
+# directory exposed read-only at /shakti inside the container.
+set -eu
+
+img="${SHAKTI_SUBSPACE_IMAGE:-shakti-subspace:local}"
+
+d="${__dir__:-}"
+case "$d" in
+  /*) ;;
+  *) echo "subspace: __dir__ must be an absolute path" >&2; exit 2 ;;
+esac
+if [ ! -d "$d" ]; then
+  echo "subspace: __dir__ is not a directory: $d" >&2; exit 2
+fi
+src="$(cd "$d" && pwd -P)"
+home=""
+if [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then home="$(cd "$HOME" && pwd -P)"; fi
+if [ "$src" = "/" ] || { [ -n "$home" ] && [ "$src" = "$home" ]; }; then
+  echo "subspace: refusing to mount $src" >&2; exit 2
+fi
+case "$src" in
+  *,*|*:*) echo "subspace: unsupported character in path: $src" >&2; exit 2 ;;
+esac
+
+# No network unless explicitly requested.
+net=none
+if [ "${SHAKTI_SUBSPACE_NETWORK:-0}" = "1" ]; then net=bridge; fi
+
+if [ -z "$(docker images -q "$img")" ]; then
+  docker build -t "$img" "$(pwd -P)/../.."
+fi
+
+exec docker run --rm -i \
+  -e TERM=dumb -e LOGNAME="${USER:-shakti}" -w /shakti \
+  --network "$net" \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
+  --pids-limit 256 \
+  --memory 1g \
+  --mount "type=bind,source=$src,target=/shakti,readonly" \
+  "$img" "$@"

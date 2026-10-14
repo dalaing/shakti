@@ -1,5 +1,6 @@
 /* HTTP JSON-RPC daemon (POST /rpc). Loopback by default. */
 #include "server.h"
+#include "shakti_internal.h"
 #include "http_line.h"
 #include "json_parse.h"
 #ifdef SHAKTI_HAVE_TLS
@@ -18,30 +19,58 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 #define SERVE_MAX_REQ (256 * 1024)
+#define SERVE_HDR_DEADLINE_MS 5000
+#define SERVE_IO_DEADLINE_MS 10000
 
 static int g_serve_loopback = 1;
 static char g_serve_token[256];
 static __thread char g_cors_origin[256];
 static __thread int g_cors_origin_ok;
+static __thread long g_write_deadline;
 #ifdef SHAKTI_HAVE_TLS
 static __thread void *g_ssl;
 static void *g_tls_ctx;
 #endif
 
+static long serve_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static int serve_debug(void) {
+    const char *d = getenv("SHAKTI_SERVE_DEBUG");
+    return d && d[0] && strcmp(d, "0") != 0;
+}
+
 static ssize_t conn_read(int fd, void *buf, size_t n) {
 #ifdef SHAKTI_HAVE_TLS
-    if (g_ssl) return tls_read(g_ssl, buf, n);
+    if (g_ssl) return shakti_tls_read(g_ssl, buf, n);
 #endif
     return read(fd, buf, n);
 }
 
 static ssize_t conn_write(int fd, const void *buf, size_t n) {
 #ifdef SHAKTI_HAVE_TLS
-    if (g_ssl) return tls_write(g_ssl, buf, n);
+    if (g_ssl) return shakti_tls_write(g_ssl, buf, n);
 #endif
     return write(fd, buf, n);
+}
+
+static int conn_write_all(int fd, const void *buf, size_t n) {
+    size_t sent = 0;
+    while (sent < n) {
+        if (g_write_deadline && serve_now_ms() >= g_write_deadline) return -1;
+        ssize_t w = conn_write(fd, (const char *)buf + sent, n - sent);
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (w <= 0) return -1;
+        sent += (size_t)w;
+    }
+    return 0;
 }
 
 static int token_eq(const char *a, const char *b) {
@@ -63,9 +92,9 @@ static int http_header_value(const char *buf, const char *name, char *out, size_
     out[0] = 0;
     size_t nlen = strlen(name);
     const char *p = buf;
-    while (*p && !(p[0] == '\r' && p[1] == '\n' && p[2] == '\r' && p[3] == '\n')) {
+    while (*p) {
         const char *eol = strstr(p, "\r\n");
-        if (!eol) break;
+        if (!eol || eol == p) break;
         if ((size_t)(eol - p) >= nlen && !strncasecmp(p, name, nlen) && p[nlen] == ':') {
             const char *val = p + nlen + 1;
             while (val < eol && (*val == ' ' || *val == '\t')) val++;
@@ -81,30 +110,17 @@ static int http_header_value(const char *buf, const char *name, char *out, size_
 }
 
 static int origin_is_localhost(const char *origin) {
-    if (!origin || !origin[0]) return 0;
-    const char *p = origin;
-    if (!strncmp(p, "http://", 7)) p += 7;
-    else if (!strncmp(p, "https://", 8)) p += 8;
-    else return 0;
-    if (*p == '[')
-        return !strncmp(p, "[::1]", 5) && (p[5] == 0 || p[5] == ':' || p[5] == '/');
-    const char *end = p;
-    while (*end && *end != ':' && *end != '/') end++;
-    size_t n = (size_t)(end - p);
-    return (n == 9 && !strncmp(p, "localhost", 9)) || (n == 9 && !strncmp(p, "127.0.0.1", 9));
+    return origin && origin[0] && http_origin_is_local(origin);
 }
 
 static int host_is_local(const char *host) {
-    if (!host || !host[0]) return 0;
-    char tmp[256];
-    size_t n = strlen(host);
-    if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
-    memcpy(tmp, host, n);
-    tmp[n] = 0;
-    char *colon = strrchr(tmp, ':');
-    if (colon && strchr(tmp, ':') == colon) *colon = 0;
-    return !strcmp(tmp, "127.0.0.1") || !strcmp(tmp, "localhost")
-        || !strcmp(tmp, "[::1]") || !strcmp(tmp, "::1");
+    return host && host[0] && http_host_is_local(host);
+}
+
+static int has_ctl(const char *s) {
+    for (; s && *s; s++)
+        if ((unsigned char)*s < 0x20 || *s == 0x7f) return 1;
+    return 0;
 }
 
 static void http_respond(int fd, int code, const char *status,
@@ -138,34 +154,17 @@ static void http_respond(int fd, int code, const char *status,
             "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n"
             "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
             strlen(fb_body), fb_body);
-        if (n > 0) conn_write(fd, fb, (size_t)n);
+        if (n > 0) conn_write_all(fd, fb, (size_t)n);
         return;
     }
-    conn_write(fd, hdr, (size_t)hlen);
-    if (body && blen > 0) conn_write(fd, body, (size_t)blen);
+    if (conn_write_all(fd, hdr, (size_t)hlen) != 0) return;
+    if (body && blen > 0) conn_write_all(fd, body, (size_t)blen);
 }
 
 static V *server_invoke_fn(V *fn, V **args, int nargs) {
     if (!fn || fn->t != T_FN)
         return v_err("not callable");
-    Env *call_env = env_new(fn->closure);
-    V *params = fn->params;
-    for (int i = 0; i < params->n; i++) {
-        if (i < nargs)
-            env_set(call_env, params->L[i]->s, args[i]);
-        else if (fn->defaults && i < fn->defaults->n && fn->defaults->L[i]->t != T_NIL)
-            env_set(call_env, params->L[i]->s, fn->defaults->L[i]);
-    }
-    Node *body = fn_ast[(int)fn->j];
-    V *result = eval_fn(body, call_env);
-    if (g_returning) {
-        g_returning = 0;
-        v_free(result);
-        result = g_retval ? g_retval : v_nil();
-        g_retval = NULL;
-    }
-    env_free(call_env);
-    return result;
+    return shakti_call_fn(fn, NULL, args, nargs, NULL, NULL, 0, fn->closure);
 }
 
 typedef struct {
@@ -353,8 +352,10 @@ static V *dispatch_rpc(Env *global, const char *body) {
             return http_result(204, "text/plain", "");
         }
         if (!r || r->t == T_ERR) {
-            const char *msg = (r && r->t == T_ERR && r->s) ? r->s : "internal error";
-            V *http = rpc_error_http(-32603, msg, id);
+            if (serve_debug())
+                fprintf(stderr, "[serve] handle_rpc error: %s\n",
+                        (r && r->t == T_ERR && r->s) ? r->s : "internal error");
+            V *http = rpc_error_http(-32603, "internal error", id);
             v_free(r);
             v_free(req);
             return http;
@@ -412,7 +413,7 @@ static V *dispatch_request(Env *global, const char *method, const char *path,
 static void client_done(int cfd) {
 #ifdef SHAKTI_HAVE_TLS
     if (g_ssl) {
-        tls_free(g_ssl);
+        shakti_tls_free(g_ssl);
         g_ssl = NULL;
     }
 #endif
@@ -470,14 +471,16 @@ static int http_content_length(const char *buf) {
     return seen ? val : -1;
 }
 
-static ssize_t http_read_request(int fd, char *buf, size_t cap, time_t deadline) {
+static ssize_t http_read_request(int fd, char *buf, size_t cap, long hdr_deadline, long deadline) {
     size_t nread = 0;
     while (nread + 1 < cap) {
-        if (time(NULL) >= deadline) return -1;
+        long now = serve_now_ms();
+        if (now >= deadline) return -1;
+        if (now >= hdr_deadline && !http_body(buf)) return -1;
         ssize_t r = conn_read(fd, buf + nread, cap - 1 - nread);
         if (r < 0) {
             if (errno == EINTR) continue;
-            if ((errno == EAGAIN || errno == EWOULDBLOCK) && time(NULL) < deadline) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
             return -1;
         }
         if (r == 0) break;
@@ -511,10 +514,14 @@ static ssize_t http_read_request(int fd, char *buf, size_t cap, time_t deadline)
 static void handle_client(int cfd, Env *global) {
     g_cors_origin[0] = 0;
     g_cors_origin_ok = 0;
+    long t0 = serve_now_ms();
+    long hdr_deadline = t0 + SERVE_HDR_DEADLINE_MS;
+    long deadline = t0 + SERVE_IO_DEADLINE_MS;
+    g_write_deadline = deadline;
 #ifdef SHAKTI_HAVE_TLS
     g_ssl = NULL;
     if (g_tls_ctx) {
-        g_ssl = tls_accept(cfd, g_tls_ctx);
+        g_ssl = shakti_tls_accept_timeout(cfd, g_tls_ctx, SERVE_HDR_DEADLINE_MS);
         if (!g_ssl) {
             close(cfd);
             return;
@@ -526,7 +533,7 @@ static void handle_client(int cfd, Env *global) {
         client_done(cfd);
         return;
     }
-    ssize_t nread = http_read_request(cfd, buf, SERVE_MAX_REQ, time(NULL) + 30);
+    ssize_t nread = http_read_request(cfd, buf, SERVE_MAX_REQ, hdr_deadline, deadline);
     if (nread <= 0) {
         free(buf);
         client_done(cfd);
@@ -645,19 +652,13 @@ static void handle_client(int cfd, Env *global) {
     } else
         resp = dispatch_request(global, method, path, body ? body : "", req_ctype);
 
+    g_write_deadline = serve_now_ms() + SERVE_IO_DEADLINE_MS;
     if (!resp || resp->t == T_ERR) {
-        const char *msg = (resp && resp->t == T_ERR && resp->s) ? resp->s : "internal error";
-        char esc[256], jbuf[512];
-        size_t o = 0;
-        for (const char *p = msg; *p && o + 8 < sizeof esc; p++) {
-            unsigned char c = (unsigned char)*p;
-            if (c == '"' || c == '\\') { esc[o++] = '\\'; esc[o++] = (char)c; }
-            else if (c < 0x20) o += (size_t)snprintf(esc + o, sizeof esc - o, "\\u%04x", c);
-            else esc[o++] = (char)c;
-        }
-        esc[o] = 0;
-        snprintf(jbuf, sizeof jbuf, "{\"error\":\"%s\"}", esc);
-        http_respond(cfd, 500, "Internal Server Error", "application/json", jbuf);
+        if (serve_debug())
+            fprintf(stderr, "[serve] handler error: %s\n",
+                    (resp && resp->t == T_ERR && resp->s) ? resp->s : "internal error");
+        http_respond(cfd, 500, "Internal Server Error", "application/json",
+                     "{\"error\":\"internal error\"}");
         v_free(resp);
         free(buf);
         client_done(cfd);
@@ -676,7 +677,13 @@ static void handle_client(int cfd, Env *global) {
     const char *ctype = dict_str(resp, "content_type", "application/json");
     const char *status_txt = status >= 400 ? "Error" : "OK";
     const char *b = dict_str(resp, "body", "{}");
-    http_respond(cfd, status, status_txt, ctype, b);
+    if (has_ctl(ctype) || status < 100 || status > 999) {
+        if (serve_debug())
+            fprintf(stderr, "[serve] handler returned invalid status or content_type\n");
+        http_respond(cfd, 500, "Internal Server Error", "application/json",
+                     "{\"error\":\"internal error\"}");
+    } else
+        http_respond(cfd, status, status_txt, ctype, b);
     v_free(resp);
     free(buf);
     client_done(cfd);
@@ -728,20 +735,38 @@ void server_serve(int port, Env *global_env) {
         close(srv);
         return;
     }
+    int have_tls = 0;
 
 #ifdef SHAKTI_HAVE_TLS
     g_tls_ctx = NULL;
     const char *cert = getenv("SHAKTI_TLS_CERT");
     const char *key = getenv("SHAKTI_TLS_KEY");
     if (cert && cert[0] && key && key[0]) {
-        g_tls_ctx = tls_server_ctx(cert, key);
+        g_tls_ctx = shakti_tls_server_ctx(cert, key);
         if (!g_tls_ctx) {
             printf("[serve] TLS cert/key failed\n");
             close(srv);
             return;
         }
+        have_tls = 1;
     }
 #endif
+    if (!g_serve_loopback && !have_tls) {
+        const char *pt = getenv("SHAKTI_SERVE_ALLOW_PLAINTEXT");
+        if (!(pt && pt[0] == '1' && pt[1] == '\0')) {
+            printf("[serve] non-loopback bind without TLS would send SHAKTI_SERVE_TOKEN in cleartext; "
+                   "set SHAKTI_TLS_CERT/SHAKTI_TLS_KEY or SHAKTI_SERVE_ALLOW_PLAINTEXT=1\n");
+#ifdef SHAKTI_HAVE_TLS
+            if (g_tls_ctx) {
+                shakti_tls_server_ctx_free(g_tls_ctx);
+                g_tls_ctx = NULL;
+            }
+#endif
+            close(srv);
+            return;
+        }
+        fprintf(stderr, "[serve] warning: public plaintext HTTP; bearer token is not encrypted\n");
+    }
 
     if (bind(srv, (struct sockaddr *)&addr, sizeof addr) < 0) {
         printf("[serve] bind failed: %s\n", strerror(errno));
@@ -769,7 +794,6 @@ void server_serve(int port, Env *global_env) {
             tv.tv_sec = 1;
             tv.tv_usec = 0;
             setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-            tv.tv_sec = 30;
             setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
         }
         handle_client(cfd, global_env);
@@ -777,7 +801,7 @@ void server_serve(int port, Env *global_env) {
     close(srv);
 #ifdef SHAKTI_HAVE_TLS
     if (g_tls_ctx) {
-        tls_server_ctx_free(g_tls_ctx);
+        shakti_tls_server_ctx_free(g_tls_ctx);
         g_tls_ctx = NULL;
     }
 #endif
@@ -790,6 +814,8 @@ V *bi_server_serve(V **a, int n, Env *e) {
     (void)e;
     return v_err("server_serve: not available in WASM");
 #else
+    if (!shakti_net_allowed())
+        return v_err("server_serve: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
     int port = 8080;
     if (n > 0 && a[0]->t == T_INT) port = (int)a[0]->j;
     server_serve(port, e);

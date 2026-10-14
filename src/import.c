@@ -16,6 +16,35 @@ FILE *fopen_regular(const char *path, char *err, size_t err_cap) {
     f = fopen(path, "r");
     return f;
 }
+void shakti_set_file_vars(Env *e, const char *path) {
+    char full[8192];
+    char *sep;
+    V *v;
+    if (!e || !path || !path[0]) return;
+#ifdef _WIN32
+    if (!_fullpath(full, path, sizeof full)) snprintf(full, sizeof full, "%s", path);
+#else
+    char *rp = realpath(path, NULL);
+    snprintf(full, sizeof full, "%s", rp ? rp : path);
+    free(rp);
+#endif
+    v = v_str(full);
+    env_set_kind(e, "__file__", v, ENV_BIND_INTERNAL);
+    v_free(v);
+    sep = strrchr(full, '/');
+#ifdef _WIN32
+    {
+        char *bs = strrchr(full, '\\');
+        if (bs && (!sep || bs > sep)) sep = bs;
+    }
+#endif
+    if (!sep) snprintf(full, sizeof full, ".");
+    else if (sep == full) full[1] = 0;
+    else *sep = 0;
+    v = v_str(full);
+    env_set_kind(e, "__dir__", v, ENV_BIND_INTERNAL);
+    v_free(v);
+}
 static const char *SHAKTI_SQL_FLAG = "__shakti_sql__";
 static int is_sql_import(const char *name) {
     P(!name || !name[0],0)
@@ -50,43 +79,30 @@ V *do_import(const char *name, Env *e) {
             return v_err("import: parent name too long");
     }
     char path[8192];
-    char open_err[256];
+    char dotpath[8192];
     FILE *f = NULL;
-    open_err[0] = 0;
-    /* Prefer .ie before extensionless paths so import name does not open a
-     * same-named binary. */
-    if(g_lib_path[0]) { snprintf(path,sizeof(path),"%s/%s.ie",g_lib_path,name); f=fopen_regular(path, open_err, sizeof open_err); }
-    if(!f) {
-        const char *env = getenv("SHAKTI_LIB");
-        if(env) { snprintf(path,sizeof(path),"%s/%s.ie",env,name); f=fopen_regular(path, open_err, sizeof open_err); }
-    }
-    if(!f) { snprintf(path,sizeof(path),"%s.ie",name); f=fopen_regular(path, open_err, sizeof open_err); }
-    if(!f && g_script_dir[0]) { snprintf(path,sizeof(path),"%s/%s.ie",g_script_dir,name); f=fopen_regular(path, open_err, sizeof open_err); }
-    if(!f) {
-        char dotpath[8192];
-        const char *envlib;
-        strncpy(dotpath, name, sizeof(dotpath)-1);
-        dotpath[sizeof(dotpath)-1] = 0;
-        for(char *p=dotpath; *p; p++) if(*p=='.') *p='/';
-        if(g_lib_path[0]) { snprintf(path,sizeof(path),"%s/%s.ie",g_lib_path,dotpath); f=fopen_regular(path, open_err, sizeof open_err); }
-        if(!f) {
-            envlib = getenv("SHAKTI_LIB");
-            if(envlib && envlib[0]) {
-                snprintf(path,sizeof(path),"%s/%s.ie",envlib,dotpath); f=fopen_regular(path, open_err, sizeof open_err);
+    snprintf(dotpath, sizeof dotpath, "%s", name);
+    for (char *p = dotpath; *p; p++) if (*p == '.') *p = '/';
+    /* Search order: the running script's directory, then the stdlib dirs
+     * (exe-relative lib, $SHAKTI_LIB). The working directory is searched only
+     * when there is no script (REPL / -c), and then after the stdlib, so an
+     * untrusted cwd cannot shadow modules. Only NAME.ie files are imported. */
+    {
+        const char *envlib = getenv("SHAKTI_LIB");
+        const char *dirs[3];
+        int nd = 0;
+        if (g_script_dir[0]) dirs[nd++] = g_script_dir;
+        if (g_lib_path[0]) dirs[nd++] = g_lib_path;
+        if (envlib && envlib[0]) dirs[nd++] = envlib;
+        if (!g_script_dir[0]) dirs[nd++] = ".";
+        for (int pass = 0; pass < 2 && !f; pass++) {
+            const char *rel = pass == 0 ? name : dotpath;
+            if (pass == 1 && !strcmp(dotpath, name)) break;
+            for (int k = 0; k < nd && !f; k++) {
+                if (snprintf(path, sizeof path, "%s/%s.ie", dirs[k], rel) >= (int)sizeof path)
+                    continue;
+                f = fopen_regular(path, NULL, 0);
             }
-        }
-        if(!f) { snprintf(path,sizeof(path),"%s.ie",dotpath); f=fopen_regular(path, open_err, sizeof open_err); }
-        if(!f && g_script_dir[0]) {
-            snprintf(path,sizeof(path),"%s/%s.ie",g_script_dir,dotpath); f=fopen_regular(path, open_err, sizeof open_err);
-        }
-    }
-    if(!f) f = fopen_regular(name, open_err, sizeof open_err);
-    if(!f && g_script_dir[0]) { snprintf(path,sizeof(path),"%s/%s",g_script_dir,name); f=fopen_regular(path, open_err, sizeof open_err); }
-    if(!f && g_lib_path[0]) { snprintf(path,sizeof(path),"%s/%s",g_lib_path,name); f=fopen_regular(path, open_err, sizeof open_err); }
-    if(!f) {
-        const char *env = getenv("SHAKTI_LIB");
-        if(env) {
-            snprintf(path,sizeof(path),"%s/%s",env,name); f=fopen_regular(path, open_err, sizeof open_err);
         }
     }
     P(!f,v_errf("cannot import '%s'", name))
@@ -98,6 +114,7 @@ V *do_import(const char *name, Env *e) {
     buf[got]='\n'; buf[got+1]=0;
     fclose(f);
     Env *mod_env = env_new(e);
+    shakti_set_file_vars(mod_env, path);
     Node *prog = parse(buf);
     V *r = eval(prog, mod_env);
     {
@@ -120,7 +137,7 @@ V *do_import(const char *name, Env *e) {
     })
     V *mod_dict = v_dict(mk, mv);
     v_free(mk); v_free(mv);
-    char *dot = strchr(name, '.');
+    const char *dot = strchr(name, '.');
     if(dot) {
         char parent[256];
         int plen = dot - name;

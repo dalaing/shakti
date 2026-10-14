@@ -1,9 +1,11 @@
 #include "rest.h"
 #include "http_line.h"
 #include "json_parse.h"
+#include "shakti_internal.h"
 #ifdef SHAKTI_HAVE_IEFS
 #include "iefs_format.h"
 #ifdef SHAKTI_HAVE_HLD
+#include "codec.h"
 #include "hld.h"
 #endif
 #endif
@@ -18,11 +20,13 @@
 #include <stdint.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef O_NOFOLLOW
@@ -40,6 +44,9 @@
 #define REST_MAX_HDR 65536
 #define REST_MAX_BODY (1024 * 1024)
 #define REST_TEMP_PATH_CAP 512
+#define REST_READ_TIMEOUT_MS 10000
+#define REST_TLS_HANDSHAKE_MS 5000
+#define REST_MAX_DECODE_DEFAULT (256ull * 1024 * 1024)
 
 typedef enum {
     REST_KIND_NONE = 0,
@@ -56,9 +63,14 @@ typedef struct {
     void *ssl_ctx;
     char *ws_key;
     char *ws_protocol;
+    char *ws_origin;
+    int loopback;
+    long deadline;
 } RestHandle;
 
-static char g_rest_token[4096];
+static char g_rest_server_token[4096];
+static char g_rest_client_token[4096];
+static int g_rest_tokens_inited;
 static int g_rest_inited;
 
 /* Process-lifetime temp paths for curl I/O — created once, truncated per request. */
@@ -95,12 +107,71 @@ static void rest_unlink_temps(void) {
     unlink(g_rest_data_path);
 }
 
+static void rest_init_tokens(void) {
+    if (g_rest_tokens_inited) return;
+    g_rest_tokens_inited = 1;
+    const char *legacy = getenv("SHAKTI_REST_TOKEN");
+    const char *srv = getenv("SHAKTI_REST_SERVER_TOKEN");
+    const char *cli = getenv("SHAKTI_REST_CLIENT_TOKEN");
+    int used_legacy = 0;
+    if (!srv || !srv[0]) {
+        srv = legacy;
+        used_legacy |= srv && srv[0];
+    }
+    if (!cli || !cli[0]) {
+        cli = legacy;
+        used_legacy |= cli && cli[0];
+    }
+    if (srv && srv[0]) snprintf(g_rest_server_token, sizeof g_rest_server_token, "%s", srv);
+    if (cli && cli[0]) snprintf(g_rest_client_token, sizeof g_rest_client_token, "%s", cli);
+    if (used_legacy)
+        fprintf(stderr, "rest: SHAKTI_REST_TOKEN is deprecated; use SHAKTI_REST_SERVER_TOKEN "
+                        "(inbound) and SHAKTI_REST_CLIENT_TOKEN (outbound)\n");
+}
+
+static int rest_token_eq(const char *a, const char *b) {
+    if (!a) a = "";
+    if (!b) b = "";
+    size_t na = strlen(a), nb = strlen(b);
+    size_t n = na > nb ? na : nb;
+    unsigned diff = (unsigned)(na != nb);
+    for (size_t i = 0; i < n; i++) {
+        unsigned ca = i < na ? (unsigned char)a[i] : 0;
+        unsigned cb = i < nb ? (unsigned char)b[i] : 0;
+        diff |= ca ^ cb;
+    }
+    return diff == 0;
+}
+
+static long rest_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static long rest_env_long(const char *name, long def, long lo, long hi) {
+    const char *e = getenv(name);
+    if (!e || !e[0]) return def;
+    char *end = NULL;
+    long v = strtol(e, &end, 10);
+    if (!end || *end || v < lo || v > hi) return def;
+    return v;
+}
+
+static size_t rest_max_decode(void) {
+    const char *e = getenv("SHAKTI_REST_MAX_DECODE");
+    if (e && e[0]) {
+        char *end = NULL;
+        unsigned long long v = strtoull(e, &end, 10);
+        if (end && !*end && v > 0 && v <= SIZE_MAX) return (size_t)v;
+    }
+    return (size_t)REST_MAX_DECODE_DEFAULT;
+}
+
 static void rest_init(void) {
+    rest_init_tokens();
     if (g_rest_inited) return;
     g_rest_inited = 1;
-    g_rest_token[0] = 0;
-    const char *env = getenv("SHAKTI_REST_TOKEN");
-    if (env && env[0]) strncpy(g_rest_token, env, sizeof g_rest_token - 1);
     const char *dir = getenv("XDG_RUNTIME_DIR");
     if (!dir || !dir[0]) dir = getenv("TMPDIR");
     if (!dir || !dir[0]) dir = "/tmp";
@@ -132,6 +203,11 @@ static int rest_has_ctl(const char *s) {
  * interpreted by curl as an option, and blocks file://, etc.
  * Loopback (127/8, ::1) stays open so the in-process mini-server can be reached.
  */
+int rest_private_allowed(void) {
+    const char *e = getenv("SHAKTI_NET_ALLOW_PRIVATE");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
 static int rest_host_is_blocked_ip(const struct sockaddr *sa) {
     if (!sa) return 1;
     if (sa->sa_family == AF_INET) {
@@ -186,6 +262,12 @@ static int rest_host_is_blocked_ip(const struct sockaddr *sa) {
     }
 #endif
     return 0;
+}
+
+int rest_addr_blocked(const struct sockaddr *sa) {
+    if (!sa) return 1;
+    if (rest_private_allowed()) return 0;
+    return rest_host_is_blocked_ip(sa);
 }
 
 static int rest_extract_host(const char *url, char *host, size_t host_cap) {
@@ -267,8 +349,9 @@ static int rest_url_resolve_pin(const char *url, char *resolve_out, size_t resol
 
     char ips[8][INET6_ADDRSTRLEN];
     int nip = 0;
+    int allow_private = rest_private_allowed();
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        if (rest_host_is_blocked_ip(ai->ai_addr)) {
+        if (!allow_private && rest_host_is_blocked_ip(ai->ai_addr)) {
             freeaddrinfo(res);
             return 0;
         }
@@ -397,18 +480,51 @@ static V *cvec_from_raw(const unsigned char *p, size_t n) {
     return v;
 }
 
-static int rest_body_looks_binary(const unsigned char *raw, size_t len, const char *ct) {
-    if (rest_ct_is_hld(ct) || rest_ct_is_iefs(ct)) return 1;
-#ifdef SHAKTI_HAVE_IEFS
-    if (raw && len >= 4 && !memcmp(raw, IEFS_MAGIC, 4))
-        return 1;
-#ifdef SHAKTI_HAVE_HLD
-    if (raw && len >= 4 && !memcmp(raw, HLD_MAGIC, 4))
-        return 1;
-#endif
-#endif
-    return 0;
+static int rest_body_looks_binary(const char *ct) {
+    return rest_ct_is_hld(ct) || rest_ct_is_iefs(ct);
 }
+
+#ifdef SHAKTI_HAVE_HLD
+static V *rest_hld_decode_max(const unsigned char *buf, size_t len, size_t max_plain) {
+    if (!buf || len < HLD_HEADER_SIZE)
+        return v_err("hld_decode: truncated header");
+    if (memcmp(buf, HLD_MAGIC, 4) != 0)
+        return v_err("hld_decode: bad magic");
+    int codec = (int)buf[4];
+    if (buf[5] != 0)
+        return v_err("hld_decode: reserved byte nonzero");
+    if (codec != SHAKTI_CODEC_NONE && codec != SHAKTI_CODEC_ZSTD && codec != SHAKTI_CODEC_SNAPPY)
+        return v_err("hld_decode: unknown codec");
+    uint32_t raw_len = (uint32_t)buf[6] | ((uint32_t)buf[7] << 8) | ((uint32_t)buf[8] << 16) |
+                       ((uint32_t)buf[9] << 24);
+    uint32_t wire_len = (uint32_t)buf[10] | ((uint32_t)buf[11] << 8) | ((uint32_t)buf[12] << 16) |
+                        ((uint32_t)buf[13] << 24);
+    if (len < (size_t)HLD_HEADER_SIZE + (size_t)wire_len)
+        return v_err("hld_decode: truncated payload");
+    if ((size_t)raw_len > max_plain)
+        return v_err("rest: decoded body exceeds SHAKTI_REST_MAX_DECODE");
+    const unsigned char *payload = buf + HLD_HEADER_SIZE;
+    if (codec == SHAKTI_CODEC_NONE) {
+        if (wire_len != raw_len)
+            return v_err("hld_decode: raw_len mismatch");
+        return iefs_decode_max(payload, wire_len, max_plain);
+    }
+    unsigned char *plain = NULL;
+    size_t plain_len = 0;
+    char err[256];
+    err[0] = 0;
+    if (shakti_decompress_max(codec, payload, wire_len, &plain, &plain_len, (size_t)raw_len,
+                              err, sizeof err) != 0)
+        return v_err(err[0] ? err : "hld_decode: decompress failed");
+    if (plain_len != (size_t)raw_len) {
+        free(plain);
+        return v_err("hld_decode: raw_len mismatch after decompress");
+    }
+    V *v = iefs_decode_max(plain, plain_len, max_plain);
+    free(plain);
+    return v;
+}
+#endif
 
 /* Extract HTTP body bytes from T_STR or list[char]. Returns 0 on success. */
 static int rest_body_bytes(V *v, const unsigned char **out, size_t *out_len) {
@@ -433,12 +549,12 @@ static int rest_body_bytes(V *v, const unsigned char **out, size_t *out_len) {
 static V *body_value(const unsigned char *raw, size_t len, const char *content_type) {
     if (!raw || len == 0) return v_str("");
 #ifdef SHAKTI_HAVE_HLD
-    if (rest_ct_is_hld(content_type) || (len >= 4 && !memcmp(raw, HLD_MAGIC, 4)))
-        return hld_decode(raw, len);
+    if (rest_ct_is_hld(content_type))
+        return rest_hld_decode_max(raw, len, rest_max_decode());
 #endif
 #ifdef SHAKTI_HAVE_IEFS
-    if (rest_ct_is_iefs(content_type) || (len >= 4 && !memcmp(raw, IEFS_MAGIC, 4)))
-        return iefs_decode(raw, len);
+    if (rest_ct_is_iefs(content_type))
+        return iefs_decode_max(raw, len, rest_max_decode());
 #endif
     while (len > 0 && (raw[len - 1] == '\n' || raw[len - 1] == '\r')) len--;
     if (len == 0) return v_str("");
@@ -448,10 +564,11 @@ static V *body_value(const unsigned char *raw, size_t len, const char *content_t
     tmp[len] = 0;
     if (tmp[0] == '{' || tmp[0] == '[') {
         V *parsed = shakti_json_parse(tmp, NULL);
-        if (parsed) {
+        if (parsed && parsed->t != T_ERR) {
             free(tmp);
             return parsed;
         }
+        if (parsed) v_free(parsed);
     }
     V *out = v_str(tmp);
     free(tmp);
@@ -467,20 +584,23 @@ static V *make_response(int status, const unsigned char *raw_body, size_t body_l
     V *body = body_value(src, copy_len, ct);
     if (body->t == T_ERR) {
         v_free(resp);
+        if (headers) v_free(headers);
         return body;
     }
     v_dict_put(resp, "body", body);
     V *raw;
-    if (rest_body_looks_binary(src, copy_len, ct)) {
+    if (rest_body_looks_binary(ct)) {
         raw = cvec_from_raw(src, copy_len);
         if (raw->t == T_ERR) {
             v_free(resp);
+            if (headers) v_free(headers);
             return raw;
         }
     } else {
         char *raw_copy = malloc(copy_len + 1);
         if (!raw_copy) {
             v_free(resp);
+            if (headers) v_free(headers);
             return v_err("rest: out of memory");
         }
         memcpy(raw_copy, src, copy_len);
@@ -548,28 +668,57 @@ static int rest_alloc(RestKind kind, int fd) {
             g_rest_handles[i].ssl_ctx = NULL;
             g_rest_handles[i].ws_key = NULL;
             g_rest_handles[i].ws_protocol = NULL;
+            g_rest_handles[i].ws_origin = NULL;
+            g_rest_handles[i].loopback = 0;
+            g_rest_handles[i].deadline = 0;
             return i;
         }
     }
     return -1;
 }
 
+static int rest_wait_readable(RestHandle *conn) {
+    long left = conn->deadline - rest_now_ms();
+    if (left <= 0) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    struct pollfd pfd = {.fd = conn->fd, .events = POLLIN, .revents = 0};
+    for (;;) {
+        int pr = poll(&pfd, 1, (int)left);
+        if (pr < 0 && errno == EINTR) continue;
+        if (pr <= 0) {
+            if (pr == 0) errno = ETIMEDOUT;
+            return -1;
+        }
+        return 0;
+    }
+}
+
 static ssize_t rest_io_read(RestHandle *conn, void *buf, size_t n) {
     if (!conn) return -1;
-#ifdef SHAKTI_HAVE_TLS
-    if (conn->ssl) return tls_read(conn->ssl, buf, n);
-#endif
     for (;;) {
-        ssize_t r = read(conn->fd, buf, n);
-        if (r < 0 && errno == EINTR) continue;
-        return r;
+        ssize_t r;
+#ifdef SHAKTI_HAVE_TLS
+        if (conn->ssl)
+            r = shakti_tls_read(conn->ssl, buf, n);
+        else
+#endif
+            r = read(conn->fd, buf, n);
+        if (r >= 0) return r;
+        if (errno == EINTR) continue;
+        if (conn->deadline && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (rest_wait_readable(conn) != 0) return -1;
+            continue;
+        }
+        return -1;
     }
 }
 
 static ssize_t rest_io_write(RestHandle *conn, const void *buf, size_t n) {
     if (!conn) return -1;
 #ifdef SHAKTI_HAVE_TLS
-    if (conn->ssl) return tls_write(conn->ssl, buf, n);
+    if (conn->ssl) return shakti_tls_write(conn->ssl, buf, n);
 #endif
     size_t sent = 0;
     while (sent < n) {
@@ -614,8 +763,10 @@ static void rest_clear_ws_meta(RestHandle *s) {
     if (!s) return;
     free(s->ws_key);
     free(s->ws_protocol);
+    free(s->ws_origin);
     s->ws_key = NULL;
     s->ws_protocol = NULL;
+    s->ws_origin = NULL;
 }
 
 int rest_peek_ws_key(int h, char *out, size_t out_cap) {
@@ -636,6 +787,18 @@ int rest_peek_ws_protocol(int h, char *out, size_t out_cap) {
     return 0;
 }
 
+int rest_peek_ws_origin(int h, char *out, size_t out_cap, int *loopback) {
+    RestHandle *s = rest_slot(h);
+    if (!s || !out || out_cap == 0) return -1;
+    if (loopback) *loopback = s->loopback;
+    if (!s->ws_origin) {
+        out[0] = 0;
+        return 0;
+    }
+    if (snprintf(out, out_cap, "%s", s->ws_origin) >= (int)out_cap) return -1;
+    return 0;
+}
+
 int rest_take_conn(int h, int *out_fd, void **out_ssl) {
     RestHandle *s = rest_slot(h);
     if (!s || s->kind != REST_KIND_CONN || !out_fd || !out_ssl) return -1;
@@ -652,7 +815,34 @@ int rest_take_conn(int h, int *out_fd, void **out_ssl) {
 /* Run curl with an explicit argv (no shell) and capture its stdout (the
  * -w http_code) into code_path. Returns curl's exit status, or -1 on error.
  * posix_spawn avoids a full address-space copy from fork(). */
+static const char *rest_curl_path(void) {
+    const char *env = getenv("SHAKTI_CURL");
+    if (env && env[0]) {
+        if (env[0] == '/' && access(env, X_OK) == 0) return env;
+        return NULL;
+    }
+    static const char *const cands[] = {"/usr/bin/curl", "/usr/local/bin/curl",
+                                        "/opt/homebrew/bin/curl", "/bin/curl"};
+    for (size_t i = 0; i < sizeof cands / sizeof cands[0]; i++)
+        if (access(cands[i], X_OK) == 0) return cands[i];
+    return NULL;
+}
+
+static int rest_env_keep(const char *kv) {
+    static const char *const keep[] = {"LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ",
+                                       "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+                                       "LD_LIBRARY_PATH", "SYSTEMROOT"};
+    const char *eq = strchr(kv, '=');
+    if (!eq) return 0;
+    size_t n = (size_t)(eq - kv);
+    for (size_t i = 0; i < sizeof keep / sizeof keep[0]; i++)
+        if (strlen(keep[i]) == n && !strncmp(kv, keep[i], n)) return 1;
+    return 0;
+}
+
 static int rest_run_curl(char *const argv[], const char *code_path) {
+    const char *curl = rest_curl_path();
+    if (!curl) return -2;
     int ofd = open(code_path, O_WRONLY | O_TRUNC | O_NOFOLLOW, 0600);
     if (ofd < 0) return -1;
     int dn = open("/dev/null", O_WRONLY);
@@ -671,7 +861,21 @@ static int rest_run_curl(char *const argv[], const char *code_path) {
 
     pid_t pid = 0;
     extern char **environ;
-    int rc = posix_spawnp(&pid, "curl", &fa, NULL, argv, environ);
+    size_t nenv = 0;
+    for (char **e = environ; e && *e; e++) nenv++;
+    char **envp = calloc(nenv + 1, sizeof(char *));
+    if (!envp) {
+        posix_spawn_file_actions_destroy(&fa);
+        close(ofd);
+        if (dn >= 0) close(dn);
+        return -1;
+    }
+    size_t ne = 0;
+    for (char **e = environ; e && *e; e++)
+        if (rest_env_keep(*e)) envp[ne++] = *e;
+    envp[ne] = NULL;
+    int rc = posix_spawn(&pid, curl, &fa, NULL, argv, envp);
+    free(envp);
     posix_spawn_file_actions_destroy(&fa);
     close(ofd);
     if (dn >= 0) close(dn);
@@ -685,10 +889,12 @@ static int rest_run_curl(char *const argv[], const char *code_path) {
 
 static V *rest_http_request(const char *method, const char *url, const unsigned char *body,
                             size_t body_len, const char *content_type, V *extra_hdrs) {
+    if (!shakti_net_allowed())
+        return v_err("rest: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
     rest_init();
     if (!method || !method[0] || !url || !url[0])
         return v_err("rest: empty method or url");
-    if (rest_has_ctl(method) || rest_has_ctl(url) || rest_has_ctl(g_rest_token))
+    if (rest_has_ctl(method) || rest_has_ctl(url) || rest_has_ctl(g_rest_client_token))
         return v_err("rest: invalid control character in method, url, or token");
     if (content_type && rest_has_ctl(content_type))
         return v_err("rest: invalid control character in content_type");
@@ -725,13 +931,13 @@ static V *rest_http_request(const char *method, const char *url, const unsigned 
 
     char auth_hdr[4200];
     auth_hdr[0] = 0;
-    if (g_rest_token[0] && rest_token_host_ok(url))
-        snprintf(auth_hdr, sizeof auth_hdr, "Authorization: Bearer %s", g_rest_token);
+    if (g_rest_client_token[0] && rest_token_host_ok(url))
+        snprintf(auth_hdr, sizeof auth_hdr, "Authorization: Bearer %s", g_rest_client_token);
 
     /* Assemble a curl argv (no shell). Each value is passed to execvp() as a
      * literal argument, so URL/header/token contents cannot inject a command. */
     int nextra = (extra_hdrs && extra_hdrs->t == T_DICT) ? (int)extra_hdrs->keys->n : 0;
-    int max_args = 36 + nextra * 2;
+    int max_args = 38 + nextra * 2;
     char **argv = calloc((size_t)max_args, sizeof(char *));
     char **hdr_lines = calloc((size_t)(nextra > 0 ? nextra : 1), sizeof(char *));
     if (!argv || !hdr_lines) {
@@ -742,6 +948,7 @@ static V *rest_http_request(const char *method, const char *url, const unsigned 
     int nh = 0;
     int ac = 0;
     argv[ac++] = "curl";
+    argv[ac++] = "-q";
     argv[ac++] = "-sS";
     argv[ac++] = "-m";
     argv[ac++] = "60";
@@ -801,6 +1008,8 @@ static V *rest_http_request(const char *method, const char *url, const unsigned 
     for (int j = 0; j < nh; j++) free(hdr_lines[j]);
     free(hdr_lines);
     free(argv);
+    if (rc == -2)
+        return v_err("rest: curl not found (install curl or set SHAKTI_CURL to an absolute path)");
     if (rc != 0)
         return v_err("rest: curl request failed");
 
@@ -832,6 +1041,9 @@ static void rest_set_cloexec(int fd) {
 #endif
 
 static V *rest_do_listen(int port, const char *host) {
+    if (!shakti_net_allowed())
+        return v_err("rest_listen: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
+    rest_init_tokens();
     if (port < 1 || port > 65535) return v_err("rest_listen: invalid port");
     if (!host || !host[0]) host = "127.0.0.1";
     if (!strcmp(host, "localhost")) host = "127.0.0.1";
@@ -840,8 +1052,8 @@ static V *rest_do_listen(int port, const char *host) {
         const char *allow = getenv("SHAKTI_REST_ALLOW_PUBLIC");
         if (!loopback && !(allow && allow[0] == '1' && allow[1] == '\0'))
             return v_err("rest_listen: non-loopback bind requires SHAKTI_REST_ALLOW_PUBLIC=1");
-        if (!loopback && !g_rest_token[0])
-            return v_err("rest_listen: non-loopback bind requires SHAKTI_REST_TOKEN");
+        if (!loopback && !g_rest_server_token[0])
+            return v_err("rest_listen: non-loopback bind requires SHAKTI_REST_SERVER_TOKEN");
     }
 
 #if defined(AF_INET6)
@@ -875,6 +1087,7 @@ static V *rest_do_listen(int port, const char *host) {
             close(fd6);
             return v_err("rest_listen: too many handles");
         }
+        g_rest_handles[h6].loopback = 1;
         return v_int(h6);
     }
 #endif
@@ -909,6 +1122,7 @@ static V *rest_do_listen(int port, const char *host) {
         close(fd);
         return v_err("rest_listen: too many handles");
     }
+    g_rest_handles[h].loopback = loopback || http_ipv4_is_loopback(host, strlen(host));
     return v_int(h);
 }
 
@@ -932,7 +1146,9 @@ static V *rest_do_accept(int listen_h) {
     void *ssl = NULL;
 #ifdef SHAKTI_HAVE_TLS
     if (srv->ssl_ctx) {
-        ssl = tls_accept(cfd, srv->ssl_ctx);
+        ssl = shakti_tls_accept_timeout(cfd, srv->ssl_ctx,
+                                 (int)rest_env_long("SHAKTI_REST_TLS_TIMEOUT_MS",
+                                                    REST_TLS_HANDSHAKE_MS, 1, 600000));
         if (!ssl) {
             close(cfd);
             return v_err("rest_accept: tls handshake failed");
@@ -943,13 +1159,14 @@ static V *rest_do_accept(int listen_h) {
     int h = rest_alloc(REST_KIND_CONN, cfd);
     if (h < 0) {
 #ifdef SHAKTI_HAVE_TLS
-        if (ssl) tls_close(ssl, cfd);
+        if (ssl) shakti_tls_close(ssl, cfd);
         else
 #endif
             close(cfd);
         return v_err("rest_accept: too many handles");
     }
     g_rest_handles[h].ssl = ssl;
+    g_rest_handles[h].loopback = srv->loopback;
     return v_int(h);
 }
 
@@ -957,16 +1174,16 @@ static V *rest_do_accept(int listen_h) {
 static V *rest_do_listen_tls(int port, const char *host, const char *cert, const char *key) {
     if (!cert || !key || !cert[0] || !key[0])
         return v_err("rest_listen_tls: cert and key required");
-    void *ctx = tls_server_ctx(cert, key);
+    void *ctx = shakti_tls_server_ctx(cert, key);
     if (!ctx) return v_err("rest_listen_tls: failed to load cert/key");
     V *h = rest_do_listen(port, host);
     if (h->t == T_ERR) {
-        tls_server_ctx_free(ctx);
+        shakti_tls_server_ctx_free(ctx);
         return h;
     }
     RestHandle *srv = rest_slot((int)h->j);
     if (!srv) {
-        tls_server_ctx_free(ctx);
+        shakti_tls_server_ctx_free(ctx);
         v_free(h);
         return v_err("rest_listen_tls: internal error");
     }
@@ -975,10 +1192,16 @@ static V *rest_do_listen_tls(int port, const char *host, const char *cert, const
 }
 #endif
 
-static V *rest_do_read(int conn_h) {
-    RestHandle *conn = rest_slot(conn_h);
-    if (!conn || conn->kind != REST_KIND_CONN) return v_err("rest_read: invalid connection handle");
+static void rest_reject(RestHandle *conn, int status, const char *reason) {
+    char resp[192];
+    int n = snprintf(resp, sizeof resp,
+                     "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\n"
+                     "Connection: close\r\n\r\n%s\n",
+                     status, reason, strlen(reason) + 1, reason);
+    if (n > 0 && (size_t)n < sizeof resp) (void)rest_io_write(conn, resp, (size_t)n);
+}
 
+static V *rest_do_read_inner(RestHandle *conn) {
     rest_clear_ws_meta(conn);
 
     char line[8192];
@@ -1035,7 +1258,7 @@ static V *rest_do_read(int conn_h) {
             char *name_end = colon;
             while (name_end > line && (name_end[-1] == ' ' || name_end[-1] == '\t')) name_end--;
             *name_end = 0;
-            if (!strcasecmp(line, "Content-Length") && v_dict_get(hdrs, "Content-Length")) {
+            if (!strcasecmp(line, "Content-Length") && rest_header_get(hdrs, "Content-Length")) {
                 v_free(hdrs);
                 return v_err("rest_read: duplicate Content-Length");
             }
@@ -1049,6 +1272,9 @@ static V *rest_do_read(int conn_h) {
                 }
                 free(conn->ws_key);
                 conn->ws_key = strdup(val);
+            } else if (!strcasecmp(line, "Origin")) {
+                free(conn->ws_origin);
+                conn->ws_origin = strdup(val);
             } else if (!strcasecmp(line, "Sec-WebSocket-Protocol")) {
                 free(conn->ws_protocol);
                 char *comma = strchr(val, ',');
@@ -1067,7 +1293,27 @@ static V *rest_do_read(int conn_h) {
         }
     }
 
-    if (g_rest_token[0]) {
+    if (conn->loopback) {
+        const char *host = rest_header_get(hdrs, "Host");
+        if (host && !http_host_is_local(host) &&
+            !http_host_allowed(host, getenv("SHAKTI_REST_ALLOWED_HOSTS"))) {
+            v_free(hdrs);
+            rest_reject(conn, 400, "Bad Request");
+            return v_err("rest_read: non-local Host on loopback listener (see SHAKTI_REST_ALLOWED_HOSTS)");
+        }
+        const char *origin = conn->ws_origin;
+        const char *upg = rest_header_get(hdrs, "Upgrade");
+        int is_ws = upg && !strcasecmp(upg, "websocket");
+        int safe = !strcmp(method, "GET") || !strcmp(method, "HEAD") || !strcmp(method, "OPTIONS");
+        if (!is_ws && !safe && origin && origin[0] && !http_origin_is_local(origin) &&
+            !http_origin_allowed(origin, getenv("SHAKTI_REST_ALLOWED_ORIGINS"))) {
+            v_free(hdrs);
+            rest_reject(conn, 403, "Forbidden");
+            return v_err("rest_read: cross-origin request blocked (see SHAKTI_REST_ALLOWED_ORIGINS)");
+        }
+    }
+
+    if (g_rest_server_token[0]) {
         const char *auth = NULL;
         for (int64_t i = 0; i < hdrs->keys->n; i++) {
             V *k = hdrs->keys->L[i];
@@ -1079,9 +1325,9 @@ static V *rest_do_read(int conn_h) {
         const char *bearer = auth;
         if (bearer && !strncasecmp(bearer, "Bearer ", 7)) bearer += 7;
         else bearer = NULL;
-        if (!bearer || strlen(bearer) != strlen(g_rest_token) ||
-            memcmp(bearer, g_rest_token, strlen(g_rest_token)) != 0) {
+        if (!bearer || !rest_token_eq(bearer, g_rest_server_token)) {
             v_free(hdrs);
+            rest_reject(conn, 401, "Unauthorized");
             return v_err("rest_read: unauthorized");
         }
     }
@@ -1126,7 +1372,7 @@ static V *rest_do_read(int conn_h) {
     V *req = v_dict_empty();
     v_dict_put(req, "method", v_str(method));
     v_dict_put(req, "path", v_str(path));
-    if (rest_body_looks_binary((const unsigned char *)body, content_len, ct)) {
+    if (rest_body_looks_binary(ct)) {
         V *decoded = body_value((const unsigned char *)body, content_len, ct);
         if (decoded->t == T_ERR) {
             free(body);
@@ -1149,6 +1395,21 @@ static V *rest_do_read(int conn_h) {
     v_dict_put(req, "headers", hdrs);
     free(body);
     return req;
+}
+
+static V *rest_do_read(int conn_h) {
+    RestHandle *conn = rest_slot(conn_h);
+    if (!conn || conn->kind != REST_KIND_CONN) return v_err("rest_read: invalid connection handle");
+    rest_init_tokens();
+    int fl = fcntl(conn->fd, F_GETFL, 0);
+    if (fl < 0 || fcntl(conn->fd, F_SETFL, fl | O_NONBLOCK) < 0)
+        return v_err("rest_read: fcntl failed");
+    conn->deadline = rest_now_ms() + rest_env_long("SHAKTI_REST_READ_TIMEOUT_MS",
+                                                   REST_READ_TIMEOUT_MS, 1, 3600000);
+    V *r = rest_do_read_inner(conn);
+    conn->deadline = 0;
+    fcntl(conn->fd, F_SETFL, fl);
+    return r;
 }
 
 static V *rest_do_write(int conn_h, int status, const unsigned char *body, size_t body_len,
@@ -1206,7 +1467,7 @@ static V *rest_do_close(int h) {
     rest_clear_ws_meta(s);
 #ifdef SHAKTI_HAVE_TLS
     if (s->ssl) {
-        tls_close(s->ssl, s->fd);
+        shakti_tls_close(s->ssl, s->fd);
         s->ssl = NULL;
         s->fd = -1;
     } else
@@ -1217,7 +1478,7 @@ static V *rest_do_close(int h) {
     }
 #ifdef SHAKTI_HAVE_TLS
     if (s->ssl_ctx) {
-        tls_server_ctx_free(s->ssl_ctx);
+        shakti_tls_server_ctx_free(s->ssl_ctx);
         s->ssl_ctx = NULL;
     }
 #endif
@@ -1431,6 +1692,13 @@ int rest_peek_ws_protocol(int h, char *out, size_t out_cap) {
     (void)h;
     (void)out;
     (void)out_cap;
+    return -1;
+}
+int rest_peek_ws_origin(int h, char *out, size_t out_cap, int *loopback) {
+    (void)h;
+    (void)out;
+    (void)out_cap;
+    (void)loopback;
     return -1;
 }
 #endif

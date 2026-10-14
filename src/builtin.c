@@ -1,4 +1,5 @@
 #include "shakti.h"
+#include "shakti_internal.h"
 #include "vec_kernels.h"
 #include "input.h"
 #include <limits.h>
@@ -326,7 +327,7 @@ static const char *BUILTINS[] = {
     "machine",
     "re_findall","re_sub","re_match","re_split",
     "json_loads","json_dumps","json_load","json_dump",
-    "sorted","any","all","isinstance","hasattr","getattr",
+    "sorted","any","all","isinstance","instanceof","hasattr","getattr",
     "char","chr","ord","hex",
     "dict","ktable","set",
     "next","assert",
@@ -379,12 +380,26 @@ int is_builtin(const char *name){for(int i=0;BUILTINS[i];i++)P(!strcmp(name,BUIL
 
 static V *kw_get(V**kwn,V**kwv,int nkw,const char*name){
     i(nkw,{P(kwn[i]->t==T_STR&&!strcmp(kwn[i]->s,name),kwv[i])})return NULL;}
-static V *bi_print(V**a,in,V**kwn,V**kwv,int nkw){
+V *shakti_instance_str(V *v, Env *e) {
+    if(!shakti_is_instance(v)) return NULL;
+    V*f=v_dict_get(v,"__str__");
+    if(!f||f->t!=T_FN) return NULL;
+    f=v_ref(f);V*r=shakti_call_fn(f,v,NULL,0,NULL,NULL,0,e);v_free(f);
+    if(r&&r->t==T_STR) return r;
+    v_free(r);
+    return NULL;
+}
+static V *bi_print(V**a,in,V**kwn,V**kwv,int nkw,Env*e){
     V *sep_v=kw_get(kwn,kwv,nkw,"sep");
     V *end_v=kw_get(kwn,kwv,nkw,"end");
     const char *sep=sep_v&&sep_v->t==T_STR?sep_v->s:" ";
     const char *end=end_v&&end_v->t==T_STR?end_v->s:"\n";
-    for(int i=0;i<n;i++){if(i)printf("%s",sep);v_print(a[i],0);}
+    for(int i=0;i<n;i++){
+        if(i)printf("%s",sep);
+        V*s=shakti_instance_str(a[i],e);
+        if(s){fputs(s->s,stdout);v_free(s);}
+        else v_print(a[i],0);
+    }
     printf("%s",end);fflush(stdout);return v_nil();}
 static V *bi_len(V**a,in){
     P(n<1,v_err("len()"))V*v=a[0];
@@ -441,9 +456,10 @@ static V *bi_float(V**a,in){
     P(v->t==T_FLOAT,v_float(v->f))P(v->t==T_INT,v_float((double)v->j))P(v->t==T_CHAR,v_float((double)v->j))
     P(v->t==T_BOOL,v_float(v->j))P(v->t==T_STR,v_float(strtod(v->s,NULL)))
     return v_err("cannot convert to float");}
-static V *bi_str(V**a,in){
+static V *bi_str(V**a,in,Env*e){
     P(n<1,v_str(""))
     P(a[0]->t==T_STR,v_str(a[0]->s))
+    {V*r=shakti_instance_str(a[0],e);if(r)return r;}
     char *s=v_to_str(a[0]);V*r=v_str(s);free(s);return r;}
 static V *bi_list(V**a,in){
     P(n<1,v_list(0))V*v=a[0];
@@ -494,22 +510,35 @@ static V *bi_bool(V**a,in){
     P(v->t==T_NIL,v_bool(0))return v_bool(1);}
 static int bi_numvec(V *v) { return v->t == T_IVEC || v->t == T_FVEC || v->t == T_IMAT || v->t == T_FMAT; }
 static int64_t mat_nelem(V *v) { return v->n * mat_cols(v); }
-static V *vec_reduce_sum(V *v) {
-    if (v->t == T_IMAT) {
-        int64_t s = 0;
-        int64_t ne = mat_nelem(v);
-        for (int64_t i = 0; i < ne; i++) s += v->J[i];
-        return v_int(s);
+/* Exact int64 sum; promotes to float on overflow like scalar +. Split halves keep the loop vectorizable. */
+static V *i64_sum_value(const int64_t *p, int64_t n) {
+    __int128 t = 0;
+    for (int64_t off = 0; off < n; off += (int64_t)1 << 31) {
+        int64_t m = n - off < ((int64_t)1 << 31) ? n - off : ((int64_t)1 << 31);
+        int64_t hi = 0;
+        uint64_t lo = 0;
+        for (int64_t i = 0; i < m; i++) {
+            hi += p[off + i] >> 32;
+            lo += (uint32_t)p[off + i];
+        }
+        t += (__int128)hi * ((int64_t)1 << 32) + (__int128)lo;
     }
+    if (t >= INT64_MIN && t <= INT64_MAX) return v_int((int64_t)t);
+    return v_float((double)t);
+}
+static V *sum_double_value(double s, int all_int) {
+    if (all_int && s >= -9223372036854775808.0 && s < 9223372036854775808.0) return v_int((int64_t)s);
+    return v_float(s);
+}
+static V *vec_reduce_sum(V *v) {
+    if (v->t == T_IMAT)
+        return i64_sum_value(v->J, mat_nelem(v));
     if (v->t == T_FMAT) {
         int64_t ne = mat_nelem(v);
         return v_float(shakti_sum_f64(v->F, ne));
     }
-    if (v->t == T_IVEC) {
-        int64_t s = 0;
-        for (int64_t i = 0; i < v->n; i++) s += v->J[i];
-        return v_int(s);
-    }
+    if (v->t == T_IVEC)
+        return i64_sum_value(v->J, v->n);
     if (v->t == T_FVEC)
         return v_float(shakti_sum_f64(v->F, v->n));
     if (v->t == T_LIST) {
@@ -521,7 +550,7 @@ static V *vec_reduce_sum(V *v) {
             else if (e->t == T_FLOAT) { s += e->f; all_int = 0; }
             else return v_err("sum: bad list element");
         }
-        return all_int ? v_int((int64_t)s) : v_float(s);
+        return sum_double_value(s, all_int);
     }
     return v_err("sum: need vector");
 }
@@ -679,7 +708,7 @@ static V *vec_unary_double(V *v, double (*fn)(double)) {
     }
     return v_err("need numeric vector");
 }
-static int64_t iabs64(int64_t x) { return x < 0 ? -x : x; }
+static int64_t iabs64(int64_t x) { return x < 0 ? (int64_t)(0 - (uint64_t)x) : x; }
 static V *bi_sum(V **a, in) {
     P(n < 1,v_int(0))
     if (n == 1) {
@@ -709,7 +738,7 @@ static V *bi_sum(V **a, in) {
             v_free(p);
         } else return v_err("sum: bad arg");
     }
-    return all_int ? v_int((int64_t)s) : v_float(s);
+    return sum_double_value(s, all_int);
 }
 static V *bi_dot(V **a, in) {
     P(n < 2, v_err("dot(x, y)"))
@@ -766,6 +795,7 @@ static V *bi_abs(V **a, in) {
     P(a[0]->t == T_IVEC || a[0]->t == T_IMAT,vec_unary_int(a[0], iabs64))
     P(a[0]->t == T_FVEC || a[0]->t == T_FMAT,vec_unary_double(a[0], fabs))
     V *v = a[0];
+    P(v->t == T_INT && v->j == INT64_MIN,v_float(-(double)INT64_MIN))
     P(v->t == T_INT,v_int(v->j < 0 ? -v->j : v->j))
     P(v->t == T_FLOAT,v_float(fabs(v->f)))
     return v_int(0);
@@ -1536,6 +1566,7 @@ static V *bi_map(V**a,in,Env*e){
     V*r=v_list(cnt);
     if(fn->n==-1) {
         for(int64_t i=0;i<cnt;++i){
+            if(iter->t!=T_STR&&i>=iter->n){r->n=i;break;}
             V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
             else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
             else item=v_nil();
@@ -1546,6 +1577,7 @@ static V *bi_map(V**a,in,Env*e){
         }
     } else {
         for(int64_t i=0;i<cnt;i++){
+            if(iter->t!=T_STR&&i>=iter->n){r->n=i;break;}
             V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
             else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
             else item=v_nil();
@@ -1564,6 +1596,7 @@ static V *bi_filter(V**a,in,Env*e){
     if(!tmp)return v_err("filter: out of memory");
     if(fn->n==-1) {
         for(int64_t i=0;i<cnt;++i){
+            if(iter->t!=T_STR&&i>=iter->n)break;
             V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
             else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
             else item=v_nil();
@@ -1575,6 +1608,7 @@ static V *bi_filter(V**a,in,Env*e){
         }
     } else {
         for(int64_t i=0;i<cnt;i++){
+            if(iter->t!=T_STR&&i>=iter->n)break;
             V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
             else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
             else item=v_nil();
@@ -1587,9 +1621,67 @@ static V *bi_filter(V**a,in,Env*e){
     }
     V*r=v_list(out);memcpy(r->L,tmp,out*sizeof(V*));free(tmp);return r;
 }
-static V *bi_append(V**a,in){P(n<2||a[0]->t!=T_LIST,v_err("append(list,val)"))
+static void ivec_grow(V *v) {
+    uint32_t cap;
+    if (v->n < 0) v->n = 0;
+    if (v->_ht_cap > 0 && (uint32_t)v->n < v->_ht_cap) return;
+    if (v->_ht_cap > (1u << 30)) shakti_oom("ivec_append");
+    cap = v->_ht_cap ? v->_ht_cap * 2 : 8;
+    if ((uint32_t)v->n >= cap) {
+        if (v->n > (int64_t)UINT32_MAX - 8) shakti_oom("ivec_append");
+        cap = (uint32_t)v->n + 8;
+    }
+    v->J = x_realloc(v->J, (size_t)cap * sizeof(int64_t), "ivec_append");
+    v->_ht_cap = cap;
+}
+/* J and L share a union, so the old buffer is copied out before the list pointer is stored. */
+static void ivec_promote(V *v) {
+    int64_t n = v->n > 0 ? v->n : 0;
+    int64_t *J = v->J;
+    uint32_t cap = 8;
+    V **L;
+    int64_t i;
+    if (n > (int64_t)cap) {
+        if (n > (1 << 30)) shakti_oom("ivec_promote");
+        cap = (uint32_t)n;
+    }
+    L = x_calloc((size_t)cap, sizeof(V *), "ivec_promote");
+    for (i = 0; i < n; i++)
+        L[i] = v_int(J ? J[i] : 0);
+    free(J);
+    v->t = T_LIST;
+    v->L = L;
+    v->n = n;
+    v->_ht_cap = cap;
+    v->bits = 0;
+    v->owner_kind = V_OWNER_MALLOC;
+    v->map_reg = NULL;
+}
+/* Mapped payloads are read-only and not malloc-owned; copy them before growing or freeing. */
+static int ivec_own(V *v) {
+    if (v->owner_kind == V_OWNER_MALLOC) return 0;
+    if (v_ensure_writable(v) != 0) return -1;
+    v->_ht_cap = v->n > 0 ? (uint32_t)v->n : 0;
+    return 0;
+}
+static V *bi_append(V**a,in){
+    if (n >= 2 && a[0] && a[0]->t == T_IVEC) {
+        if (ivec_own(a[0]) != 0) return v_err("append: read-only vector");
+        if (a[1] && (a[1]->t == T_INT || a[1]->t == T_CHAR)) {
+            ivec_grow(a[0]);
+            a[0]->J[a[0]->n++] = a[1]->j;
+            return v_nil();
+        }
+        ivec_promote(a[0]);
+    }
+    P(n<2||a[0]->t!=T_LIST,v_err("append(list,val)"))
     v_list_append(a[0], a[1]); return v_nil();}
-static V *bi_pop(V**a,in){P(n<1||a[0]->t!=T_LIST||a[0]->n==0,v_err("pop"))
+static V *bi_pop(V**a,in){
+    if (n >= 1 && a[0] && a[0]->t == T_IVEC) {
+        if (a[0]->n <= 0) return v_err("pop");
+        return v_int(a[0]->J[--a[0]->n]);
+    }
+    P(n<1||a[0]->t!=T_LIST||a[0]->n==0,v_err("pop"))
     return a[0]->L[--a[0]->n];}
 static V *bi_keys(V**a,in){return n>0&&(a[0]->t==T_DICT||a[0]->t==T_TABLE)?v_copy(a[0]->keys):v_list(0);}
 static V *bi_values(V**a,in){return n>0&&(a[0]->t==T_DICT||a[0]->t==T_TABLE)?v_copy(a[0]->vals):v_list(0);}
@@ -1952,13 +2044,17 @@ static V *bi_next(V**a,in){
     P(n<1||a[0]->t!=T_LIST||a[0]->n==0,n>1?v_ref(a[1]):v_nil())
     return v_ref(a[0]->L[0]);}
 typedef V *(*BiCall)(V **a, in, V **kwn, V **kwv, int nkw, Env *e);
+static V *bi_isinstance_class(V **a, in) {
+    P(n >= 2 && shakti_is_class(a[1]), v_bool(shakti_isinstance(a[0], a[1])))
+    return bi_isinstance(a, n);
+}
 
 #define BI0(nm) static MS V *bi_w_##nm(V **a,in,V **k,V **v,int nk,Env *e){(void)k;(void)v;(void)nk;(void)e;return bi_##nm(a,n);}
 #define BIKW(nm) static MS V *bi_w_##nm(V **a,in,V **k,V **v,int nk,Env *e){(void)e;return bi_##nm(a,n,k,v,nk);}
 #define BIE(nm) static MS V *bi_w_##nm(V **a,in,V **k,V **v,int nk,Env *e){(void)k;(void)v;(void)nk;return bi_##nm(a,n,e);}
 #define BIKWE(nm) static MS V *bi_w_##nm(V **a,in,V **k,V **v,int nk,Env *e){return bi_##nm(a,n,k,v,nk,e);}
-BIKW(print)
-BI0(len) BI0(range) BI0(type) BI0(int) BI0(float) BI0(str) BI0(list) BI0(bool)
+BIKWE(print)
+BI0(len) BI0(range) BI0(type) BI0(int) BI0(float) BIE(str) BI0(list) BI0(bool)
 BIKW(dict) BIKW(ktable) BI0(set)
 BI0(sum) BI0(avg) BI0(min) BI0(max) BI0(dot) BI0(mmul) BI0(abs)
 BI0(band) BI0(bor) BI0(bxor) BI0(bnot) BI0(shl) BI0(shr)
@@ -1985,7 +2081,7 @@ BI0(path_basename) BI0(path_dirname) BI0(path_splitext)
 BI0(getcwd) BI0(mkdir) BI0(getenv) BI0(sh) BI0(machine)
 BI0(re_findall) BI0(re_sub) BI0(re_match) BI0(re_split)
 BI0(json_loads) BI0(json_dumps) BI0(json_load) BI0(json_dump)
-BI0(any) BI0(all) BI0(isinstance) BI0(hasattr) BI0(getattr) BI0(char) BI0(chr) BI0(ord) BI0(hex)
+BI0(any) BI0(all) BI0(isinstance_class) BI0(hasattr) BI0(getattr) BI0(char) BI0(chr) BI0(ord) BI0(hex)
 static V *bi_parse_check(V **a, int n) {
     char err[256];
     P(n < 1 || a[0]->t != T_STR, v_err("parse_check(src)"))
@@ -2279,6 +2375,7 @@ static const BiEntry bi_tab[] = {
     {"input_set_wheel", bi_w_input_set_wheel},
     {"input_set_x", bi_w_input_set_x},
     {"input_set_y", bi_w_input_set_y},
+    {"instanceof", bi_w_isinstance_class},
     {"int", bi_w_int},
 #ifdef SHAKTI_HAVE_IPC
     {"ipc_accept", bi_w_ipc_accept},
@@ -2311,7 +2408,7 @@ static const BiEntry bi_tab[] = {
     {"ipc_shm_open", bi_w_ipc_shm_open},
     {"ipc_shm_view", bi_w_ipc_shm_view},
 #endif
-    {"isinstance", bi_w_isinstance},
+    {"isinstance", bi_w_isinstance_class},
     {"json_dump", bi_w_json_dump},
     {"json_dumps", bi_w_json_dumps},
     {"json_load", bi_w_json_load},
@@ -2531,8 +2628,70 @@ static BiCall bi_find(const char *name) {
     const BiEntry *hit = bsearch(&key, bi_tab, sizeof bi_tab / sizeof bi_tab[0], sizeof *hit, bi_name_cmp);
     return hit ? hit->fn : NULL;
 }
+/* Path arguments of file-touching builtins (safe-mode confinement). idx2 < 0
+ * when the builtin takes a single path. Sorted by name for bsearch. */
+typedef struct { const char *name; signed char idx, write, idx2, write2; } BiFsArg;
+static const BiFsArg bi_fs_args[] = {
+    {"iefs_load", 0, 0, -1, 0},
+    {"iefs_map", 0, 0, -1, 0},
+    {"iefs_save", 1, 1, -1, 0},
+    {"json_dump", 1, 1, -1, 0},
+    {"json_load", 0, 0, -1, 0},
+    {"listdir", 0, 0, -1, 0},
+    {"load", 0, 0, -1, 0},
+    {"load_context", 0, 0, -1, 0},
+    {"mkdir", 0, 1, -1, 0},
+    {"pdf_open", 0, 0, -1, 0},
+    {"pdf_save", 1, 1, -1, 0},
+    {"read", 0, 0, -1, 0},
+    {"readlines", 0, 0, -1, 0},
+    {"save", 1, 1, -1, 0},
+    {"save_context", 0, 1, -1, 0},
+    {"stat", 0, 0, -1, 0},
+    {"stem_load_ml", 0, 0, -1, 0},
+    {"stem_read_wav", 0, 0, -1, 0},
+    {"stem_separate_file", 0, 0, 1, 1},
+    {"stem_separate_file_ml", 0, 0, 1, 1},
+    {"stem_write_ml_synth", 0, 1, -1, 0},
+    {"stem_write_wav", 0, 1, -1, 0},
+    {"synth_load_sample", 0, 0, -1, 0},
+    {"walk", 0, 0, -1, 0},
+    {"write", 0, 1, -1, 0},
+};
+static int bi_fs_cmp(const void *a, const void *b) {
+    return strcmp(((const BiFsArg *)a)->name, ((const BiFsArg *)b)->name);
+}
+static V *bi_fs_guard_one(const char *name, V **args, int nargs, int idx, int write) {
+    char err[512];
+    if (idx < 0 || idx >= nargs || !args[idx] || args[idx]->t != T_STR) return NULL;
+    if (shakti_fs_check(args[idx]->s, write, err, sizeof err) == 0) return NULL;
+    return v_errf("%s: %s", name, err);
+}
+static V *bi_fs_guard(const char *name, V **args, int nargs) {
+    static int safe = -1;
+    if (safe < 0) safe = shakti_safe_mode() ? 1 : 0;
+    if (!safe) return NULL;
+    BiFsArg key = {name, 0, 0, 0, 0};
+    const BiFsArg *hit = bsearch(&key, bi_fs_args, sizeof bi_fs_args / sizeof bi_fs_args[0],
+                                 sizeof *hit, bi_fs_cmp);
+    if (!hit) return NULL;
+    V *r = bi_fs_guard_one(name, args, nargs, hit->idx, hit->write);
+    if (!r && hit->idx2 >= 0) r = bi_fs_guard_one(name, args, nargs, hit->idx2, hit->write2);
+    return r;
+}
+static int bi_kw_true(V **kwn, V **kwv, int nkw, const char *name) {
+    V *v = kw_get(kwn, kwv, nkw, name);
+    if (!v) return 0;
+    if (v->t == T_BOOL || v->t == T_INT) return v->j != 0;
+    return 0;
+}
+extern V *subprocess_ex(V **a, int n, const char *dir_env);
 V *builtin_call(const char *name,V **args,int nargs,V **kwn,V **kwv,int nkw,Env *e){
     BiCall fn;
+    {
+        V *denied = bi_fs_guard(name, args, nargs);
+        if (denied) return denied;
+    }
     if(!strcmp(name,"clock") || !strcmp(name,"timer")){
         struct timespec tb;
         clock_gettime(CLOCK_MONOTONIC, &tb);
@@ -2572,12 +2731,8 @@ V *builtin_call(const char *name,V **args,int nargs,V **kwn,V **kwv,int nkw,Env 
         P(!al || al->t != T_LIST, v_err("__invoke__: args must be a list"))
         P(fnv->n == -1,builtin_call(fnv->s, al->L, (int)al->n, NULL, NULL, 0, e))
         P(fnv->j < 0 || fnv->j >= fn_ast_n, v_err("__invoke__: bad function"))
-        Env*ce=env_new(fnv->closure);V*p=fnv->params;
-        if (p && p->t == T_LIST) {
-            for(int i=0;i<p->n && i<al->n;i++) {
-                if (p->L[i] && p->L[i]->t == T_STR) env_set(ce,p->L[i]->s,al->L[i]);
-            }
-        }
+        Env*ce=env_new(fnv->closure);
+        shakti_bind_params(ce, fnv, al->L, (int)al->n, NULL, NULL, 0);
         Node*body=fn_ast[(int)fnv->j];V*rv=eval_fn(body,ce);
         if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
         env_free(ce);return rv;
@@ -2598,23 +2753,21 @@ V *builtin_call(const char *name,V **args,int nargs,V **kwn,V **kwv,int nkw,Env 
         {
             struct stat sb;
             if (stat(args[0]->s, &sb) == 0 && S_ISDIR(sb.st_mode)) {
-                const char *safe = getenv("SHAKTI_SAFE");
-                const char *allow = getenv("SHAKTI_ALLOW_EXEC");
-                if ((safe && safe[0] && strcmp(safe, "0") != 0) ||
-                    (allow && allow[0] == '0' && allow[1] == '\0'))
+                /* A data loader must not run code implicitly: spawning the
+                 * directory's ./run helper requires an explicit exec:True. */
+                if (!bi_kw_true(kwn, kwv, nkw, "exec"))
+                    return v_err("load: path is a directory; pass exec:True to run its ./run helper");
+                if (!shakti_exec_allowed())
                     return v_err("load: subprocess disabled (SHAKTI_SAFE or SHAKTI_ALLOW_EXEC=0)");
-                int saved = open(".", O_RDONLY);
+                int saved = open(".", O_RDONLY | O_CLOEXEC);
                 if (saved < 0) return v_err("load: cannot open cwd");
                 if (chdir(args[0]->s) != 0) {
                     close(saved);
                     return v_err("load: chdir");
                 }
-                {
-                    V *dirkw = kw_get(kwn, kwv, nkw, "__dir__");
-                    if (dirkw && dirkw->t == T_STR)
-                        setenv("__dir__", dirkw->s, 1);
-                }
-                V *result = subprocess(args + 1, nargs - 1);
+                V *dirkw = kw_get(kwn, kwv, nkw, "__dir__");
+                V *result = subprocess_ex(args + 1, nargs - 1,
+                                          (dirkw && dirkw->t == T_STR) ? dirkw->s : NULL);
                 int fch = fchdir(saved);
                 close(saved);
                 if (fch != 0) {

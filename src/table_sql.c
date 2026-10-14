@@ -1975,9 +1975,17 @@ V *table_sql_insert(V *table, V *cols, V *vals) {
     for (int64_t i = 0; i < ncols; i++) {
         const char *name = use_all_cols ? table->keys->L[i]->s : cols->L[i]->s;
         int idx = tbl_col_idx(table, name);
-        if (idx < 0 || !table->keys->L[i] || table->keys->L[i]->t != T_STR) {
+        if (idx < 0 || !table->keys->L[idx] || table->keys->L[idx]->t != T_STR) {
             if (free_vals_list) v_free(vals_list);
             return v_errf("insert: unknown column '%s'", name ? name : "");
+        }
+        if (!use_all_cols) {
+            for (int64_t k = 0; k < i; k++) {
+                if (!strcmp(cols->L[k]->s, name)) {
+                    if (free_vals_list) v_free(vals_list);
+                    return v_errf("insert: column '%s' named more than once", name);
+                }
+            }
         }
         if (!mat_cell_fits(table->vals->L[idx], vals_list->L[i])) {
             if (free_vals_list) v_free(vals_list);

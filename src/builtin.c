@@ -1581,7 +1581,7 @@ static V *bi_map(V**a,in,Env*e){
             V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
             else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
             else item=v_nil();
-            Env*ce=env_new(fn->closure);if(fn->params->n>0)env_set(ce,fn->params->L[0]->s,item);v_free(item);
+            Env*ce=env_new(fn->closure);shakti_bind_params(ce,fn,&item,1,NULL,NULL,0);v_free(item);
             if(fn->j<0||fn->j>=fn_ast_n){env_free(ce);v_free(r);return v_err("map: bad function");}
             V*rv=eval_fn(fn_ast[(int)fn->j],ce);if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
             r->L[i]=rv;env_free(ce);
@@ -1612,7 +1612,7 @@ static V *bi_filter(V**a,in,Env*e){
             V*item;if(iter->t==T_IVEC)item=v_int(iter->J[i]);else if(iter->t==T_FVEC)item=v_float(iter->F[i]);
             else if(iter->t==T_LIST)item=v_ref(iter->L[i]);else if(iter->t==T_STR){char b[2]={iter->s[i],0};item=v_str(b);}
             else item=v_nil();
-            Env*ce=env_new(fn->closure);if(fn->params->n>0)env_set(ce,fn->params->L[0]->s,item);
+            Env*ce=env_new(fn->closure);shakti_bind_params(ce,fn,&item,1,NULL,NULL,0);
             if(fn->j<0||fn->j>=fn_ast_n){v_free(item);env_free(ce);free(tmp);return v_err("filter: bad function");}
             V*rv=eval_fn(fn_ast[(int)fn->j],ce);if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
             int keep=rv&&((rv->t==T_BOOL&&rv->j)||(rv->t==T_INT&&rv->j)||(rv->t!=T_NIL&&rv->t!=T_BOOL&&rv->t!=T_INT));

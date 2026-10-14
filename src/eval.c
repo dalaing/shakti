@@ -1697,13 +1697,22 @@ V *eval(Node *n, Env *e) {
             int nargs_total = n->nch - 1;
             int args_cap = nargs_total + 1;
             V **args = calloc(args_cap, sizeof(V*));
-            int nargs = 0;
+            int nargs = 0, nkw = 0;
+            for(int i=1; i<n->nch; i++) nkw += n->ch[i]->type == N_KWARG;
+            V **kwnames = nkw ? calloc(nkw, sizeof(V*)) : NULL;
+            V **kwvals = nkw ? calloc(nkw, sizeof(V*)) : NULL;
+            nkw = 0;
+            /* the arguments, keywords included, in source order, as f(...) evaluates them */
             for(int i=1; i<n->nch; i++) {
-                if(n->ch[i]->type == N_KWARG) continue;
-                if(call_arg_eval(n->ch[i], e, &args, &nargs, &args_cap, n->nch - 1 - i) < 0) {
+                if(n->ch[i]->type == N_KWARG) {
+                    kwnames[nkw] = v_str(n->ch[i]->sval);
+                    kwvals[nkw] = eval(n->ch[i]->ch[0], e);
+                    nkw++;
+                } else if(call_arg_eval(n->ch[i], e, &args, &nargs, &args_cap, n->nch - 1 - i) < 0) {
                     v_free(obj);
                     for(int j=0;j<nargs;j++) v_free(args[j]);
-                    free(args);
+                    for(int j=0;j<nkw;j++) { v_free(kwnames[j]); v_free(kwvals[j]); }
+                    free(args); free(kwnames); free(kwvals);
                     return v_err("cannot unpack non-sequence");
                 }
             }
@@ -1712,18 +1721,6 @@ V *eval(Node *n, Env *e) {
                 attr = v_dict_get(obj, method);
             }
             if(attr && (attr->t == T_FN || shakti_is_class(attr))) {
-                int nkw = 0;
-                for(int i=1; i<n->nch; i++) nkw += n->ch[i]->type == N_KWARG;
-                V **kwnames = nkw ? calloc(nkw, sizeof(V*)) : NULL;
-                V **kwvals = nkw ? calloc(nkw, sizeof(V*)) : NULL;
-                nkw = 0;
-                for(int i=1; i<n->nch; i++) {
-                    if(n->ch[i]->type == N_KWARG) {
-                        kwnames[nkw] = v_str(n->ch[i]->sval);
-                        kwvals[nkw] = eval(n->ch[i]->ch[0], e);
-                        nkw++;
-                    }
-                }
                 V *self = NULL;
                 V *lead = obj->keys && obj->keys->n > 0 ? obj->keys->L[0] : NULL;
                 if(lead && lead->t == T_STR && lead->s[0] == '_' && lead->s[1] == '_') {
@@ -1745,6 +1742,9 @@ V *eval(Node *n, Env *e) {
                 free(args); free(kwnames); free(kwvals);
                 return result;
             }
+            /* a builtin method takes no keywords: they were evaluated, and are dropped */
+            for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
+            free(kwnames); free(kwvals);
             if(obj->t == T_SUBPROCESS) {
                 V *r;
                 if(!nargs) r = subprocess_next(obj, -1);

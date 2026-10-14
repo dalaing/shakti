@@ -653,6 +653,15 @@ int input_hub_read_char(char *out) {
     return 1;
 }
 
+/* columns taken by n bytes of UTF-8 text: one per character, so continuation bytes (10xxxxxx)
+   take none (both line editors place the cursor with it) */
+int input_utf8_cols(const char *s, int n) {
+    int cols = 0;
+    for (int i = 0; i < n; i++)
+        if (((unsigned char)s[i] & 0xc0) != 0x80) cols++;
+    return cols;
+}
+
 char *input_hub_readline_repl(const char *prompt) {
     static char buf[65536];
     int len = 0, pos = 0;
@@ -682,11 +691,14 @@ char *input_hub_readline_repl(const char *prompt) {
         }
         if (c == 127 || c == 8) {
             if (pos > 0) {
-                memmove(buf + pos - 1, buf + pos, (size_t)(len - pos));
-                pos--;
-                len--;
+                /* the whole character: back over its continuation bytes to its first byte */
+                int p = pos - 1;
+                while (p > 0 && ((unsigned char)buf[p] & 0xc0) == 0x80) p--;
+                memmove(buf + p, buf + pos, (size_t)(len - pos));
+                len -= pos - p;
+                pos = p;
             }
-        } else if (c >= 32 && len + 1 < (int)sizeof buf) {
+        } else if ((unsigned char)c >= 32 && len + 1 < (int)sizeof buf) {
             memmove(buf + pos + 1, buf + pos, (size_t)(len - pos));
             buf[pos] = c;
             pos++;
@@ -696,8 +708,9 @@ char *input_hub_readline_repl(const char *prompt) {
         }
         buf[len] = 0;
         printf("\r\033[K%s%s", prompt ? prompt : "", buf);
-        if (prompt && (int)strlen(prompt) + pos > 0)
-            printf("\r\033[%dC", (int)strlen(prompt) + pos);
+        int col = (prompt ? input_utf8_cols(prompt, (int)strlen(prompt)) : 0) + input_utf8_cols(buf, pos);
+        if (col > 0)
+            printf("\r\033[%dC", col);
         else
             printf("\r");
         fflush(stdout);

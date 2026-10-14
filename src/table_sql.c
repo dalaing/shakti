@@ -754,6 +754,7 @@ static inline void dense_accum_row(int key_val, int64_t row, int64_t *s_nrows, i
         }
     }
 }
+/* 1: the groups are in tab; 0: not handled (tab left empty); -1: out of memory. */
 static int dense_to_slots(GhTab *tab, int slots_cap, int nby, const int64_t *dims,
                            int64_t *s_nrows, int64_t *s_name_row, V *tbl, const int *name_idx, int nspecs,
                            int nactive, ColSpec *specs, int n_agg, const int *agg_sp,
@@ -818,7 +819,7 @@ static int dense_to_slots(GhTab *tab, int slots_cap, int nby, const int64_t *dim
             }
         }
     }
-    return 0;
+    return 1;
 }
 /* LSD radix argsort of indices by uint64 keys (stable). */
 static int radix_argsort_u64(uint64_t *keys, int64_t *idx, int64_t n) {

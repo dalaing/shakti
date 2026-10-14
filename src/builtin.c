@@ -1873,20 +1873,52 @@ static V *seq_cat_same(V *a, V *b) {
     default: return NULL;
     }
 }
+/* the rows x adds to matrix m when catenated with it, or -1 when x doesn't fit m */
+static int64_t mat_cat_rows(V *m, V *x) {
+    int rt = m->t==T_IMAT ? T_IVEC : m->t==T_FMAT ? T_FVEC : m->t==T_BMAT ? T_BVEC : T_CVEC;
+    if (x->t == m->t && mat_cols(x) == mat_cols(m)) return x->n;
+    if (x->t == rt && x->n == mat_cols(m)) return 1;
+    return -1;
+}
+/* A matrix joins by rows: with a matrix of its kind and width, or a vector of its row kind and
+   width (one row), the result is a matrix of that kind; NULL when the two don't fit together. */
+static V *mat_cat_same(V *a, V *b) {
+    V *m = is_mat_t(a->t) ? a : is_mat_t(b->t) ? b : NULL;
+    int64_t ra, rb, rows, nc, es;
+    if (!m) return NULL;
+    ra = mat_cat_rows(m, a); rb = mat_cat_rows(m, b);
+    if (ra < 0 || rb < 0) return NULL;
+    if (__builtin_add_overflow(ra, rb, &rows)) return v_err("catenate: too large");
+    nc = mat_cols(m);
+    es = m->t==T_IMAT || m->t==T_FMAT ? 8 : 1;
+    V *r = m->t==T_IMAT ? v_imat(rows, nc) : m->t==T_FMAT ? v_fmat(rows, nc) :
+           m->t==T_BMAT ? v_bmat(rows, nc) : v_cmat(rows, nc);
+    char *d = es == 8 ? (m->t==T_IMAT ? (char *)r->J : (char *)r->F) : (char *)r->B;
+    const char *da = es == 8 ? (m->t==T_IMAT ? (char *)a->J : (char *)a->F) : (char *)a->B;
+    const char *db = es == 8 ? (m->t==T_IMAT ? (char *)b->J : (char *)b->F) : (char *)b->B;
+    if (ra && nc) memcpy(d, da, (size_t)(ra * nc * es));
+    if (rb && nc) memcpy(d + ra * nc * es, db, (size_t)(rb * nc * es));
+    return r;
+}
+/* the items catenate takes from x: a sequence's items, a matrix's rows, or x itself */
+static int64_t cat_n(V *x) { return is_seq_t(x->t) ? seq_n(x) : is_mat_t(x->t) ? x->n : 1; }
+static V *cat_item(V *x, int64_t i) {
+    return is_seq_t(x->t) ? seq_elem(x, i) : is_mat_t(x->t) ? v_mat_row(x, i) : v_ref(x);
+}
 static V *bi_catenate(V**a,in){
     int64_t na, nb, ntot, k;
     V *r, *same;
     P(n<2,v_err("catenate(x, y)"))
     same = seq_cat_same(a[0], a[1]);
     if (same) return same;
-    na = is_seq_t(a[0]->t) ? seq_n(a[0]) : 1;
-    nb = is_seq_t(a[1]->t) ? seq_n(a[1]) : 1;
+    same = mat_cat_same(a[0], a[1]);
+    if (same) return same;
+    na = cat_n(a[0]);
+    nb = cat_n(a[1]);
     if (__builtin_add_overflow(na, nb, &ntot) || ntot < 0) return v_err("catenate: too large");
     r = v_list(ntot); k = 0;
-    if (is_seq_t(a[0]->t)) { for(int64_t i=0;i<na;i++) r->L[k++]=seq_elem(a[0], i); }
-    else r->L[k++] = v_ref(a[0]);
-    if (is_seq_t(a[1]->t)) { for(int64_t i=0;i<nb;i++) r->L[k++]=seq_elem(a[1], i); }
-    else r->L[k++] = v_ref(a[1]);
+    for(int64_t i=0;i<na;i++) r->L[k++]=cat_item(a[0], i);
+    for(int64_t i=0;i<nb;i++) r->L[k++]=cat_item(a[1], i);
     return r;
 }
 static V *bi_group_sum(V**a,in){

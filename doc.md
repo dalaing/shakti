@@ -323,7 +323,7 @@ Leading `@` decorates. `mmul(a, b)` multiplies matrices.
 | `sublist(n, xs)` | First `n` items. A negative `n` takes from the end. |
 | `sublist([i, n], xs)` | `n` items starting at index `i` (`i` may be negative). |
 | `drop(n, xs)` | Drop the first `n` items. A negative `n` drops from the end. |
-| `catenate(x, y)` | Join lists, vectors, or strings. `+` on `list[int]` adds element-wise; `catenate` joins. |
+| `catenate(x, y)` | Join lists, vectors, or strings. `+` on `list[int]` adds element-wise; `catenate` joins. A matrix joins by rows: with a matrix of its kind and width, or a vector of its row kind and width (one row), the result is a matrix; otherwise its rows are items of a `list`. |
 
 ```ie
 xs : 1 2 3 4 5
@@ -334,6 +334,8 @@ print(drop(2, xs))            # [3, 4, 5]
 print(drop(-1, xs))           # [1, 2, 3, 4]
 print(catenate(1 2, 3 4))     # [1, 2, 3, 4]
 print(catenate("ab", "cd"))   # abcd
+m : catenate([[1, 2]], [[3, 4]])
+print(repr(m))                # [[1, 2], [3, 4]], a matrix[int]
 print(len(xs))                # 5
 ```
 

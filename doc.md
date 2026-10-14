@@ -634,6 +634,10 @@ j : t join u on id
 | Insert | `insert into name (cols...) values (...)` |
 | Join | `t1 join t2 on col` *(not yet implemented)* |
 
+The aggregates `count`, `sum`, `avg`, `min` and `max` need `by`. A group's `min` and `max` are what
+the builtins `min` and `max` give for its items: an int column's are ints, a float column's floats
+(a bool or char column's groups are errors, as `min` of a list[bool] is).
+
 `by col1, col2` groups and sorts ascending. There is no separate `group by` / `order by` clause.
 
 See also [syntax and builtins](#syntax-and-builtins) for tables, `load("file.csv")`, and matrix types.

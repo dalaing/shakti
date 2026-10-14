@@ -192,9 +192,21 @@ static V *eval_slice(V *obj, V *start_v, V *stop_v, V *step_v) {
 }
 static void for_set_vars(Node *vars, V *item, Env *e) {
     if(vars->type == N_LIST) {
+        /* for a, b in xs unpacks each item that is a list or a vector (a matrix's row) into the
+           names in order; a, b : v does the same, but binds nothing for a list[bool] */
         if(item->t == T_LIST) {
             for(int j=0; j<vars->nch && j<item->n; j++)
                 env_set(e, vars->ch[j]->sval, item->L[j]);
+        } else if(item->t==T_IVEC||item->t==T_FVEC||item->t==T_CVEC||item->t==T_BVEC) {
+            for(int j=0; j<vars->nch && j<item->n; j++) {
+                V *elem;
+                if(item->t==T_IVEC) elem=v_int(item->J[j]);
+                else if(item->t==T_FVEC) elem=v_float(item->F[j]);
+                else if(item->t==T_CVEC) elem=v_char(item->B[j]);
+                else elem=v_bool(item->B[j] != 0);
+                env_set(e, vars->ch[j]->sval, elem);
+                v_free(elem);
+            }
         }
     } else {
         env_set(e, vars->sval, item);

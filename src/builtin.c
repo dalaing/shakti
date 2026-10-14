@@ -1738,13 +1738,22 @@ static V *list_ref_elems(V *src) {
     for (i = 0; i < src->n; i++) c->L[i] = src->L[i] ? v_ref(src->L[i]) : v_nil();
     return c;
 }
+/* table(...): each column a vector, list or matrix (v_table checks they are one length);
+ * an error column is the result. */
+static V *table_cols(V *k, V *v) {
+    for(int64_t i=0;i<v->n;i++){V*c=v->L[i];
+        if(c->t==T_ERR)return v_ref(c);
+        if(!is_vec_t(c->t)&&c->t!=T_LIST&&!is_mat_t(c->t))
+            return v_errf("table column must be a vector, list or matrix, not %s",type_name(c->t));}
+    return v_table(k,v);
+}
 static V *bi_table(V**a,in,V**kwn,V**kwv,int nkw){
     if(n==1&&a[0]->t==T_DICT){
         V*k=list_ref_elems(a[0]->keys),*v=list_ref_elems(a[0]->vals);
-        V*r=v_table(k,v);v_free(k);v_free(v);return r;}
+        V*r=table_cols(k,v);v_free(k);v_free(v);return r;}
     if(nkw>0){V*p=v_list(nkw),*d=v_list(nkw);
         for(int i=0;i<nkw;i++){p->L[i]=v_ref(kwn[i]);d->L[i]=v_ref(kwv[i]);}
-        V*r=v_table(p,d);v_free(p);v_free(d);return r;}
+        V*r=table_cols(p,d);v_free(p);v_free(d);return r;}
     return v_err("table()");}
 static V *bi_columns(V**a,in){return n>0&&a[0]->t==T_TABLE?v_copy(a[0]->keys):v_err("columns()");}
 static V *bi_shape(V**a,in){

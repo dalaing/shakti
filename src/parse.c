@@ -981,21 +981,29 @@ static char *param_name(const char *star, const char *name) {
     return s;
 }
 /* One parameter: `name`, `name: default`, `*name` or `**name`, kept as the parameter's name,
-   stars and all. `*name` takes the rest of the positional arguments, so it has no default, and a
-   def has at most one (nrest counts them). */
-static void parse_param(Lexer *l, Node *params, Node *defaults, int *nrest) {
-    const char *star = "";
-    if(lex_peek(l).type == T_STAR_) { lex_next(l); star = "*"; }
-    else if(lex_peek(l).type == T_DSTAR_) { lex_next(l); star = "**"; }
+   stars and all. `*name` takes the rest of the positional arguments and `**name` the keywords
+   that name no parameter, so neither has a default, and a def has at most one of each (nstar[1]
+   counts the `*name`s, nstar[2] the `**name`s); `**name` comes last. */
+static void parse_param(Lexer *l, Node *params, Node *defaults, int nstar[3]) {
+    int star = 0;
+    if(lex_peek(l).type == T_STAR_) { lex_next(l); star = 1; }
+    else if(lex_peek(l).type == T_DSTAR_) { lex_next(l); star = 2; }
+    const char *stars = star == 2 ? "**" : star ? "*" : "";
     Token p = lex_next(l);
-    Node *pn = node_new(N_NAME); pn->sval = param_name(star, p.sval);
+    if(nstar[2] && star != 2) {   /* `**name` takes what is left: nothing can follow it */
+        const char *kw = "";
+        for(int i=0; i<params->nch; i++)
+            if(!strncmp(params->ch[i]->sval, "**", 2)) kw = params->ch[i]->sval;
+        parse_fail("parse error: a parameter after %s", kw);
+    }
+    Node *pn = node_new(N_NAME); pn->sval = param_name(stars, p.sval);
     node_add(params, pn);
-    int rest = !strcmp(star, "*");
-    if(rest && (*nrest)++)
-        parse_fail("parse error: a second *name parameter (*%s)", p.sval);
+    if(star && nstar[star]++)
+        parse_fail("parse error: a second %sname parameter (%s%s)", stars, stars, p.sval);
     if(lex_peek(l).type == T_COLON_) {
         lex_next(l); node_add(defaults, parse_expr(l));
-        if(rest) parse_fail("parse error: *%s takes the rest of the arguments: it has no default", p.sval);
+        if(star) parse_fail("parse error: %s%s takes the rest of the %s: it has no default", stars,
+                            p.sval, star == 2 ? "keywords" : "arguments");
     } else {
         node_add(defaults, NULL);   /* no default (a default of None is a None node) */
     }
@@ -1005,13 +1013,13 @@ static Node *parse_def(Lexer *l) {
     expect(l, T_LPAREN_);
     Node *params = node_new(N_LIST);
     Node *defaults = node_new(N_LIST);
-    int nrest = 0;
+    int nstar[3] = {0, 0, 0};
     if(lex_peek(l).type != T_RPAREN_) {
-        parse_param(l, params, defaults, &nrest);
+        parse_param(l, params, defaults, nstar);
         while(lex_peek(l).type == T_COMMA_) {
             lex_next(l);
             if(lex_peek(l).type == T_RPAREN_) break;
-            parse_param(l, params, defaults, &nrest);
+            parse_param(l, params, defaults, nstar);
         }
     }
     expect(l, T_RPAREN_);

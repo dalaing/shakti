@@ -612,21 +612,38 @@ static inline int call_arg_eval(Node *a, Env *e, V ***args, int *nargs, int *cap
     v_free(v);
     return 0;
 }
+/* 1 when name is one of fn's parameters (not a `*name` or `**name` one). */
+static int param_named(V *params, const char *name) {
+    for (int i = 0; i < params->n; i++) {
+        V *p = params->L[i];
+        if (p && p->t == T_STR && p->s[0] != '*' && !strcmp(p->s, name)) return 1;
+    }
+    return 0;
+}
+/* Bind a call's arguments to fn's parameters in ce: positional arguments in order, a `*name`
+   parameter the rest of them, defaults the parameters left; then each `name: value`, but that a
+   `**name` parameter takes the keywords that name no parameter, as a dict. */
 static inline void bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V **kwv, int nkw) {
     V *params = fn->params;
     int positional = 1;
+    const char *kwrest = NULL;
     if (!params || params->t != T_LIST) return;
     for (int i = 0; i < params->n; i++) {
         V *p = params->L[i];
         if (!p || p->t != T_STR) continue;
         const char *s = p->s;
         if (s[0] == '*' && s[1] == '*') {
-            V *k = v_list(nkw), *vl = v_list(nkw);
-            for (int j = 0; j < nkw; j++) { k->L[j] = v_ref(kwn[j]); vl->L[j] = v_ref(kwv[j]); }
+            V *k = v_list(0), *vl = v_list(0);
+            for (int j = 0; j < nkw; j++) {
+                if (param_named(params, kwn[j]->s)) continue;
+                v_list_append(k, kwn[j]);
+                v_list_append(vl, kwv[j]);
+            }
             V *d = v_dict(k, vl);
             v_free(k); v_free(vl);
             env_set(ce, s + 2, d);
             v_free(d);
+            kwrest = s + 2;
         } else if (s[0] == '*') {
             V *rest = v_list(nargs > i ? nargs - i : 0);
             for (int j = i; j < nargs; j++) rest->L[j - i] = v_ref(args[j]);
@@ -639,6 +656,8 @@ static inline void bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V *
             env_set(ce, s, fn->defaults->L[i]);
         }
     }
+    for (int i = 0; i < nkw; i++)
+        if (!kwrest || param_named(params, kwn[i]->s)) env_set(ce, kwn[i]->s, kwv[i]);
 }
 void shakti_bind_params(Env *ce, V *fn, V **args, int nargs, V **kwn, V **kwv, int nkw) {
     bind_params(ce, fn, args, nargs, kwn, kwv, nkw);
@@ -649,7 +668,6 @@ static inline V *call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, 
     if (fn->j < 0 || fn->j >= fn_ast_n || !fn_ast[(int)fn->j]) return v_err("call: bad function");
     Env *ce = env_new(fn->closure);
     bind_params(ce, fn, args, nargs, kwn, kwv, nkw);
-    for (int i = 0; i < nkw; i++) env_set(ce, kwn[i]->s, kwv[i]);
     if (self) env_set(ce, "self", self);
     int npush = push_list_vals(args, nargs) + push_list_vals(kwv, nkw);
     V *r = eval_fn(fn_ast[(int)fn->j], ce);
@@ -1865,8 +1883,6 @@ V *eval(Node *n, Env *e) {
         }
         Env *call_env = env_acquire(fn->closure);
         bind_params(call_env, fn, args, nargs, kwnames, kwvals, nkw);
-        for(int i=0;i<nkw;i++)
-            env_set(call_env, kwnames[i]->s, kwvals[i]);
         Node *body = fn_ast[(int)fn->j];
         int npush = push_list_vals(args, nargs) + push_list_vals(kwvals, nkw);
         V *result = eval_fn(body, call_env);

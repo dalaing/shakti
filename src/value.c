@@ -654,8 +654,8 @@ V *v_copy(V *v) {
    found by a scan. Equal number keys hash alike: `=` compares numbers as doubles, so the hash is
    of that double, with -0.0 as 0.0. Keys are added in position order, so the first of equal keys
    is found first. The table is built once a dict has more than DICT_HT_MIN keys (on a lookup or
-   an insertion) and kept in step by v_dict_set, the only way a dict's keys change; a new dict
-   (literal, copy, dict(), json_loads...) starts without one. */
+   an insertion) and kept in step by v_dict_set and v_dict_push, the only ways a dict's keys
+   change; a new dict (literal, copy, dict(), json_loads...) starts without one. */
 static uint32_t dict_num_hash(double x) {
     uint64_t b;
     if (x == 0) x = 0;
@@ -742,6 +742,23 @@ void v_dict_set(V *d, const char *key, V *val) {
     d->vals->L[d->n] = v_ref(val);
     d->n++; d->keys->n++; d->vals->n++;
     if (d->n > DICT_HT_MIN) dict_ht_rebuild(d);
+}
+/* Append the pair k: val to d, adding k to the hash table; the caller has checked that k is not
+   in d. The keys and vals are unshared first, as in v_dict_set: a dict can share them with another
+   (f@ d's result shares d's keys). */
+void v_dict_push(V *d, V *k, V *val) {
+    uint32_t h;
+    Pv(d->t != T_DICT)
+    v_list_unshare(&d->keys);
+    v_list_unshare(&d->vals);
+    dict_side_reserve(d->keys);
+    dict_side_reserve(d->vals);
+    d->keys->L[d->n] = v_ref(k);
+    d->vals->L[d->n] = v_ref(val);
+    d->n++; d->keys->n++; d->vals->n++;
+    if (!d->_ht) dict_ht_ensure(d);
+    else if (d->n * 4 > (int64_t)d->_ht_cap * 3) dict_ht_rebuild(d);
+    else if (dict_ht_hash(k, &h)) dict_ht_put(d, h, d->n - 1);
 }
 int64_t v_dict_str_index(V *d, const char *key) {
     P(!d || d->t != T_DICT,-1)

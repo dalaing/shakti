@@ -835,6 +835,19 @@ V *v_dict_find(V *d, V *k) {
     int64_t i = v_dict_index(d, k);
     return i < 0 ? NULL : d->vals->L[i];
 }
+void v_dict_set_key(V *d, V *k, V *val) {
+    Pv(d->t != T_DICT)
+    if (k->t == T_STR) { v_dict_set(d, k->s, val); return; }
+    v_list_unshare(&d->keys);
+    v_list_unshare(&d->vals);
+    int64_t i = v_dict_index(d, k);
+    if (i >= 0) {
+        v_free(d->vals->L[i]);
+        d->vals->L[i] = v_ref(val);
+        return;
+    }
+    v_dict_push(d, k, val);
+}
 V *table_filter(V *tbl, V *mask) {
     P(tbl->t != T_TABLE || mask->t != T_BVEC,v_err("bad filter"))
     int64_t nr = tbl->n, count=0;

@@ -375,6 +375,9 @@ V *v_dict_own(V *keys, V *vals);
 V *v_table(V *cols, V *data);
 V *v_table_own(V *cols, V *data);
 void v_dict_put(V *d, const char *key, V *val);
+/* Append the pair k: val to d, keeping its hash table in step; k is not in d already. Like
+   v_dict_set, it first unshares d's keys and vals, so another dict sharing them is unchanged. */
+void v_dict_push(V *d, V *k, V *val);
 V *v_fn(V *params, V *defaults, Node *body_ast, Env *closure);
 V *v_datetime(int64_t ms_utc);
 V *v_ref(V *v);
@@ -418,6 +421,8 @@ int64_t v_dict_num_index(V *d, V *k);
 int64_t v_dict_index(V *d, V *k);
 /* The value under key k (borrowed), or NULL: a string key matches by text, any other by `=`. */
 V *v_dict_find(V *d, V *k);
+/* Set key k to val, matching k as v_dict_find does; a new key is added at the end. */
+void v_dict_set_key(V *d, V *k, V *val);
 int env_save(Env *e, const char *path);
 int env_load(Env *e, const char *path);
 int shakti_parse_datetime_ms(const char *s, int64_t *out_ms);

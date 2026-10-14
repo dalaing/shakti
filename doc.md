@@ -1020,6 +1020,8 @@ print(ipc.recv(c))
 ipc.close(c)
 ```
 
+A send on a connection whose other end has closed gives an error value (`ipc: send: Broken pipe`, or the system's reason) and the process goes on; so do `send_async`, `send_sync`, `reply` and `send_n`. Over TCP the first send after the close can still succeed: the close is seen when the other end answers it.
+
 ## Async API
 
 Same model as `input(ms)` — poll-based, not coroutines.

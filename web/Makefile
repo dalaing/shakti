@@ -16,7 +16,7 @@ CFLAGS := -O2 -std=gnu11 -Wall -Wno-unused-parameter -Wno-unused-function \
 
 SRCS := \
 	$(SRC)/alloc.c $(SRC)/value.c $(SRC)/env.c $(SRC)/lex.c $(SRC)/ast.c \
-	$(SRC)/parse.c $(SRC)/vec_ops.c $(SRC)/eval.c $(SRC)/import.c $(SRC)/repl.c \
+	$(SRC)/parse.c $(SRC)/vec_ops.c $(SRC)/eval.c $(SRC)/eval_each.c $(SRC)/import.c $(SRC)/repl.c \
 	$(SRC)/shakti_lang.c $(SRC)/builtin.c $(SRC)/table_sql.c $(SRC)/mat_simd.c \
 	$(SRC)/vec_kernels.c $(SRC)/fb_present.c \
 	$(SRC)/methods.c $(SRC)/stdlib.c $(SRC)/json_parse.c $(SRC)/table_io.c \

@@ -781,6 +781,10 @@ static Node *parse_query(Lexer *l) {
             if (lex_peek(l).type == T_COMMA_) lex_next(l);
         }
     }
+    /* delete takes no column list: delete from t where expr. A refused delete still has the
+     * rest of its statement parsed below, so parsing resumes after it, and is then dropped. */
+    int delete_cols = kw.type == T_DELETE_ && cols->nch > 0 && lex_peek(l).type == T_FROM_;
+    if (delete_cols) parse_fail("parse error: delete takes no columns (delete from t where expr)");
     if (lex_peek(l).type == T_FROM_) {
         lex_next(l);
         node_free(from);
@@ -795,6 +799,7 @@ static Node *parse_query(Lexer *l) {
     node_add(n, cols);
     node_add(n, by);
     node_add(n, where);
+    if (delete_cols) { node_free(n); return node_new(N_NONE); }
     return n;
 }
 static Node *parse_create_table(Lexer *l) {

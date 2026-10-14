@@ -642,7 +642,7 @@ j : t join u on id
 | Select | `select col by group from t where expr` |
 | Aggregate | `select sum amount by dept from t` |
 | Update | `update col : expr from t where expr` |
-| Delete | `delete from t where expr` |
+| Delete | `delete from t where expr` (no column list; `delete from t` deletes every row) |
 | Create | `create table name (col: default, ...)` |
 | Insert | `insert into name (cols...) values (...)` |
 | Join | `t1 join t2 on col` *(not yet implemented)* |

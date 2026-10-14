@@ -530,7 +530,9 @@ void v_free(V *v) {
         v->rc = 1;
         return;
     }
+#ifdef SHAKTI_HAVE_IEFS
     int mapped = (v->owner_kind == V_OWNER_MAP_ALIAS);
+#endif
     int owned = (v->owner_kind == V_OWNER_MALLOC);
     switch(v->t) {
     case T_STR: case T_ERR: free(v->s); break;

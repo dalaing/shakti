@@ -342,9 +342,8 @@ static int parse_enter(Lexer *l) {
     l->parse_depth++;
     return 1;
 }
-/* A juxtaposed assert's argument (and its message) and a list[T] constructor's argument have no
- * bracket of their own to count, so they count one level here: a chain of them stops at the cap
- * instead of running the C stack out. */
+/* A juxtaposed assert's argument (and its message) has no bracket of its own to count, so it
+ * counts one level here: a chain of them stops at the cap instead of running the C stack out. */
 static Node *parse_nested_expr(Lexer *l) {
     if (!parse_enter(l)) return node_new(N_NONE);
     Node *n = parse_expr(l);
@@ -408,7 +407,15 @@ static Node *parse_postfix(Lexer *l) {
                     node_free(n);
                     n = node_new(N_CALL);
                     node_add(n, tnode);
-                    node_add(n, parse_nested_expr(l));
+                    /* only the parenthesised argument: (), (x) or (x, y) */
+                    if(lex_peek(l).type != T_LPAREN_) {
+                        /* stop: the argument's end can't be told from what follows */
+                        const char *msg = "parse error: list[T] takes its argument in parentheses: list[int](n)";
+                        parse_fail("%s", msg);
+                        lex_fail(l, msg);
+                        return n;
+                    }
+                    node_add(n, parse_atom(l));
                     continue;
                 }
             } else if(n->type == N_NAME && n->sval && !strcmp(n->sval, "matrix")) {

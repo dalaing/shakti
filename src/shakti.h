@@ -106,6 +106,7 @@ enum {
  *   - j vs _ht_cap: scalars/fn/input use j; vec/mat/list/dict/table use _ht_cap.
  *   - T_INPUT uses j (mode) and s (prompt) together.
  *   - T_SUBPROCESS uses j (PTY fd), n (pid, then 0/-1 after wait), bits (exit/signal).
+ *   - T_ERR uses bits 1 to mark v_loop_err().
  *   - bits also holds V_COLUMN on a list, vector or matrix that is a table's column.
  *   - T_FN uses j (body AST index) and params/defaults/closure together.
  *     Builtin wrappers (n == -1) store the name in s instead of params.

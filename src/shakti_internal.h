@@ -28,6 +28,9 @@
 #ifndef SHAKTI_PRINT_MAX_DEPTH
 #define SHAKTI_PRINT_MAX_DEPTH 512
 #endif
+/* Copying (v_copy, list()) and comparing (=, !=, in) a value that holds itself would go round
+ * it until the stack ran out; they give this error value, v_loop_err(), instead. */
+#define SHAKTI_LOOP_ERR "a value holds itself"
 
 #ifdef _WIN32
 #define SHAKTI_TIMEGM(tm) _mkgmtime(tm)
@@ -55,6 +58,41 @@ V *v_alloc(int t);
 V *try_promote_matrix(V **elems, int nch);
 void print_val(V *v, FILE *fp, int repr_mode);
 void v_serialize(V *v, FILE *fp);
+/* The error value SHAKTI_LOOP_ERR, marked so that v_is_loop_err tells it from any other
+ * error (in gives it back, where an item that doesn't compare is just not a match). */
+V *v_loop_err(void);
+int v_is_loop_err(const V *v);
+/* A walk that recurses through lists, dicts and tables (v_copy, vec_cmp) goes on forever just
+ * when it comes back to a step it is already inside: the value holds itself. LoopWalk spots
+ * that without keeping the whole path, so a deep value costs little more than a wide one: the
+ * step entered at each power-of-two depth is saved (1, 2, 4, ...: always steps the walk is
+ * inside), and each step entered is checked against those, a few dozen at most. A walk that
+ * goes round forever comes back to a step entered at depth m after r more steps; the first
+ * saved depth at or past m is less than twice m, so it is caught by depth 2m + r (at depth r + 1
+ * when it comes back to the start). A walk that doesn't go round is never stopped, however deep
+ * it goes. A step is a value, or for a comparison two values and an operator. loop_enter says
+ * whether the step is one the walk is already inside; each loop_enter is matched by a
+ * loop_leave. */
+typedef struct {
+    int64_t depth;
+    int level;
+    struct { const void *a, *b; int op; } saved[64];
+} LoopWalk;
+static inline int loop_enter(LoopWalk *w, const void *a, const void *b, int op) {
+    int64_t d = ++w->depth;
+    int seen = 0;
+    for (int k = w->level - 1; k >= 0 && !seen; k--)
+        seen = w->saved[k].a == a && w->saved[k].b == b && w->saved[k].op == op;
+    if (!(d & (d - 1))) {
+        w->saved[w->level].a = a; w->saved[w->level].b = b; w->saved[w->level].op = op;
+        w->level++;
+    }
+    return seen;
+}
+static inline void loop_leave(LoopWalk *w) {
+    if (!(w->depth & (w->depth - 1))) w->level--;
+    w->depth--;
+}
 V *v_deserialize(FILE *fp);
 
 int is_truthy(V *v);

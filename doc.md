@@ -339,6 +339,15 @@ print(len(xs))                # 5
 
 `xs[i:j]` is a sublist. `xs[n:]` drops the first `n` items.
 
+A list can hold itself, and lists can hold each other: `x[0]: x` makes `x` hold itself.
+Copying such a value (`list(x)`, `sorted(x)`) gives an error value, `a value holds itself`, and
+so does comparing it where the comparison would come back round to the same two values for ever
+(`x = x`, `y in x`). A value that comes back round to itself only tens of thousands of levels
+down can still run out of stack instead. Compared with a value that doesn't come back round with
+it, it is just equal or not: after `x: [1, "a", 0]; x[2]: x`, `x = [1, "a", [1, "a", [5]]]` is
+`False`. Lists and dicts nested deeply without holding themselves copy and compare as deep as the
+stack allows (tables copy, but don't compare). Lists that hold each other are never freed.
+
 ## Vectors
 
 `range(n)` builds an `ivec` `[0, 1, …, n - 1]`. Element-wise `+`, `-`, `*`, `/`, `//`, `%` work on matching-length `ivec` / `fvec` pairs (and scalar broadcast).

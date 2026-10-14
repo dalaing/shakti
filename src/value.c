@@ -65,6 +65,8 @@ V *v_time(int64_t ms_since_midnight) {
     return v;
 }
 V *v_err(const char *s)  { V *v=v_alloc(T_ERR);  v->s=x_strdup(s, "v_err"); return v; }
+V *v_loop_err(void) { V *v = v_err(SHAKTI_LOOP_ERR); v->bits = 1; return v; }
+int v_is_loop_err(const V *v) { return v && v->t == T_ERR && v->bits == 1; }
 V *v_errf(const char *fmt, ...) {
     char buf[2048];
     va_list ap; va_start(ap,fmt);
@@ -624,6 +626,37 @@ const char *type_name(int t) {
     P(t >= 0 && t <= T_BMAT, names[t])
     return "unknown";
 }
+/* v_copy's walk through lists, dicts and tables, and whether it has come back round to one it
+ * is inside (the value holds itself): then each level gives up at once, and the outermost frees
+ * what it made and returns v_loop_err(). A list, dict or table enters the walk in v_copy itself,
+ * so that a level of nesting takes one stack frame, as it did. */
+static LoopWalk g_copy_walk;
+static int g_copy_loop;
+/* 0 after v enters the walk, or 1 (and v doesn't) when the walk is giving up. */
+static int copy_enter(V *v) {
+    if (g_copy_loop) return 1;
+    if (!loop_enter(&g_copy_walk, v, NULL, 0)) return 0;
+    loop_leave(&g_copy_walk);
+    g_copy_loop = 1;
+    return 1;
+}
+/* r, the copy of the value that last entered the walk, as it leaves. */
+static V *copy_leave(V *r) {
+    loop_leave(&g_copy_walk);
+    if (g_copy_walk.depth == 0 && g_copy_loop) {
+        g_copy_loop = 0;
+        v_free(r);
+        return v_loop_err();
+    }
+    return r;
+}
+/* A dict's or table's keys or vals list, copied without counting a level of its own. */
+static V *v_copy_side(V *v) {
+    if (!v || v->t != T_LIST) return v_copy(v);
+    V *r=v_list(v->n);
+    for(int64_t i=0;i<v->n;i++) r->L[i]=v_copy(v->L[i]);
+    return r;
+}
 V *v_copy(V *v) {
     P(!v,v_nil())
     switch(v->t) {
@@ -645,20 +678,24 @@ V *v_copy(V *v) {
     case T_BMAT:  { V *r=v_bmat(v->n, mat_cols(v)); memcpy(r->B,v->B,(size_t)v->n*mat_cols(v)); return r; }
     case T_CMAT:  { V *r=v_cmat(v->n, mat_cols(v)); memcpy(r->B,v->B,(size_t)v->n*mat_cols(v)); return r; }
     case T_LIST:  {
+        if (copy_enter(v)) return v_nil();
         V *r=v_list(v->n);
         for(int64_t i=0;i<v->n;i++) r->L[i]=v_copy(v->L[i]);
-        return r;
+        return copy_leave(r);
     }
     case T_DICT: {
-        V *k=v_copy(v->keys), *vl=v_copy(v->vals);
-        V *r=v_dict(k,vl); v_free(k); v_free(vl); return r;
+        if (copy_enter(v)) return v_nil();
+        V *k=v_copy_side(v->keys), *vl=v_copy_side(v->vals);
+        V *r=g_copy_loop ? v_nil() : v_dict(k,vl); v_free(k); v_free(vl); return copy_leave(r);
     }
     case T_DATETIME: return v_datetime(v->j);
     case T_SUBPROCESS: return v_ref(v);
     case T_TABLE: {
-        V *kc = v_copy(v->keys);
-        V *vl = v_copy(v->vals);
-        return v_table_own(kc, vl);
+        if (copy_enter(v)) return v_nil();
+        V *kc = v_copy_side(v->keys);
+        V *vl = v_copy_side(v->vals);
+        if (g_copy_loop) { v_free(kc); v_free(vl); return copy_leave(v_nil()); }
+        return copy_leave(v_table_own(kc, vl));
     }
     default: return v_ref(v);
     }

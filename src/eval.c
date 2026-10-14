@@ -1219,9 +1219,12 @@ V *eval(Node *n, Env *e) {
                 return r;
             }
             int found = 0;
+            /* comparing with an item that comes back round forever is an error, which in gives back */
+#define IN_LOOP_ERR(c) if(v_is_loop_err(c)) { v_free(a); v_free(b); return (c); }
             if(b->t==T_LIST) {
                 for(int64_t i=0;i<b->n;i++) {
                     V *c = vec_cmp(a, b->L[i], OP_EQ);
+                    IN_LOOP_ERR(c)
                     if(c->t==T_BOOL && c->j) { found=1; v_free(c); break; }
                     v_free(c);
                 }
@@ -1234,10 +1237,12 @@ V *eval(Node *n, Env *e) {
             } else if(b->t==T_DICT) {
                 for(int64_t i=0;i<b->n;i++) {
                     V *c = vec_cmp(a, b->keys->L[i], OP_EQ);
+                    IN_LOOP_ERR(c)
                     if(c->t==T_BOOL && c->j) { found=1; v_free(c); break; }
                     v_free(c);
                 }
             }
+#undef IN_LOOP_ERR
             v_free(a); v_free(b);
             return v_bool(n->op == OP_IN ? found : !found);
         }

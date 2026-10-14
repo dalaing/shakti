@@ -529,6 +529,32 @@ V *vec_binop(V *a, V *b, int op) {
     return v_errf("unsupported operand types for op %d: %s and %s", op, type_name(a->t), type_name(b->t));
     #undef VEC_BIN
 }
+/* vec_cmp's walk through lists and dicts, and whether it has come back round to the same two
+ * values with the same operator, which it is inside (the comparison would go on forever): then
+ * each level gives up at once (an item compares unequal), and the outermost frees what it made
+ * and returns v_loop_err(). Comparing a value that holds itself with one that doesn't come back
+ * round with it ends as it did, true or false. Two values enter the walk in vec_cmp itself, where
+ * it goes into their items, so that a level of nesting takes one stack frame, as it did. */
+static LoopWalk g_cmp_walk;
+static int g_cmp_loop;
+/* 0 after a and b enter the walk, or 1 (and they don't) when the walk is giving up. */
+static int cmp_enter(V *a, V *b, int op) {
+    if (g_cmp_loop) return 1;
+    if (!loop_enter(&g_cmp_walk, a, b, op)) return 0;
+    loop_leave(&g_cmp_walk);
+    g_cmp_loop = 1;
+    return 1;
+}
+/* r, the result for the two values that last entered the walk, as they leave. */
+static V *cmp_leave(V *r) {
+    loop_leave(&g_cmp_walk);
+    if (g_cmp_walk.depth == 0 && g_cmp_loop) {
+        g_cmp_loop = 0;
+        v_free(r);
+        return v_loop_err();
+    }
+    return r;
+}
 V *vec_cmp(V *a, V *b, int op) {
     if((a->t==T_INT||a->t==T_FLOAT||a->t==T_BOOL||a->t==T_CHAR) && (b->t==T_INT||b->t==T_FLOAT||b->t==T_BOOL||b->t==T_CHAR)) {
         double x = a->t==T_BOOL?(double)a->j:to_float(a);
@@ -693,23 +719,25 @@ V *vec_cmp(V *a, V *b, int op) {
     }
     if(a->t==T_LIST && (b->t==T_LIST||b->t==T_IVEC||b->t==T_FVEC||b->t==T_CVEC) && (op==OP_EQ||op==OP_NE)) {
         P(a->n != b->n,v_bool(op==OP_NE))
-        for(int64_t i=0;i<a->n;i++) {
+        if (cmp_enter(a, b, op)) return v_bool(0);
+        int eq = 1;
+        for(int64_t i=0;i<a->n && eq;i++) {
             V *belem;
             if(b->t==T_LIST) belem = b->L[i];
             else if(b->t==T_IVEC) belem = v_int(b->J[i]);
             else if(b->t==T_CVEC) belem = v_char(b->B[i]);
             else belem = v_float(b->F[i]);
             V *c = vec_cmp(a->L[i], belem, OP_EQ);
-            int eq = c->t==T_BOOL && c->j;
+            eq = c->t==T_BOOL && c->j;
             v_free(c); if(b->t != T_LIST) v_free(belem);
-            P(!eq,v_bool(op==OP_NE))
         }
-        return v_bool(op==OP_EQ);
+        return cmp_leave(v_bool(eq ? op==OP_EQ : op==OP_NE));
     }
     if((a->t==T_IVEC||a->t==T_FVEC||a->t==T_CVEC) && b->t==T_LIST && (op==OP_EQ||op==OP_NE)) {
         return vec_cmp(b, a, op);
     }
     if(a->t==T_LIST && b->t==T_STR) {
+        if (cmp_enter(a, b, op)) return v_bool(0);
         int64_t n = a->n;
         V *r = v_bvec(n);
         for(int64_t i = 0; i < n; i++) {
@@ -717,9 +745,10 @@ V *vec_cmp(V *a, V *b, int op) {
             r->B[i] = (c->t == T_BOOL && c->j) ? 1 : 0;
             v_free(c);
         }
-        return r;
+        return cmp_leave(r);
     }
     if(a->t==T_STR && b->t==T_LIST) {
+        if (cmp_enter(a, b, op)) return v_bool(0);
         int64_t n = b->n;
         V *r = v_bvec(n);
         for(int64_t i = 0; i < n; i++) {
@@ -727,11 +756,13 @@ V *vec_cmp(V *a, V *b, int op) {
             r->B[i] = (c->t == T_BOOL && c->j) ? 1 : 0;
             v_free(c);
         }
-        return r;
+        return cmp_leave(r);
     }
     if(a->t==T_DICT && b->t==T_DICT && (op==OP_EQ||op==OP_NE)) {
         P(a->n != b->n,v_bool(op==OP_NE))
-        for(int64_t i=0;i<a->n;i++) {
+        if (cmp_enter(a, b, op)) return v_bool(0);
+        int eq = 1;
+        for(int64_t i=0;i<a->n && eq;i++) {
             V *ak = a->keys->L[i], *av = a->vals->L[i];
             int found = 0;
             for(int64_t j=0;j<b->n;j++) {
@@ -740,15 +771,13 @@ V *vec_cmp(V *a, V *b, int op) {
                 v_free(kc);
                 if(!keq) continue;
                 V *vc = vec_cmp(av, b->vals->L[j], OP_EQ);
-                int veq = vc->t==T_BOOL && vc->j;
+                found = vc->t==T_BOOL && vc->j;
                 v_free(vc);
-                P(!veq,v_bool(op==OP_NE))
-                found = 1;
                 break;
             }
-            P(!found,v_bool(op==OP_NE))
+            eq = found;
         }
-        return v_bool(op==OP_EQ);
+        return cmp_leave(v_bool(eq ? op==OP_EQ : op==OP_NE));
     }
     if (is_mat_t(a->t) && (b->t == T_INT || b->t == T_FLOAT || b->t == T_BOOL || b->t == T_CHAR)) {
         int64_t ne = a->n * mat_cols(a);

@@ -29,6 +29,17 @@ static V *assign_map_oom(V *a, V *b, V *c, V *d) {
     if (d) v_free(d);
     return v_nil();
 }
+/* An indexed assignment into a value of type tn with more indices than it takes: the indices are
+   evaluated in order and an error in one passes through; otherwise "cannot assign to tn with n
+   indices". */
+static V *too_many_indices(const char *tn, Node *target, Env *e) {
+    for (int k = 1; k < target->nch; k++) {
+        V *v = eval(target->ch[k], e);
+        if (v && v->t == T_ERR) return v;
+        v_free(v);
+    }
+    return v_errf("cannot assign to %s with %d indices", tn, target->nch - 1);
+}
 /* t.name: val and t["name"]: val — replace or add a column of the table's height.
  * *valp is the caller's value: replaced by its copy if the column has to be one. */
 static V *table_set_col(V *obj, const char *name, V **valp) {
@@ -1211,7 +1222,13 @@ V *eval(Node *n, Env *e) {
         if(target->type == N_INDEX) {
             V *obj = eval(target->ch[0], e);
             if (!obj || obj->t == T_ERR) { v_free(val); return obj ? obj : v_err("bad assignment target"); }
-            if (is_mat_t(obj->t) && target->nch >= 3) {
+            /* a matrix takes two indices; anything else one (x[i][j]: v writes into an item) */
+            if (target->nch > 3 || (target->nch == 3 && !is_mat_t(obj->t))) {
+                const char *tn = type_name(obj->t);
+                v_free(obj); v_free(val);
+                return too_many_indices(tn, target, e);
+            }
+            if (target->nch == 3) {
                 V *idx0 = eval(target->ch[1], e);
                 if (!idx0 || idx0->t == T_ERR) {
                     v_free(obj); v_free(val);
@@ -1222,12 +1239,18 @@ V *eval(Node *n, Env *e) {
                     v_free(obj); v_free(idx0); v_free(val);
                     return idx1 ? idx1 : v_err("bad assignment index");
                 }
-                /* the indices can call a function that turns obj into a list of rows in place */
-                if (is_mat_t(obj->t) && (idx0->t == T_INT || idx0->t == T_CHAR) && (idx1->t == T_INT || idx1->t == T_CHAR)) {
+                V *res = NULL;
+                /* obj's type is looked at again once the indices are worked out: they can call a
+                 * function that turns the matrix into a list of rows in place */
+                if (!is_mat_t(obj->t)) {
+                    res = v_errf("cannot assign to %s with 2 indices", type_name(obj->t));
+                } else if ((idx0->t == T_INT || idx0->t == T_CHAR) && (idx1->t == T_INT || idx1->t == T_CHAR)) {
                     int64_t r = idx0->j, c = idx1->j;
                     if (r < 0) r += obj->n;
                     if (c < 0) c += mat_cols(obj);
-                    if (r >= 0 && r < obj->n && c >= 0 && c < mat_cols(obj)) {
+                    if (r < 0 || r >= obj->n || c < 0 || c >= mat_cols(obj)) {
+                        res = v_err("index out of range");
+                    } else {
                         if (v_ensure_writable(obj) != 0)
                             return assign_map_oom(obj, idx0, idx1, val);
                         if (obj->t == T_IMAT && (val->t == T_INT || val->t == T_CHAR))
@@ -1245,11 +1268,15 @@ V *eval(Node *n, Env *e) {
                             if (rc == 0) rc = v_list_set(obj, r, row);
                             v_free(row);
                             if (rc == -2) return assign_map_oom(obj, idx0, idx1, val);
+                            if (rc == -3) res = v_ref(val);
                         }
                     }
+                } else {
+                    res = v_errf("cannot index type %s with type %s", type_name(obj->t),
+                                 type_name(idx0->t == T_INT || idx0->t == T_CHAR ? idx1->t : idx0->t));
                 }
                 v_free(obj); v_free(idx0); v_free(idx1); v_free(val);
-                return v_nil();
+                return res ? res : v_nil();
             }
             V *idx = eval(target->ch[1], e);
             if (!idx || idx->t == T_ERR) { v_free(obj); v_free(val); return idx ? idx : v_err("bad assignment index"); }
@@ -1270,14 +1297,21 @@ V *eval(Node *n, Env *e) {
                 v_free(obj); v_free(idx); v_free(val);
                 return v_nil();
             }
-            V *res = NULL;
+            V *res;
             if ((obj->t == T_LIST || is_vec_t(obj->t) || is_mat_t(obj->t)) && (idx->t == T_INT || idx->t == T_CHAR)) {
-                if (v_list_set(obj, idx->j, val) == -2) return assign_map_oom(obj, idx, val, NULL);
+                int rc = v_list_set(obj, idx->j, val);
+                if (rc == -2) return assign_map_oom(obj, idx, val, NULL);
+                /* a vector or matrix doesn't take an error value: it is given back */
+                res = rc == -3 ? v_ref(val) : rc ? v_err("index out of range") : v_nil();
             } else if (obj->t == T_TABLE && idx->t == T_STR) {
                 res = table_set_col(obj, idx->s, &val);
+            } else if (obj->t == T_LIST || is_vec_t(obj->t) || is_mat_t(obj->t) || obj->t == T_TABLE) {
+                res = v_errf("cannot index type %s with type %s", type_name(obj->t), type_name(idx->t));
+            } else {
+                res = v_errf("cannot assign to an item of %s", type_name(obj->t));
             }
             v_free(obj); v_free(idx); v_free(val);
-            return res ? res : v_nil();
+            return res;
         }
         if(target->type == N_DOT) {
             V *obj = eval(target->ch[0], e);

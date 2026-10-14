@@ -357,6 +357,17 @@ or a `matrix[char]` is stored as a byte and the type stays (`c: 0x6162; c[0]: 65
 `x` as it was (a `list` stores it, as it stores any value). A `for` loop over `x` sees the new
 items from the next one on. `t["a"]: col` sets a table's column as `t.a: col` does.
 
+An assignment to an item of a list, vector, matrix or table that can't be done is an error
+value, as the read would be: an index out of range (`x[5]: 3`, `m[0, 9]: 1`), an index of the
+wrong kind (`x["a"]: 3`), too many indices (two on anything but a matrix, `x[0, 1]: 3`, or
+three on a matrix, `m[0, 1, 2]: 3`), or an item of something that holds none
+(`n: 5; n["a"]: 1`, `s: "abc"; s[0]: "x"`). An error value put into a vector or matrix
+(`x: 1 2; x[0]: 1/0`) is given back, since it isn't stored.
+
+In a dict, `d["k"]: v` sets key `k`, an int `d[i]: v` sets the value at position `i` if there is
+one, and any other key does nothing, with no error; two indices (`d["a", 1]: 2`) are an error
+value, as above.
+
 A list can hold itself, and lists can hold each other: `x[0]: x` and `x.append([x])` make `x`
 hold itself, and `a.append(b)` then `b.append(a)` make `a` and `b` hold each other.
 Copying such a value (`list(x)`, `sorted(x)`) gives an error value, `a value holds itself`, and
@@ -426,6 +437,10 @@ m[0, 1] : 7     # assign cell
 len(m)      # row count
 shape(m)    # [rows, cols]
 ```
+
+Reading `x[i, j]` indexes `x[i]` with `j`. An assignment takes one index, or two for a
+matrix: `x[0, 1]: v` on a list of lists is an error value ("cannot assign to list with 2
+indices"); `x[0][1]: v` writes into the item.
 
 ### Operators
 

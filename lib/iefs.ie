@@ -61,10 +61,16 @@ def loads(blob, max_plain:-1):
     return iefs_loads(blob, max_plain)
 
 def direct_available():
-    return iefs_direct_available()
+    # False when iefs_direct_available is missing from this build
+    r : iefs_direct_available()
+    return False if type(r) = "error" else r
 
 def uring_available():
-    return iefs_uring_available()
+    # False when iefs_uring_available is a stub in this build
+    r : iefs_uring_available()
+    return False if type(r) = "error" else r
 
 def libaio_available():
-    return iefs_libaio_available()
+    # False when iefs_libaio_available is a stub in this build
+    r : iefs_libaio_available()
+    return False if type(r) = "error" else r

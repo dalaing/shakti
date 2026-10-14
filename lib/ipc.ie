@@ -106,4 +106,6 @@ def publish(h, msg):
     return ipc_publish(h, msg)
 
 def rdma_available():
-    return ipc_rdma_available()
+    # 0 when ipc_rdma_available is missing from this build
+    r : ipc_rdma_available()
+    return 0 if type(r) = "error" else r

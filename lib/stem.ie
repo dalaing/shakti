@@ -27,7 +27,9 @@ def close():
     return stem_close()
 
 def alive():
-    return stem_alive()
+    # False when stem_alive is missing from this build
+    r : stem_alive()
+    return False if type(r) = "error" else r
 
 def process(samples):
     return stem_process(samples)

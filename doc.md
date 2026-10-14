@@ -188,6 +188,36 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - `char(n)` builds a `char` from an int (distinct from `chr`, which returns a
   one-character `str`)
 - `parse_check(src)` returns `dict(ok, error)` — syntax only, no eval
+- A failed operation (`1/0`, a method its type lacks, a comparison of values that don't
+  compare such as `1 = "a"`) gives an **error value**: it can be bound, stored and passed,
+  and binary arithmetic on it gives it back. Used as a condition (`if`, `elif`, `while`,
+  `x if c else y`, the left operand of `and` or `or`, `not`), or dropped by a statement
+  (`x.append(True)` on a `list[bool]`, `a, b : 5`, a failed `import`), it is raised, as `raise`
+  does: `try`/`except` catches it, and uncaught it stops the program. So with `x` an int,
+  `if x = "a":` raises `cannot compare types int and str`, and an assignment to a slice
+  (`x[1:3] : [7]`), which is not supported, raises `slice assignment is not supported`.
+  Every statement's value is dropped except that of the last statement of a function body
+  (the function's value) or of the program; the last statement of a loop body, a class
+  body, an imported module or a `finally` clause is dropped too, and the last statement of
+  an `if`, `try` or `with` clause is dropped when the statement it ends is. `x : 1/0` or
+  `x += …` binds the error value, so neither raises (but `x += 1` with no `x` bound raises
+  `name 'x' is not defined`). A function's value is its last statement's, and a loop's
+  value is its body's last statement's, so a function ending in `x : 1/0` (directly, or as
+  the last statement of a loop body, of an `if` or `with` clause, or of a `try`
+  statement's `except` or `else` clause) gives that error value, and calling it as a
+  statement raises it:
+
+  ```ie
+  def f():
+      for i in [1, 2]:
+          x : 1/0
+  y : f()    # y is the division error
+  f()        # raises it
+  ```
+
+  A `try` body whose last statement binds an error value counts as failed, as it always
+  has: `except` runs if there is one (`try:` `x : 1/0` `except:` runs the `except` clause,
+  with `x` bound to the error value), and otherwise the error is raised after `finally`.
 
 String and formatted-string token text is limited to 8191 bytes, and source
 indentation is limited to 255 nested levels. Inputs beyond either limit fail
@@ -451,7 +481,7 @@ k : ktable(a:1, b:2)
 - `re_match`, `re_findall`, `re_sub`, `re_split` — POSIX regex on Unix/macOS
 - `argv` — script path plus remaining CLI args (set when running a script file)
 - `parse_check(src)` — syntax-only check; returns `dict(ok, error)`
-- `eval(src)` — parse and evaluate a Shakti source string in the **root** environment (returns the value, or an error value). Bindings persist across calls, including when `eval` is invoked from nested functions.
+- `eval(src)` — parse and evaluate a Shakti source string in the **root** environment (returns the value of its last statement, or an error value; an error value that an earlier statement drops stops it there and is what it returns, so `eval("1/0\n2")` gives the division error, not `2`). Bindings persist across calls, including when `eval` is invoked from nested functions.
 - `sh(cmd)` — run `cmd` via `/bin/sh -c` (POSIX). Returns the wait status
   integer (`0` = success; any non-zero value means failure). This is the
   `waitpid` status, not a bash 0–255 exit code — test with

@@ -421,6 +421,11 @@ int shakti_parse_errors(void);
 V *eval(Node *n, Env *e);
 /* Evaluate a user-function body with interpreter call-depth accounting. */
 V *eval_fn(Node *body, Env *e);
+/* Evaluate a block's statements; its value is the last one's. Every statement's value but
+ * the last is dropped, and the last's too when drop is 1 (the block's own value is dropped);
+ * a dropped error value is raised, except the value of a binding to a name or of a compound
+ * statement (see stmt_raises_dropped). */
+V *eval_block(Node *n, Env *e, int drop);
 int shakti_lang_main(int argc, char **argv);
 V *table_load(const char *path, V *columns_opt);
 int table_save(V *table, const char *path);

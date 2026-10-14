@@ -116,7 +116,7 @@ V *do_import(const char *name, Env *e) {
     Env *mod_env = env_new(e);
     shakti_set_file_vars(mod_env, path);
     Node *prog = parse(buf);
-    V *r = eval(prog, mod_env);
+    V *r = eval_block(prog, mod_env, 1);   /* a module's value is dropped */
     {
         int stray = g_breaking || g_continuing || g_returning;
         shakti_clear_flow();

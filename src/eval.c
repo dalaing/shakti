@@ -537,6 +537,145 @@ static int cow_list_arg(Env *e, Node *slot, V **objp) {
     v_free(copy);
     return 0;
 }
+/* Raise the error value v (taken over), as `raise v` does. */
+static V *raise_value(V *v) {
+    g_error = 1;
+    if(g_error_val) v_free(g_error_val);
+    g_error_val = v;
+    return v_nil();
+}
+/* Whether statement s, its value dropped, raises that value when it is an error value:
+ * yes, but for a binding to a name (its value is the bound value) and a compound
+ * statement (its own blocks drop and raise). */
+static int stmt_raises_dropped(Node *s) {
+    switch(s->type) {
+    case N_ASSIGN: case N_AUGASSIGN: return s->ch[0]->type != N_NAME;
+    case N_IF: return s->nch < 2 || s->ch[1]->type != N_BLOCK;   /* a ternary */
+    case N_WHILE: case N_FOR: case N_TRY: case N_WITH: case N_BLOCK: return 0;
+    default: return 1;
+    }
+}
+/* if/elif/else, and a ternary; drop: whether its value is dropped (passed on to the
+ * clause that runs). An error value as a condition raises. */
+static V *eval_if(Node *n, Env *e, int drop) {
+    for(int i=0; i<n->nch; i+=2) {
+        V *cond = eval(n->ch[i], e);
+        P(cond->t==T_ERR,raise_value(cond))
+        int t = is_truthy(cond);
+        v_free(cond);
+        P(t,eval_block(n->ch[i+1], e, drop))
+    }
+    return v_nil();
+}
+/* try/except/else/finally; drop: whether its value is dropped (passed on to each clause
+ * but finally, whose value is always dropped). Slots: 0 try, 1 except, 2 else, 3 finally;
+ * missing clauses are N_PASS. */
+static V *eval_try(Node *n, Env *e, int drop) {
+    int prev_error = g_error;
+    int has_except = n->nch > 1 && n->ch[1]->type != N_PASS;
+    int pending_error = 0;
+    V *pending_err = NULL;
+    g_error = 0;
+    V *r = n->nch > 0 ? eval_block(n->ch[0], e, drop) : v_nil();
+    int flow = g_returning || g_breaking || g_continuing;
+    int failed = g_error || (r && r->t == T_ERR);
+    if (failed && !flow && has_except) {
+        g_error = 0;
+        if (n->sval && g_error_val) env_set(e, n->sval, g_error_val);
+        else if (n->sval && r && r->t == T_ERR) env_set(e, n->sval, r);
+        if (g_error_val) { v_free(g_error_val); g_error_val = NULL; }
+        v_free(r);
+        r = eval_block(n->ch[1], e, drop);
+    } else if (failed && !flow) {
+        pending_error = 1;
+        if (g_error_val) {
+            pending_err = g_error_val;
+            g_error_val = NULL;
+        } else if (r && r->t == T_ERR) {
+            pending_err = v_ref(r);
+        } else {
+            pending_err = v_err("Exception");
+        }
+        g_error = 0;
+        v_free(r);
+        r = v_nil();
+    } else if (!failed && !flow && n->nch > 2 && n->ch[2]->type != N_PASS) {
+        v_free(r);
+        r = eval_block(n->ch[2], e, drop);
+    }
+    int handler_error = g_error;
+    V *handler_val = g_error_val;
+    int sb = g_breaking, sc = g_continuing, sr = g_returning;
+    V *try_ret = g_retval;
+    g_error = 0;
+    g_error_val = NULL;
+    g_retval = NULL;
+    g_breaking = g_continuing = g_returning = 0;
+    if (n->nch > 3 && n->ch[3]->type != N_PASS) {
+        V *f = eval_block(n->ch[3], e, 1);
+        v_free(f);
+    }
+    if (g_error) {
+        if (try_ret) v_free(try_ret);
+        if (pending_err) v_free(pending_err);
+        if (handler_val) v_free(handler_val);
+        v_free(r);
+        return v_nil();
+    }
+    if (g_returning || g_breaking || g_continuing) {
+        if (try_ret && try_ret != g_retval) v_free(try_ret);
+        if (pending_err) v_free(pending_err);
+        if (handler_val) v_free(handler_val);
+        v_free(r);
+        return v_nil();
+    }
+    g_breaking = sb;
+    g_continuing = sc;
+    g_returning = sr;
+    if (sr) g_retval = try_ret;
+    else if (try_ret) v_free(try_ret);
+    if (pending_error) {
+        g_error = 1;
+        g_error_val = pending_err;
+        if (handler_val) v_free(handler_val);
+    } else if (handler_error) {
+        g_error = 1;
+        g_error_val = handler_val;
+    } else {
+        if (handler_val) v_free(handler_val);
+        g_error = prev_error;
+    }
+    return r;
+}
+/* with; drop: whether its value is dropped (passed on to its body). */
+static V *eval_with(Node *n, Env *e, int drop) {
+    V *ctx = eval(n->ch[0], e);
+    if(n->sval) env_set(e, n->sval, ctx);
+    V *r = eval_block(n->ch[1], e, drop);
+    v_free(ctx);
+    return r;
+}
+/* A block's value is its last statement's; see shakti.h. */
+V *eval_block(Node *n, Env *e, int drop) {
+    if(n->type != N_BLOCK) return eval(n, e);
+    P(g_returning || g_breaking || g_continuing || g_error,v_nil())
+    V *r = v_nil();
+    for(int i=0; i<n->nch; i++) {
+        Node *s = n->ch[i];
+        int d = drop || i < n->nch - 1;
+        v_free(r);
+        /* a dropped if/try/with passes the drop on to its clauses */
+        r = !d ? eval(s, e)
+          : s->type == N_IF ? eval_if(s, e, 1)
+          : s->type == N_TRY ? eval_try(s, e, 1)
+          : s->type == N_WITH ? eval_with(s, e, 1)
+          : eval(s, e);
+        P(g_returning || g_breaking || g_continuing || g_error,r)
+        if(d && r && r->t == T_ERR && stmt_raises_dropped(s)) return raise_value(r);
+    }
+    return r;
+}
+
 static int shakti_call_depth_limit(void) {
     if (g_call_depth_limit < 0) {
         const char *e = getenv("SHAKTI_CALL_MAX_DEPTH");
@@ -1125,7 +1264,7 @@ V *eval(Node *n, Env *e) {
         }
         if(n->op == OP_AND) {
             V *a = eval(n->ch[0], e);
-            P(a->t==T_ERR,a)
+            P(a->t==T_ERR,raise_value(a))
             if(a->t==T_BVEC||a->t==T_IVEC||a->t==T_FVEC||a->t==T_CVEC){
                 V *b = eval(n->ch[1], e);
                 if(b->t==T_ERR){ v_free(a); return b; }
@@ -1139,7 +1278,7 @@ V *eval(Node *n, Env *e) {
         }
         if(n->op == OP_OR) {
             V *a = eval(n->ch[0], e);
-            P(a->t==T_ERR,a)
+            P(a->t==T_ERR,raise_value(a))
             if(a->t==T_BVEC||a->t==T_IVEC||a->t==T_FVEC||a->t==T_CVEC){
                 V *b = eval(n->ch[1], e);
                 if(b->t==T_ERR){ v_free(a); return b; }
@@ -1280,7 +1419,10 @@ V *eval(Node *n, Env *e) {
             if(a->t==T_FVEC) { V *r=v_fvec(a->n); for(int64_t i=0;i<a->n;i++) r->F[i]=-a->F[i]; v_free(a); return r; }
             if(a->t==T_FMAT) { int64_t ne=a->n*mat_cols(a); V *r=v_fmat(a->n,mat_cols(a)); for(int64_t i=0;i<ne;i++) r->F[i]=-a->F[i]; v_free(a); return r; }
         }
-        if(n->op == OP_NOT) { int r = !is_truthy(a); v_free(a); return v_bool(r); }
+        if(n->op == OP_NOT) {
+            P(a->t==T_ERR,raise_value(a))
+            int r = !is_truthy(a); v_free(a); return v_bool(r);
+        }
         v_free(a);
         return v_err("bad unop");
     }
@@ -1436,6 +1578,8 @@ V *eval(Node *n, Env *e) {
             return v_nil();
         }
         v_free(val);
+        /* x[1:3] : v */
+        P(target->type == N_SLICE,v_err("slice assignment is not supported"))
         return v_err("bad assignment target");
     }
     case N_AUGASSIGN: {
@@ -1443,7 +1587,7 @@ V *eval(Node *n, Env *e) {
         if(target->type == N_NAME) {
             V *local = env_get_here(e, target->sval);
             V *cur = local ? local : env_get(e, target->sval);
-            P(!cur,v_errf("name '%s' is not defined", target->sval))
+            P(!cur,raise_value(v_errf("name '%s' is not defined", target->sval)))
             /* Fast path: uniquely-owned local INT += INT. Outer bindings use vec_binop. */
             if(local && cur->t == T_INT && cur->rc == 1 && n->ch[1]->type == N_INT && n->op == OP_ADD) {
                 int64_t z;
@@ -1874,25 +2018,18 @@ V *eval(Node *n, Env *e) {
         free(args); free(kwnames); free(kwvals);
         return result;
     }
-    case N_IF: {
-        for(int i=0; i<n->nch; i+=2) {
-            V *cond = eval(n->ch[i], e);
-            int t = is_truthy(cond);
-            v_free(cond);
-            P(t,eval(n->ch[i+1], e))
-        }
-        return v_nil();
-    }
+    case N_IF: return eval_if(n, e, 0);
     case N_WHILE: {
         V *fast = try_fast_counting_while(n, e);
         if(fast) return fast;
         V *r = v_nil();
         for(;;) {
             V *cond = eval(n->ch[0], e);
+            if(cond->t == T_ERR) { v_free(r); return raise_value(cond); }
             int t = is_truthy(cond); v_free(cond);
             if(!t) break;
             v_free(r);
-            r = eval(n->ch[1], e);
+            r = eval_block(n->ch[1], e, 1);
             P(g_returning || g_error,r)
             if(g_breaking) { g_breaking=0; break; }
             if(g_continuing) { g_continuing=0; continue; }
@@ -1908,7 +2045,7 @@ V *eval(Node *n, Env *e) {
                 V *item = iter->t == T_IVEC ? v_int(iter->J[i]) : iter->L[i] ? v_ref(iter->L[i]) : v_nil();
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -1918,7 +2055,7 @@ V *eval(Node *n, Env *e) {
                 V *item = v_float(iter->F[i]);
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -1928,7 +2065,7 @@ V *eval(Node *n, Env *e) {
                 V *item = v_char(iter->B[i]);
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -1938,7 +2075,7 @@ V *eval(Node *n, Env *e) {
                 V *item = v_bool(iter->B[i] != 0);
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -1947,7 +2084,7 @@ V *eval(Node *n, Env *e) {
             for(int64_t i=0;i<iter->n;i++) {
                 for_set_vars(vars, iter->L[i], e);
                 v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -1957,7 +2094,7 @@ V *eval(Node *n, Env *e) {
                 V *item = v_mat_row(iter, i);
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -1969,7 +2106,7 @@ V *eval(Node *n, Env *e) {
                 V *ch = v_str(buf);
                 for_set_vars(vars, ch, e);
                 v_free(ch); v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -1981,7 +2118,7 @@ V *eval(Node *n, Env *e) {
                 if(!item || item->t == T_NIL) { v_free(item); break; }
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -1993,7 +2130,7 @@ V *eval(Node *n, Env *e) {
                 if(!item || item->t == T_NIL) { v_free(item); break; }
                 for_set_vars(vars, item, e);
                 v_free(item); v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -2007,7 +2144,7 @@ V *eval(Node *n, Env *e) {
                     for_set_vars(vars, iter->keys->L[i], e);
                 }
                 v_free(r);
-                r = eval(n->ch[2], e);
+                r = eval_block(n->ch[2], e, 1);
                 if(g_returning||g_error) { v_free(iter); return r; }
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
@@ -2089,96 +2226,13 @@ V *eval(Node *n, Env *e) {
         v_free(val);
         return v_nil();
     }
-    case N_TRY: {
-        /* Slots: 0 try, 1 except, 2 else, 3 finally. Missing clauses are N_PASS. */
-        int prev_error = g_error;
-        int has_except = n->nch > 1 && n->ch[1]->type != N_PASS;
-        int pending_error = 0;
-        V *pending_err = NULL;
-        g_error = 0;
-        V *r = n->nch > 0 ? eval(n->ch[0], e) : v_nil();
-        int flow = g_returning || g_breaking || g_continuing;
-        int failed = g_error || (r && r->t == T_ERR);
-        if (failed && !flow && has_except) {
-            g_error = 0;
-            if (n->sval && g_error_val) env_set(e, n->sval, g_error_val);
-            else if (n->sval && r && r->t == T_ERR) env_set(e, n->sval, r);
-            if (g_error_val) { v_free(g_error_val); g_error_val = NULL; }
-            v_free(r);
-            r = eval(n->ch[1], e);
-        } else if (failed && !flow) {
-            pending_error = 1;
-            if (g_error_val) {
-                pending_err = g_error_val;
-                g_error_val = NULL;
-            } else if (r && r->t == T_ERR) {
-                pending_err = v_ref(r);
-            } else {
-                pending_err = v_err("Exception");
-            }
-            g_error = 0;
-            v_free(r);
-            r = v_nil();
-        } else if (!failed && !flow && n->nch > 2 && n->ch[2]->type != N_PASS) {
-            v_free(r);
-            r = eval(n->ch[2], e);
-        }
-        int handler_error = g_error;
-        V *handler_val = g_error_val;
-        int sb = g_breaking, sc = g_continuing, sr = g_returning;
-        V *try_ret = g_retval;
-        g_error = 0;
-        g_error_val = NULL;
-        g_retval = NULL;
-        g_breaking = g_continuing = g_returning = 0;
-        if (n->nch > 3 && n->ch[3]->type != N_PASS) {
-            V *f = eval(n->ch[3], e);
-            v_free(f);
-        }
-        if (g_error) {
-            if (try_ret) v_free(try_ret);
-            if (pending_err) v_free(pending_err);
-            if (handler_val) v_free(handler_val);
-            v_free(r);
-            return v_nil();
-        }
-        if (g_returning || g_breaking || g_continuing) {
-            if (try_ret && try_ret != g_retval) v_free(try_ret);
-            if (pending_err) v_free(pending_err);
-            if (handler_val) v_free(handler_val);
-            v_free(r);
-            return v_nil();
-        }
-        g_breaking = sb;
-        g_continuing = sc;
-        g_returning = sr;
-        if (sr) g_retval = try_ret;
-        else if (try_ret) v_free(try_ret);
-        if (pending_error) {
-            g_error = 1;
-            g_error_val = pending_err;
-            if (handler_val) v_free(handler_val);
-        } else if (handler_error) {
-            g_error = 1;
-            g_error_val = handler_val;
-        } else {
-            if (handler_val) v_free(handler_val);
-            g_error = prev_error;
-        }
-        return r;
-    }
-    case N_WITH: {
-        V *ctx = eval(n->ch[0], e);
-        if(n->sval) env_set(e, n->sval, ctx);
-        V *r = eval(n->ch[1], e);
-        v_free(ctx);
-        return r;
-    }
+    case N_TRY: return eval_try(n, e, 0);
+    case N_WITH: return eval_with(n, e, 0);
     case N_DEL: return v_nil();
     case N_GLOBAL: return v_nil();
     case N_CLASS: {
         Env *cls_env = env_new(e);
-        V *r = eval(n->ch[0], cls_env);
+        V *r = eval_block(n->ch[0], cls_env, 1);
         v_free(r);
         V *bases = v_list(0);
         V *keys = v_list(cls_env->len + 1);
@@ -2218,15 +2272,7 @@ V *eval(Node *n, Env *e) {
         env_free(cls_env);
         return v_nil();
     }
-    case N_BLOCK: {
-        V *r = v_nil();
-        i(n->nch,{
-            v_free(r);
-            r = eval(n->ch[i], e);
-            P(g_returning || g_breaking || g_continuing || g_error,r)
-        })
-        return r;
-    }
+    case N_BLOCK: return eval_block(n, e, 0);
     case N_IMPORT: return do_import(n->sval, e);
     default:
         return v_errf("unknown node type %d", n->type);

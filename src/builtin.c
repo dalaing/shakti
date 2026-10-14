@@ -1664,6 +1664,13 @@ static int ivec_own(V *v) {
     v->_ht_cap = v->n > 0 ? (uint32_t)v->n : 0;
     return 0;
 }
+static V *list_ref_elems(V *src) {
+    V *c = v_list(src ? src->n : 0);
+    int64_t i;
+    if (!src) return c;
+    for (i = 0; i < src->n; i++) c->L[i] = src->L[i] ? v_ref(src->L[i]) : v_nil();
+    return c;
+}
 #define COLUMN_FIXED ": a table column's length is fixed; copy it with list() first"
 static V *bi_append(V**a,in){
     P(n>=2&&a[0]&&(a[0]->t==T_LIST||a[0]->t==T_IVEC)&&v_is_column(a[0]),v_err("append" COLUMN_FIXED))
@@ -1677,6 +1684,8 @@ static V *bi_append(V**a,in){
         ivec_promote(a[0]);
     }
     P(n<2||a[0]->t!=T_LIST,v_err("append(list,val)"))
+    /* x.append(x) appends a new list holding x's items, not x itself */
+    if(a[1]==a[0]){V*c=list_ref_elems(a[0]);v_list_append(a[0],c);v_free(c);return v_nil();}
     v_list_append(a[0], a[1]); return v_nil();}
 static V *bi_pop(V**a,in){
     P(n>=1&&a[0]&&(a[0]->t==T_LIST||a[0]->t==T_IVEC)&&v_is_column(a[0]),v_err("pop" COLUMN_FIXED))
@@ -1688,13 +1697,6 @@ static V *bi_pop(V**a,in){
     return a[0]->L[--a[0]->n];}
 static V *bi_keys(V**a,in){return n>0&&(a[0]->t==T_DICT||a[0]->t==T_TABLE)?v_copy(a[0]->keys):v_list(0);}
 static V *bi_values(V**a,in){return n>0&&(a[0]->t==T_DICT||a[0]->t==T_TABLE)?v_copy(a[0]->vals):v_list(0);}
-static V *list_ref_elems(V *src) {
-    V *c = v_list(src ? src->n : 0);
-    int64_t i;
-    if (!src) return c;
-    for (i = 0; i < src->n; i++) c->L[i] = src->L[i] ? v_ref(src->L[i]) : v_nil();
-    return c;
-}
 static V *bi_table(V**a,in,V**kwn,V**kwv,int nkw){
     if(n==1&&a[0]->t==T_DICT){
         V*k=list_ref_elems(a[0]->keys),*v=list_ref_elems(a[0]->vals);

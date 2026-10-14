@@ -314,6 +314,14 @@ Leading `@` decorates. `mmul(a, b)` multiplies matrices.
 | `len()` | `list`, `str`, `ivec`, `fvec`, `bvec`, `list[char]`, `matrix[int]`, `matrix[float]`, `matrix[bool]`, `matrix[char]` |
 | `find(substr)` | `str` — byte index of first match, or `-1` |
 
+`append` and `pop` change the list in place, and every name that holds the list sees the
+change: after `y: x`, `y.append(3)` is seen through `x`, as `y[0]: 9` is. So is an append to
+a function's parameter, to a `for` variable that holds a row of a list of lists, and to a default
+parameter value: `def f(a:[]):` shares one list among all the calls that use the default, so
+what one call appends the next one sees. `x.append(x)` appends a new list holding `x`'s items.
+A `for` loop over a list sees the items its body appends or pops, as Python's does:
+`for v in L: L.append(v)` goes on until the body breaks.
+
 ## Lists
 
 `len(x)` counts items in a list, vector, or string, and rows in a matrix.
@@ -339,7 +347,8 @@ print(len(xs))                # 5
 
 `xs[i:j]` is a sublist. `xs[n:]` drops the first `n` items.
 
-A list can hold itself, and lists can hold each other: `x[0]: x` makes `x` hold itself.
+A list can hold itself, and lists can hold each other: `x[0]: x` and `x.append([x])` make `x`
+hold itself, and `a.append(b)` then `b.append(a)` make `a` and `b` hold each other.
 Copying such a value (`list(x)`, `sorted(x)`) gives an error value, `a value holds itself`, and
 so does comparing it where the comparison would come back round to the same two values for ever
 (`x = x`, `y in x`). A value that comes back round to itself only tens of thousands of levels

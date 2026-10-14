@@ -715,6 +715,25 @@ static ssize_t rest_io_read(RestHandle *conn, void *buf, size_t n) {
     }
 }
 
+/* A write to a client that has closed fails with EPIPE instead of raising SIGPIPE, which ends the
+ * process: SO_NOSIGPIPE on the socket where the system has it (macOS; it stays on the socket when
+ * ws.accept takes it over), and MSG_NOSIGNAL on each send where the system has that (Linux, recent
+ * macOS). tls.c guards OpenSSL's own writes. */
+static void rest_set_nosigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#else
+    (void)fd;
+#endif
+}
+
+#ifdef MSG_NOSIGNAL
+#define REST_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define REST_SEND_FLAGS 0
+#endif
+
 static ssize_t rest_io_write(RestHandle *conn, const void *buf, size_t n) {
     if (!conn) return -1;
 #ifdef SHAKTI_HAVE_TLS
@@ -722,7 +741,7 @@ static ssize_t rest_io_write(RestHandle *conn, const void *buf, size_t n) {
 #endif
     size_t sent = 0;
     while (sent < n) {
-        ssize_t w = write(conn->fd, (const char *)buf + sent, n - sent);
+        ssize_t w = send(conn->fd, (const char *)buf + sent, n - sent, REST_SEND_FLAGS);
         if (w < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -1142,6 +1161,7 @@ static V *rest_do_accept(int listen_h) {
     }
     if (cfd < 0) return v_err("rest_accept: accept failed");
     rest_set_cloexec(cfd);
+    rest_set_nosigpipe(cfd);
 
     void *ssl = NULL;
 #ifdef SHAKTI_HAVE_TLS
@@ -1448,14 +1468,14 @@ static V *rest_do_write(int conn_h, int status, const unsigned char *body, size_
     while (sent < (size_t)hn) {
         ssize_t w = rest_io_write(conn, hdr + sent, (size_t)hn - sent);
         if (w < 0)
-            return v_err("rest_write: write failed");
+            return v_errf("rest_write: write failed: %s", strerror(errno));
         sent += (size_t)w;
     }
     sent = 0;
     while (sent < blen) {
         ssize_t w = rest_io_write(conn, body + sent, blen - sent);
         if (w < 0)
-            return v_err("rest_write: write failed");
+            return v_errf("rest_write: write failed: %s", strerror(errno));
         sent += (size_t)w;
     }
     return v_nil();

@@ -1228,6 +1228,8 @@ rest.close(srv)
 | `rest.set_nonblock(h, enabled)` | Non-blocking fd |
 | `rest.close(h)` | Close listen or connection handle |
 
+A `rest.write` (or `respond_json`, `respond_iefs`, `respond_hld`) to a client that has hung up gives an error value such as `rest_write: write failed: Broken pipe` (the reason can also be `Connection reset by peer`, or, over `rest.listen_tls` once a write has already failed, `Input/output error`) and the process goes on, with `rest.listen` and `rest.listen_tls` alike; `rest.close` of such a connection closes it as usual. The first write after the hang-up can still succeed: the client's system answers it with a reset, and later writes fail.
+
 `rest.listen_tls` is for long-lived sockets (HTTPS mini-server, `wss` upgrade). The HTTP **client** still uses `curl`.
 
 ```ie

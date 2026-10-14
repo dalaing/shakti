@@ -29,6 +29,33 @@ static V *assign_map_oom(V *a, V *b, V *c, V *d) {
     if (d) v_free(d);
     return v_nil();
 }
+/* t.name: val and t["name"]: val — replace or add a column of the table's height.
+ * *valp is the caller's value: replaced by its copy if the column has to be one. */
+static V *table_set_col(V *obj, const char *name, V **valp) {
+    V *val = *valp;
+    int found = -1;
+    if ((val->t==T_IVEC||val->t==T_FVEC||val->t==T_BVEC||val->t==T_CVEC||val->t==T_LIST) &&
+        obj->n > 0 && val->n != obj->n)
+        return v_err("table column length mismatch");
+    v_list_unshare(&obj->keys);
+    v_list_unshare(&obj->vals);
+    for(int i=0; i<obj->keys->n; i++) {
+        if(obj->keys->L[i] && obj->keys->L[i]->t == T_STR &&
+           !strcmp(obj->keys->L[i]->s, name)) { found=i; break; }
+    }
+    v_table_column(valp);  /* as table() takes a column */
+    val = *valp;
+    if(found >= 0) {
+        v_free(obj->vals->L[found]);
+        obj->vals->L[found] = v_ref(val);
+    } else {
+        V *k = v_str(name);
+        v_list_append(obj->keys, k);
+        v_list_append(obj->vals, val);
+        v_free(k);
+    }
+    return v_nil();
+}
 #define FSTR_FMT_MAX_FIELD 100
 static int fstr_fmt_field(const char **pp) {
     const char *p = *pp;
@@ -1243,11 +1270,14 @@ V *eval(Node *n, Env *e) {
                 v_free(obj); v_free(idx); v_free(val);
                 return v_nil();
             }
+            V *res = NULL;
             if ((obj->t == T_LIST || is_vec_t(obj->t) || is_mat_t(obj->t)) && (idx->t == T_INT || idx->t == T_CHAR)) {
                 if (v_list_set(obj, idx->j, val) == -2) return assign_map_oom(obj, idx, val, NULL);
+            } else if (obj->t == T_TABLE && idx->t == T_STR) {
+                res = table_set_col(obj, idx->s, &val);
             }
             v_free(obj); v_free(idx); v_free(val);
-            return v_nil();
+            return res ? res : v_nil();
         }
         if(target->type == N_DOT) {
             V *obj = eval(target->ch[0], e);
@@ -1255,28 +1285,9 @@ V *eval(Node *n, Env *e) {
             if(obj->t == T_DICT) {
                 v_dict_set(obj, target->sval, val);
             } else if(obj->t == T_TABLE) {
-                int found = -1;
-                if ((val->t==T_IVEC||val->t==T_FVEC||val->t==T_BVEC||val->t==T_CVEC||val->t==T_LIST) &&
-                    obj->n > 0 && val->n != obj->n) {
-                    v_free(obj); v_free(val);
-                    return v_err("table column length mismatch");
-                }
-                v_list_unshare(&obj->keys);
-                v_list_unshare(&obj->vals);
-                for(int i=0; i<obj->keys->n; i++) {
-                    if(obj->keys->L[i] && obj->keys->L[i]->t == T_STR &&
-                       !strcmp(obj->keys->L[i]->s, target->sval)) { found=i; break; }
-                }
-                v_table_column(&val);  /* as table() takes a column */
-                if(found >= 0) {
-                    v_free(obj->vals->L[found]);
-                    obj->vals->L[found] = v_ref(val);
-                } else {
-                    V *k = v_str(target->sval);
-                    v_list_append(obj->keys, k);
-                    v_list_append(obj->vals, val);
-                    v_free(k);
-                }
+                V *r = table_set_col(obj, target->sval, &val);
+                v_free(obj); v_free(val);
+                return r;
             }
             v_free(obj); v_free(val);
             return v_nil();

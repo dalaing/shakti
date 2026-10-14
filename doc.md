@@ -355,7 +355,7 @@ a list of rows. A `list` stays a `list` (`x: [1, "a"]; x[1]: 2`). An int put in 
 or a `matrix[char]` is stored as a byte and the type stays (`c: 0x6162; c[0]: 65` gives
 `0x4162`). A vector or matrix doesn't take an error value: `x: 1 2; x[0]: x[0] + "s"` leaves
 `x` as it was (a `list` stores it, as it stores any value). A `for` loop over `x` sees the new
-items from the next one on.
+items from the next one on. `t["a"]: col` sets a table's column as `t.a: col` does.
 
 A list can hold itself, and lists can hold each other: `x[0]: x` and `x.append([x])` make `x`
 hold itself, and `a.append(b)` then `b.append(a)` make `a` and `b` hold each other.

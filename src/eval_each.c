@@ -569,6 +569,7 @@ static V *each_dyadic(V *fn, V *xs, V *ys, Env *e) {
 }
 V *eval_each(Node *n, Env *e) {
     V *fn = eval(n->ch[0], e);
+    if (g_error) { v_free(fn); return v_nil(); }   /* the function raised */
     P(fn->t == T_ERR, fn)
     if (fn->t != T_FN) {
         V *err = v_errf("each: left of '@' must be callable (got %s); use f@ xs, xs f@ ys, or mmul",
@@ -578,6 +579,7 @@ V *eval_each(Node *n, Env *e) {
     }
     if (n->nch == 2) {
         V *xs = eval(n->ch[1], e);
+        if (g_error) { v_free(fn); v_free(xs); return v_nil(); }   /* an argument raised */
         if (xs->t == T_ERR) { v_free(fn); return xs; }
         V *r = each_unary(fn, xs, e);
         v_free(fn); v_free(xs);
@@ -587,6 +589,7 @@ V *eval_each(Node *n, Env *e) {
         V *xs = eval(n->ch[1], e);
         if (xs->t == T_ERR) { v_free(fn); return xs; }
         V *ys = eval(n->ch[2], e);
+        if (g_error) { v_free(fn); v_free(xs); v_free(ys); return v_nil(); }   /* an argument raised */
         if (ys->t == T_ERR) { v_free(fn); v_free(xs); return ys; }
         V *r = each_dyadic(fn, xs, ys, e);
         v_free(fn); v_free(xs); v_free(ys);

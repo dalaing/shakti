@@ -1463,6 +1463,7 @@ V *eval(Node *n, Env *e) {
                 }
             }
             V *delta = eval(n->ch[1], e);
+            if(g_error) { v_free(delta); return v_nil(); }   /* the right side raised */
             if(local && cur->t == T_INT && cur->rc == 1 && delta->t == T_INT &&
                (n->op == OP_ADD || n->op == OP_SUB || n->op == OP_MUL)) {
                 int64_t z;
@@ -1484,7 +1485,7 @@ V *eval(Node *n, Env *e) {
             V *obj = eval(target->ch[0], e);
             V *idx = eval(target->ch[1], e);
             V *delta = eval(n->ch[1], e);
-            if(obj->t==T_DICT && idx->t==T_STR) {
+            if(!g_error && obj->t==T_DICT && idx->t==T_STR) {
                 V *cur = v_dict_get(obj, idx->s);
                 if(cur) {
                     V *newval = vec_binop(cur, delta, n->op);
@@ -1504,6 +1505,7 @@ V *eval(Node *n, Env *e) {
         if(obj->t == T_FN) {
             V *al = v_list(n->nch - 1);
             for(int i=1; i<n->nch; i++) al->L[i-1] = eval(n->ch[i], e);
+            if(g_error) { v_free(obj); v_free(al); return v_nil(); }   /* an argument raised */
             V *r = builtin_call("__invoke__", (V*[]){obj, al}, 2, NULL, NULL, 0, e);
             v_free(obj); v_free(al); return r;
         }
@@ -1618,6 +1620,7 @@ V *eval(Node *n, Env *e) {
             }
             if(n->nch==2) {
                 V *obj = eval(n->ch[1], e);
+                if(g_error) { v_free(obj); return v_nil(); }
                 if(obj->t != T_CHAR && obj->t != T_INT) {
                     V *r = builtin_call("list",&obj,1,NULL,NULL,0,e);
                     v_free(obj);
@@ -1642,6 +1645,7 @@ V *eval(Node *n, Env *e) {
             if(n->nch==3) {
                 V *o1 = eval(n->ch[1], e);
                 V *o2 = eval(n->ch[2], e);
+                if(g_error) { v_free(o1); v_free(o2); return v_nil(); }
                 if((o1->t != T_CHAR && o1->t != T_INT)||(o2->t != T_CHAR && o2->t != T_INT)) {
                     v_free(o1); v_free(o2);
                     return v_err("types");
@@ -1683,6 +1687,12 @@ V *eval(Node *n, Env *e) {
                     return v_err("cannot unpack non-sequence");
                 }
             }
+            if(g_error) {   /* the object or an argument raised: the call is abandoned */
+                v_free(obj);
+                for(int i=0;i<nargs;i++) v_free(args[i]);
+                free(args);
+                return v_nil();
+            }
             V *attr = NULL;
             if(obj->t == T_DICT) {
                 attr = v_dict_get(obj, method);
@@ -1699,6 +1709,13 @@ V *eval(Node *n, Env *e) {
                         kwvals[nkw] = eval(n->ch[i]->ch[0], e);
                         nkw++;
                     }
+                }
+                if (g_error) {   /* a keyword argument raised: the call is abandoned */
+                    v_free(obj);
+                    for (int i = 0; i < nargs; i++) v_free(args[i]);
+                    for (int i = 0; i < nkw; i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
+                    free(args); free(kwnames); free(kwvals);
+                    return v_nil();
                 }
                 V *self = NULL;
                 V *lead = obj->keys && obj->keys->n > 0 ? obj->keys->L[0] : NULL;
@@ -1776,6 +1793,12 @@ V *eval(Node *n, Env *e) {
                 return v_err("cannot unpack non-sequence");
             }
         }
+        if(g_error) {   /* an argument raised: the call is abandoned */
+            for(int i=0;i<nargs;i++) v_free(args[i]);
+            for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
+            free(args); free(kwnames); free(kwvals);
+            return v_nil();
+        }
         if(fn_node->type == N_NAME && is_builtin(fn_node->sval)) {
             if ((!strcmp(fn_node->sval, "pop") || !strcmp(fn_node->sval, "append")) &&
                 nargs >= 1 && n->nch > 1 && n->ch[1]->type != N_KWARG &&
@@ -1822,11 +1845,12 @@ V *eval(Node *n, Env *e) {
             free(args); free(kwnames); free(kwvals);
             return result;
         }
-        if(!fn || fn->t != T_FN) {
+        if(!fn || fn->t != T_FN || g_error) {   /* not callable, or the callee raised */
             if(fn) v_free(fn);
             for(int i=0;i<nargs;i++) v_free(args[i]);
             for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
             free(args); free(kwnames); free(kwvals);
+            if(g_error) return v_nil();
             return v_errf("'%s' is not callable", fn_node->sval ? fn_node->sval : "?");
         }
         Env *call_env = env_acquire(fn->closure);
@@ -2043,6 +2067,7 @@ V *eval(Node *n, Env *e) {
         V *rv;
         if(n->nch > 0) rv = eval(n->ch[0], e);
         else rv = v_nil();
+        if(g_error) { v_free(rv); return v_nil(); }   /* the value raised: a raise, not a return */
         if (g_retval) v_free(g_retval);
         g_retval = rv;
         g_returning = 1;
@@ -2052,6 +2077,7 @@ V *eval(Node *n, Env *e) {
     case N_CONTINUE: { g_continuing = 1; return v_nil(); }
     case N_RAISE: {
         V *val = n->nch > 0 ? eval(n->ch[0], e) : v_err("Exception");
+        if(g_error) { v_free(val); return v_nil(); }   /* the value raised: that error stands */
         g_error = 1;
         if (val->t == T_ERR) {
             g_error_val = v_ref(val);

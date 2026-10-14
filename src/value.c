@@ -649,19 +649,44 @@ V *v_copy(V *v) {
 }
 #define DICT_HT_EMPTY 0xFFFFFFFFu
 #define DICT_HT_MIN   8
+/* A dict's hash table maps slots to key positions, by linear probing. It holds the string keys
+   and the number keys (int, float, bool, char) but a NaN, which equals no key; other keys are
+   found by a scan. Equal number keys hash alike: `=` compares numbers as doubles, so the hash is
+   of that double, with -0.0 as 0.0. Keys are added in position order, so the first of equal keys
+   is found first. The table is built once a dict has more than DICT_HT_MIN keys (on a lookup or
+   an insertion) and kept in step by v_dict_set, the only way a dict's keys change; a new dict
+   (literal, copy, dict(), json_loads...) starts without one. */
+static uint32_t dict_num_hash(double x) {
+    uint64_t b;
+    if (x == 0) x = 0;
+    memcpy(&b, &x, sizeof b);
+    return hash_u64(b);
+}
+static void dict_ht_put(V *d, uint32_t h, int64_t i) {
+    uint32_t mask = d->_ht_cap - 1, slot = h & mask;
+    W(d->_ht[slot] != DICT_HT_EMPTY,slot = (slot + 1) & mask)
+    d->_ht[slot] = (uint32_t)i;
+}
+/* Whether key k goes in the hash table, and its hash. */
+static int dict_ht_hash(V *k, uint32_t *h) {
+    if (k->t == T_STR) { *h = fnv1a(k->s); return 1; }
+    if (!dict_num_key(k)) return 0;
+    double x = dict_num_val(k);
+    if (x != x) return 0;
+    *h = dict_num_hash(x);
+    return 1;
+}
 static void dict_ht_rebuild(V *d) {
-    uint32_t cap = 16;
+    uint32_t cap = 16, h;
     W(cap < (uint32_t)d->n * 2,cap <<= 1)
     d->_ht = x_realloc(d->_ht, cap * sizeof(uint32_t), "dict_ht_rebuild");
     d->_ht_cap = cap;
     memset(d->_ht, 0xFF, cap * sizeof(uint32_t));
-    uint32_t mask = cap - 1;
-    for (int64_t i = 0; i < d->n; i++) {
-        if (d->keys->L[i]->t != T_STR) continue;
-        uint32_t slot = fnv1a(d->keys->L[i]->s) & mask;
-        W(d->_ht[slot] != DICT_HT_EMPTY,slot = (slot + 1) & mask)
-        d->_ht[slot] = (uint32_t)i;
-    }
+    for (int64_t i = 0; i < d->n; i++)
+        if (dict_ht_hash(d->keys->L[i], &h)) dict_ht_put(d, h, i);
+}
+static void dict_ht_ensure(V *d) {
+    if (!d->_ht && d->n > DICT_HT_MIN) dict_ht_rebuild(d);
 }
 static void dict_side_reserve(V *lst) {
     if (lst->n < (int64_t)lst->_ht_cap) return;
@@ -678,6 +703,7 @@ void v_dict_set(V *d, const char *key, V *val) {
     Pv(d->t != T_DICT)
     v_list_unshare(&d->keys);
     v_list_unshare(&d->vals);
+    dict_ht_ensure(d);
     uint32_t h = fnv1a(key);
     if (d->_ht) {
         uint32_t mask = d->_ht_cap - 1, slot = h & mask;
@@ -717,22 +743,48 @@ void v_dict_set(V *d, const char *key, V *val) {
     d->n++; d->keys->n++; d->vals->n++;
     if (d->n > DICT_HT_MIN) dict_ht_rebuild(d);
 }
-V *v_dict_get(V *d, const char *key) {
-    P(!d || d->t != T_DICT,NULL)
+int64_t v_dict_str_index(V *d, const char *key) {
+    P(!d || d->t != T_DICT,-1)
+    dict_ht_ensure(d);
     if (d->_ht) {
         uint32_t mask = d->_ht_cap - 1, slot = fnv1a(key) & mask;
         W(d->_ht[slot] != DICT_HT_EMPTY,{
             uint32_t idx = d->_ht[slot];
             if (d->keys->L[idx]->t == T_STR && strcmp(d->keys->L[idx]->s, key) == 0)
-                return d->vals->L[idx];
+                return idx;
             slot = (slot + 1) & mask;
         })
-        return NULL;
+        return -1;
     }
     for (int64_t i = 0; i < d->n; i++)
         if (d->keys->L[i]->t == T_STR && strcmp(d->keys->L[i]->s, key) == 0)
-            return d->vals->L[i];
-    return NULL;
+            return i;
+    return -1;
+}
+int64_t v_dict_num_index(V *d, V *k) {
+    P(d->t != T_DICT,-1)
+    double x = dict_num_val(k);
+    P(x != x,-1)
+    dict_ht_ensure(d);
+    if (d->_ht) {
+        uint32_t mask = d->_ht_cap - 1, slot = dict_num_hash(x) & mask;
+        W(d->_ht[slot] != DICT_HT_EMPTY,{
+            uint32_t idx = d->_ht[slot];
+            V *key = d->keys->L[idx];
+            if (dict_num_key(key) && dict_num_val(key) == x) return idx;
+            slot = (slot + 1) & mask;
+        })
+        return -1;
+    }
+    for (int64_t i = 0; i < d->n; i++) {
+        V *key = d->keys->L[i];
+        if (dict_num_key(key) && dict_num_val(key) == x) return i;
+    }
+    return -1;
+}
+V *v_dict_get(V *d, const char *key) {
+    int64_t i = v_dict_str_index(d, key);
+    return i < 0 ? NULL : d->vals->L[i];
 }
 void v_serialize(V *v, FILE *fp) {
     if(!v) { fputc(T_NIL, fp); return; }

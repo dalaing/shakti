@@ -50,6 +50,7 @@ void *x_realloc(void *ptr, size_t sz, const char *where);
 char *x_strdup(const char *s, const char *where);
 size_t x_mul(size_t a, size_t b, const char *where);
 uint32_t fnv1a(const char *s);
+uint32_t hash_u64(uint64_t x);
 
 V *v_alloc(int t);
 V *try_promote_matrix(V **elems, int nch);

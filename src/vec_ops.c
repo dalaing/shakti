@@ -816,6 +816,25 @@ V *vec_cmp(V *a, V *b, int op) {
     }
     return v_errf("cannot compare types %s and %s", type_name(a->t), type_name(b->t));
 }
+/* Dict keys other than strings match by `=`, as vec_cmp decides it. A number key (int, float,
+   bool or char) equals only a number key, which v_dict_num_index finds as vec_cmp compares
+   numbers; any other key is compared with each key by vec_cmp. */
+int64_t v_dict_index(V *d, V *k) {
+    P(d->t != T_DICT,-1)
+    if (k->t == T_STR) return v_dict_str_index(d, k->s);
+    if (dict_num_key(k)) return v_dict_num_index(d, k);
+    for (int64_t i = 0; i < d->n; i++) {
+        V *c = vec_cmp(k, d->keys->L[i], OP_EQ);
+        int eq = c->t == T_BOOL && c->j;
+        v_free(c);
+        if (eq) return i;
+    }
+    return -1;
+}
+V *v_dict_find(V *d, V *k) {
+    int64_t i = v_dict_index(d, k);
+    return i < 0 ? NULL : d->vals->L[i];
+}
 V *table_filter(V *tbl, V *mask) {
     P(tbl->t != T_TABLE || mask->t != T_BVEC,v_err("bad filter"))
     int64_t nr = tbl->n, count=0;

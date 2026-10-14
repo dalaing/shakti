@@ -18,6 +18,14 @@ static uint32_t hash_seed(void) {
     }
     return seed;
 }
+/* A 64-bit value hashed with the same seed as fnv1a (the finaliser of MurmurHash3). */
+uint32_t hash_u64(uint64_t x) {
+    x ^= hash_seed();
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdull;
+    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ull;
+    x ^= x >> 33;
+    return (uint32_t)x;
+}
 uint32_t fnv1a(const char *s) {
     uint32_t seed = hash_seed();
     uint32_t h = 2166136261u ^ seed;

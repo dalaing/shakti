@@ -406,6 +406,18 @@ void fn_ast_release(int idx);
 V *col_get(V *col, int64_t row);
 void v_dict_set(V *d, const char *key, V *val);
 V *v_dict_get(V *d, const char *key);
+/* Position of the string key `key` in d, or -1. */
+int64_t v_dict_str_index(V *d, const char *key);
+/* A number dict key (int, float, bool, char) matches a number key by `=`, which compares them
+   as doubles. */
+static inline int dict_num_key(V *v) { return v->t==T_INT||v->t==T_FLOAT||v->t==T_BOOL||v->t==T_CHAR; }
+static inline double dict_num_val(V *v) { return v->t==T_FLOAT ? v->f : (double)v->j; }
+/* Position of the number key k in d, or -1 (always for NaN, which equals no key). */
+int64_t v_dict_num_index(V *d, V *k);
+/* Position of key k in d, or -1: a string key matches by text, any other by `=`. */
+int64_t v_dict_index(V *d, V *k);
+/* The value under key k (borrowed), or NULL: a string key matches by text, any other by `=`. */
+V *v_dict_find(V *d, V *k);
 int env_save(Env *e, const char *path);
 int env_load(Env *e, const char *path);
 int shakti_parse_datetime_ms(const char *s, int64_t *out_ms);

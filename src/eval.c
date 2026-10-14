@@ -1238,14 +1238,8 @@ V *eval(Node *n, Env *e) {
                 for(int64_t i=0;i<b->n;i++) if(b->J[i]==a->j) { found=1; break; }
             } else if(b->t==T_STR && a->t==T_STR) {
                 found = strstr(b->s, a->s) != NULL;
-            } else if(b->t==T_DICT && a->t==T_STR) {
-                found = v_dict_get(b, a->s) != NULL;
             } else if(b->t==T_DICT) {
-                for(int64_t i=0;i<b->n;i++) {
-                    V *c = vec_cmp(a, b->keys->L[i], OP_EQ);
-                    if(c->t==T_BOOL && c->j) { found=1; v_free(c); break; }
-                    v_free(c);
-                }
+                found = v_dict_index(b, a) >= 0;
             }
             v_free(a); v_free(b);
             return v_bool(n->op == OP_IN ? found : !found);
@@ -1537,17 +1531,8 @@ V *eval(Node *n, Env *e) {
                     else next = v_ref(obj->L[j]);
                 } else next = v_err("index out of range");
             } else if(obj->t==T_DICT) {
-                if(idx->t==T_STR) {
-                    V *found = v_dict_get(obj, idx->s);
-                    next = found ? v_ref(found) : v_nil();
-                } else {
-                    next = v_nil();
-                    for(int64_t j=0;j<obj->n;j++) {
-                        V *c = vec_cmp(idx, obj->keys->L[j], OP_EQ);
-                        if(c->t==T_BOOL && c->j) { v_free(next); next = v_ref(obj->vals->L[j]); v_free(c); break; }
-                        v_free(c);
-                    }
-                }
+                V *found = v_dict_find(obj, idx);
+                next = found ? v_ref(found) : v_nil();
             } else if(obj->t==T_STR && (idx->t==T_INT||idx->t==T_CHAR)) {
                 int64_t j = idx->j;
                 int64_t slen = strlen(obj->s);

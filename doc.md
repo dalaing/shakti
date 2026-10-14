@@ -218,6 +218,9 @@ def index_of(s, ch):
 for c in "abc":
     print(c)
 
+for r in table(a:[1, 2], b:[3, 4]):
+    print(r)    # each row as a dict, as list(t) gives them: {"a": 1, "b": 3}, then {"a": 2, "b": 4}
+
 import sql
 r : select id, amount by dept from t where amount > 15
 ```

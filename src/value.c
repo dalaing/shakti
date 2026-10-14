@@ -420,6 +420,25 @@ void v_dict_put(V *d, const char *key, V *val) {
     v_dict_set(d, key, val);
     v_free(val);
 }
+/* Row `row` of table t as a dict of column name to cell, for list(t) and for r in t. A column
+ * that isn't a vector, list or matrix (or is too short) gives None. */
+V *table_row(V *t, int64_t row) {
+    V *d = v_dict_empty();
+    for (int64_t c = 0; c < t->keys->n; c++) {
+        if (t->keys->L[c]->t != T_STR) continue;
+        V *col = t->vals->L[c], *cell;
+        if (row >= col->n) cell = v_nil();
+        else if (col->t == T_IVEC) cell = v_int(col->J[row]);
+        else if (col->t == T_FVEC) cell = v_float(col->F[row]);
+        else if (col->t == T_BVEC) cell = v_bool(col->B[row] != 0);
+        else if (col->t == T_CVEC) cell = v_char(col->B[row]);
+        else if (col->t == T_LIST) cell = col->L[row] ? v_ref(col->L[row]) : v_nil();
+        else if (is_mat_t(col->t)) cell = v_mat_row(col, row);
+        else cell = v_nil();
+        v_dict_put(d, t->keys->L[c]->s, cell);
+    }
+    return d;
+}
 V *col_get(V *col, int64_t row) {
     if (!col || row < 0) return v_nil();
     switch (col->t) {

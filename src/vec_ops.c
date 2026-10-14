@@ -842,50 +842,50 @@ V *vec_cmp(V *a, V *b, int op) {
 }
 V *table_filter(V *tbl, V *mask) {
     P(tbl->t != T_TABLE || mask->t != T_BVEC,v_err("bad filter"))
+    P(mask->n != tbl->n,v_err("table mask length mismatch"))
     int64_t nr = tbl->n, count=0;
-    int64_t rows = nr < mask->n ? nr : mask->n;
-    for(int64_t i=0;i<rows;i++) if(mask->B[i]) count++;
+    for(int64_t i=0;i<nr;i++) if(mask->B[i]) count++;
     int nc = tbl->keys->n;
     V *new_data = v_list(nc);
     for(int c=0;c<nc;c++) {
         V *col = tbl->vals->L[c];
         if(col->t == T_IVEC) {
             V *nc2 = v_ivec(count); int64_t j=0;
-            for(int64_t i=0;i<nr&&i<mask->n;i++) if(mask->B[i]) nc2->J[j++]=col->J[i];
+            for(int64_t i=0;i<nr;i++) if(mask->B[i]) nc2->J[j++]=col->J[i];
             new_data->L[c] = nc2;
         } else if(col->t == T_CVEC) {
             V *nc2 = v_cvec(count); int64_t j=0;
-            for(int64_t i=0;i<nr&&i<mask->n;i++) if(mask->B[i]) nc2->B[j++]=col->B[i];
+            for(int64_t i=0;i<nr;i++) if(mask->B[i]) nc2->B[j++]=col->B[i];
             new_data->L[c] = nc2;
         } else if(col->t == T_FVEC) {
             V *nc2 = v_fvec(count); int64_t j=0;
-            for(int64_t i=0;i<nr&&i<mask->n;i++) if(mask->B[i]) nc2->F[j++]=col->F[i];
+            for(int64_t i=0;i<nr;i++) if(mask->B[i]) nc2->F[j++]=col->F[i];
             new_data->L[c] = nc2;
         } else if(col->t == T_BVEC) {
             V *nc2 = v_bvec(count); int64_t j=0;
-            for(int64_t i=0;i<rows;i++) if(mask->B[i]) nc2->B[j++]=col->B[i];
+            for(int64_t i=0;i<nr;i++) if(mask->B[i]) nc2->B[j++]=col->B[i];
             new_data->L[c] = nc2;
         } else if(col->t == T_LIST) {
             V *nc2 = v_list(count); int64_t j=0;
-            for(int64_t i=0;i<nr&&i<mask->n;i++) if(mask->B[i]) nc2->L[j++]=v_ref(col->L[i]);
+            for(int64_t i=0;i<nr;i++) if(mask->B[i]) nc2->L[j++]=v_ref(col->L[i]);
             new_data->L[c] = nc2;
         } else if(col->t == T_IMAT || col->t == T_FMAT || col->t == T_BMAT || col->t == T_CMAT) {
             int64_t cols = mat_cols(col);
             if(col->t == T_IMAT) {
                 V *nc2 = v_imat(count, cols);
-                mat_filter_imat_rows(nc2->J, col->J, mask->B, rows, cols);
+                mat_filter_imat_rows(nc2->J, col->J, mask->B, nr, cols);
                 new_data->L[c] = nc2;
             } else if(col->t == T_FMAT) {
                 V *nc2 = v_fmat(count, cols);
-                mat_filter_fmat_rows(nc2->F, col->F, mask->B, rows, cols);
+                mat_filter_fmat_rows(nc2->F, col->F, mask->B, nr, cols);
                 new_data->L[c] = nc2;
             } else if(col->t == T_CMAT) {
                 V *nc2 = v_cmat(count, cols);
-                mat_filter_bmat_rows(nc2->B, col->B, mask->B, rows, cols);
+                mat_filter_bmat_rows(nc2->B, col->B, mask->B, nr, cols);
                 new_data->L[c] = nc2;
             } else {
                 V *nc2 = v_bmat(count, cols);
-                mat_filter_bmat_rows(nc2->B, col->B, mask->B, rows, cols);
+                mat_filter_bmat_rows(nc2->B, col->B, mask->B, nr, cols);
                 new_data->L[c] = nc2;
             }
         } else {

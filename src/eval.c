@@ -67,6 +67,42 @@ static V *table_set_col(V *obj, const char *name, V **valp) {
     }
     return v_nil();
 }
+/* x[i] op= d (x[r, c] op= d on a matrix, cell the column index c, else NULL) for a list,
+ * vector or matrix x: the item becomes `x[i] op d`, stored as x[i]: … stores it. The caller has
+ * counted the indices against x's type and worked out the indices and d, none of them an
+ * error; this looks at the type again, since they can call a function that changes it. NULL
+ * when materializing a mapped column fails. */
+static V *aug_assign_item(V *obj, V *idx, V *cell, V *delta, int op) {
+    int list = obj->t == T_LIST || is_vec_t(obj->t) || is_mat_t(obj->t);
+    if (cell && !is_mat_t(obj->t))
+        return v_errf("cannot assign to %s with 2 indices", type_name(obj->t));
+    if (!list && obj->t != T_TABLE) return v_errf("cannot assign to an item of %s", type_name(obj->t));
+    /* t["a"] reads a column, but op= on it is refused, as through a dot (t.a += 1) */
+    if (obj->t == T_TABLE && idx->t == T_STR) return v_err("bad augmented assignment target");
+    if (!list || (idx->t != T_INT && idx->t != T_CHAR))
+        return v_errf("cannot index type %s with type %s", type_name(obj->t), type_name(idx->t));
+    if (cell && cell->t != T_INT && cell->t != T_CHAR)
+        return v_errf("cannot index type %s with type %s", type_name(obj->t), type_name(cell->t));
+    V *row = NULL;
+    int64_t i = idx->j < 0 ? idx->j + obj->n : idx->j, c = i;
+    V *at = obj;
+    if (cell) {
+        row = v_list_item(obj, i);
+        if (!row) return v_err("index out of range");
+        at = row;
+        c = cell->j < 0 ? cell->j + row->n : cell->j;
+    }
+    V *cur = v_list_item(at, c);
+    if (!cur) { if (row) v_free(row); return v_err("index out of range"); }
+    V *nv = vec_binop(cur, delta, op);
+    v_free(cur);
+    if (nv->t == T_ERR) { if (row) v_free(row); return nv; }
+    int rc = v_list_set(at, c, nv);
+    if (rc == 0 && row) rc = v_list_set(obj, i, row);
+    v_free(nv);
+    if (row) v_free(row);
+    return rc == -2 ? NULL : v_nil();
+}
 #define FSTR_FMT_MAX_FIELD 100
 static int fstr_fmt_field(const char **pp) {
     const char *p = *pp;
@@ -1377,18 +1413,42 @@ V *eval(Node *n, Env *e) {
         }
         if(target->type == N_INDEX) {
             V *obj = eval(target->ch[0], e);
+            if (obj->t == T_ERR) return obj;
+            /* too many indices is an error before v is worked out; otherwise the
+               indices and v are worked out, in order, before the item is read, and the
+               first error among them is given back, with nothing after it worked out */
+            if (target->nch > 3 || (target->nch == 3 && !is_mat_t(obj->t))) {
+                const char *tn = type_name(obj->t);
+                v_free(obj);
+                return too_many_indices(tn, target, e);
+            }
             V *idx = eval(target->ch[1], e);
+            if (idx->t == T_ERR) { v_free(obj); return idx; }
+            V *cell = NULL;
+            if (target->nch == 3) {
+                cell = eval(target->ch[2], e);
+                if (cell->t == T_ERR) { v_free(obj); v_free(idx); return cell; }
+            }
             V *delta = eval(n->ch[1], e);
-            if(obj->t==T_DICT && idx->t==T_STR) {
-                V *cur = v_dict_get(obj, idx->s);
-                if(cur) {
-                    V *newval = vec_binop(cur, delta, n->op);
-                    v_dict_set(obj, idx->s, newval);
-                    v_free(newval);
+            if (delta->t == T_ERR) { v_free(obj); v_free(idx); if (cell) v_free(cell); return delta; }
+            V *res = NULL;
+            if(obj->t==T_DICT) {
+                if(idx->t==T_STR) {
+                    V *cur = v_dict_get(obj, idx->s);
+                    if(cur) {
+                        V *newval = vec_binop(cur, delta, n->op);
+                        v_dict_set(obj, idx->s, newval);
+                        v_free(newval);
+                    }
                 }
+                res = v_nil();
+            } else {
+                res = aug_assign_item(obj, idx, cell, delta, n->op);
+                if (!res) return assign_map_oom(obj, idx, cell, delta);
             }
             v_free(obj); v_free(idx); v_free(delta);
-            return v_nil();
+            if (cell) v_free(cell);
+            return res;
         }
         return v_err("bad augmented assignment target");
     }

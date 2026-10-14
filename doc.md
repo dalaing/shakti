@@ -365,9 +365,17 @@ three on a matrix, `m[0, 1, 2]: 3`), or an item of something that holds none
 (`n.k: 1`). An error value put into a vector or matrix (`x: 1 2; x[0]: 1/0`) is given back,
 since it isn't stored.
 
+`x[i] op= v` (`x[i] += 1`, `m[r, c] *= 2`) sets the item to `x[i] op v` as `x[i]: v` sets it,
+on a list, vector or matrix, and is an error value where `x[i]: v` or the op would be one; an op
+that fails stores nothing. `x`, the indices and `v` are worked out in that order, before the
+item is read, and an error in one is given back with nothing after it worked out:
+`x[1/0] += f()` doesn't call `f`, and `x[0] += 1/0` (or `d["a"] += 1/0` on a dict) is
+`division by zero`, with nothing changed. On a table's column (`t["a"] += 1`) it is the error
+value `bad augmented assignment target`, as `t.a += 1` is.
+
 In a dict, `d["k"]: v` sets key `k`, an int `d[i]: v` sets the value at position `i` if there is
-one, and any other key does nothing, with no error; two indices (`d["a", 1]: 2`) are an error
-value, as above.
+one, and any other key does nothing, with no error; `d["k"] op= v` updates key `k` if it is
+there and does nothing otherwise. Two indices (`d["a", 1]: 2`) are an error value, as above.
 
 A list can hold itself, and lists can hold each other: `x[0]: x` and `x.append([x])` make `x`
 hold itself, and `a.append(b)` then `b.append(a)` make `a` and `b` hold each other.

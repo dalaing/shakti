@@ -69,7 +69,7 @@ static int import_name_safe(const char *name) {
         if (*p == '/' || *p == '\\') return 0;
     return 1;
 }
-V *do_import(const char *name, Env *e) {
+static V *import_module(const char *name, Env *e) {
     P(!name || !name[0],v_err("import requires a module name"))
     if (!import_name_safe(name))
         return v_err("import: module name must be a relative identifier");
@@ -170,4 +170,24 @@ V *do_import(const char *name, Env *e) {
     v_free(mod_dict);
     env_free(mod_env);
     return v_nil();
+}
+/* The modules being imported, innermost first. A module that imports itself, directly or through
+ * others, would otherwise run again and again until the C stack is gone: that import raises
+ * instead, so the error reaches the import that began the cycle (as a module's parse error does). */
+typedef struct ImportFrame { const char *name; struct ImportFrame *up; } ImportFrame;
+static ImportFrame *import_stack;
+V *do_import(const char *name, Env *e) {
+    for (ImportFrame *p = import_stack; p && name; p = p->up)
+        if (!strcmp(p->name, name)) {
+            V *err = v_errf("import: circular import of '%s'", name);
+            if (g_error_val) v_free(g_error_val);
+            g_error = 1;
+            g_error_val = v_ref(err);
+            return err;
+        }
+    ImportFrame self = { name, import_stack };
+    import_stack = &self;
+    V *r = import_module(name, e);
+    import_stack = self.up;
+    return r;
 }

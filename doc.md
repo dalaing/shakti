@@ -555,6 +555,9 @@ delete from u where id = 2
 | `rest` | [REST module](#rest-module) | `rest_demo.ie` |
 | `ws` | [WebSocket module](#websocket-module) | |
 
+A module that imports itself, directly or through other modules, is an error: the import that
+began the cycle raises `import: circular import of 'm'`.
+
 Index: [examples index](#examples-index).
 
 ---

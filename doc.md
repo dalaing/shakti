@@ -178,6 +178,11 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 ## Core syntax
 
 - **Bind** with `:` — `x: 1`, `a, b: (1, 2)`, `def f(n:2):`, `table(a:[1])`
+- `a, b: v` binds each name to an item of `v`, a list or vector with one item per name.
+  Any other value gives the error value `cannot unpack <type>` (`a, b: "xy"` gives
+  `cannot unpack str`), a list or vector of another length gives
+  `expected 2 values, got 1` or the like, and a target that is not a name (`a, l[0]: v`)
+  gives `bad assignment target`; no name is bound then
 - **Compare** with `=` — `if x = 1:`, `while i < len(s):`
 - Dict literals and slices keep `:` — `{k: v}`, `a[1:3]`
 - `==` is not supported

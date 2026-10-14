@@ -1430,17 +1430,30 @@ V *eval(Node *n, Env *e) {
         Node *target = n->ch[0];
         V *val = eval(n->ch[1], e);
         if(g_error) { v_free(val); return v_nil(); }
-        if(target->type == N_LIST && (val->t==T_LIST||val->t==T_IVEC||val->t==T_FVEC||val->t==T_CVEC)) {
-            for(int i=0; i<target->nch && i<val->n; i++) {
-                if(target->ch[i]->type == N_NAME) {
-                    V *elem;
-                    if(val->t==T_LIST) elem=val->L[i];
-                    else if(val->t==T_IVEC) elem=v_int(val->J[i]);
-                    else if(val->t==T_CVEC) elem=v_char(val->B[i]);
-                    else elem=v_float(val->F[i]);
-                    env_set(e, target->ch[i]->sval, elem);
-                    if(val->t!=T_LIST) v_free(elem);
-                }
+        if(target->type == N_LIST) {
+            /* a, b : v binds each name to an item of the list or vector v */
+            if(val->t == T_ERR) return val;   /* a, b : 1/0 gives the division error */
+            for(int i=0; i<target->nch; i++)
+                if(target->ch[i]->type != N_NAME) { v_free(val); return v_err("bad assignment target"); }
+            if(!(val->t==T_LIST||val->t==T_IVEC||val->t==T_FVEC||val->t==T_CVEC||val->t==T_BVEC)) {
+                V *r = v_errf("cannot unpack %s", type_name(val->t));
+                v_free(val);
+                return r;
+            }
+            if(val->n != target->nch) {
+                V *r = v_errf("expected %d values, got %lld", target->nch, (long long)val->n);
+                v_free(val);
+                return r;
+            }
+            for(int i=0; i<target->nch; i++) {
+                V *elem;
+                if(val->t==T_LIST) elem=val->L[i];
+                else if(val->t==T_IVEC) elem=v_int(val->J[i]);
+                else if(val->t==T_CVEC) elem=v_char(val->B[i]);
+                else if(val->t==T_BVEC) elem=v_bool(val->B[i] != 0);
+                else elem=v_float(val->F[i]);
+                env_set(e, target->ch[i]->sval, elem);
+                if(val->t!=T_LIST) v_free(elem);
             }
             v_free(val);
             return v_nil();

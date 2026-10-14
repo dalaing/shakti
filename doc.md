@@ -1354,6 +1354,8 @@ curl -s -H 'Content-Type: application/json' \
   http://127.0.0.1:8080/rpc
 ```
 
+A handler that raises, or stops on an error, is answered as one that returns an error value: `handle_rpc` with JSON-RPC error `-32603`, `handle_request` with **500**, both `internal error` (`SHAKTI_SERVE_DEBUG=1` logs the message to stderr). The daemon goes on to the next request.
+
 Not available in WASM builds.
 
 ---

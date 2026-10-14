@@ -20,15 +20,18 @@
 # save sync:"full"|"data"|"none" (default full)
 # dumps/loads blobs are list[char]. Default write version is 2.
 
+def _number(v):
+    return type(v) = "int" or type(v) = "float" or type(v) = "bool"
+
 def save(x, path, direct:-1, codec:"", level:3, format:0, codecs:"", sync:"full"):
     d : direct
-    if d = -1:
+    if _number(d) and d = -1:
         d : "auto"
     c : codec
     fmt : format
     cs : codecs
     if type(cs) = "dict":
-        if fmt = 0:
+        if _number(fmt) and fmt = 0:
             fmt : 3
         return iefs_save(x, path, d, c, level, fmt, cs, sync)
     return iefs_save(x, path, d, c, level, fmt, [], sync)
@@ -37,7 +40,7 @@ def load(path):
     return iefs_load(path)
 
 def map(path, pages:"thp", device:"", columns:[]):
-    if device = "gpu":
+    if type(device) = "str" and device = "gpu":
         return iefs_map(path, pages, device)
     if type(columns) = "list" and len(columns) > 0:
         return iefs_map(path, pages, device, columns)
@@ -46,11 +49,11 @@ def map(path, pages:"thp", device:"", columns:[]):
 def dumps(x, codec:"", level:3, format:0, codecs:""):
     if type(codecs) = "dict":
         fmt : format
-        if fmt = 0:
+        if _number(fmt) and fmt = 0:
             fmt : 3
         return iefs_dumps(x, codec, level, fmt, codecs)
-    if format = 0:
-        if codec = "":
+    if _number(format) and format = 0:
+        if type(codec) = "str" and codec = "":
             return iefs_dumps(x)
         return iefs_dumps(x, codec, level)
     return iefs_dumps(x, codec, level, format)

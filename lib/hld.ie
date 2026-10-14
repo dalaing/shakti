@@ -10,7 +10,7 @@
 # Blobs are list[char].
 
 def encode(x, codec:"", level:3):
-    if codec = "":
+    if type(codec) = "str" and codec = "":
         return hld_encode(x)
     return hld_encode(x, codec, level)
 

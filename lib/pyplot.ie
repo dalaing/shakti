@@ -84,7 +84,7 @@ def _parse_color(c):
         return c
     if type(c) = "float":
         return int(c)
-    if c = "":
+    if type(c) != "str" or c = "":
         return _COLORS["C0"]
     if c in _COLORS:
         return _COLORS[c]
@@ -99,7 +99,7 @@ def _next_color():
     return name
 
 def _resolve_color(color):
-    if color = "":
+    if type(color) = "str" and color = "":
         return _parse_color(_next_color())
     return _parse_color(color)
 
@@ -351,13 +351,13 @@ def _draw_series(lim):
                 i : i + 1
 
 def _draw_labels(fg, muted):
-    if not (_fig["title"] = ""):
+    if type(_fig["title"]) = "str" and not (_fig["title"] = ""):
         tw : gfx.text_width(_fig["title"], 2)
         gfx.text((_W - tw) // 2, 10, _fig["title"], fg, 2)
-    if not (_fig["xlabel"] = ""):
+    if type(_fig["xlabel"]) = "str" and not (_fig["xlabel"] = ""):
         tw : gfx.text_width(_fig["xlabel"])
         gfx.text((_X0 + _X1 - tw) // 2, _H - 18, _fig["xlabel"], muted, 1)
-    if not (_fig["ylabel"] = ""):
+    if type(_fig["ylabel"]) = "str" and not (_fig["ylabel"] = ""):
         y : _Y0 + 8
         for ch in _fig["ylabel"]:
             gfx.text(12, y, ch, muted, 1)
@@ -370,10 +370,11 @@ def _draw_legend(fg):
     ly : _Y0 + 8
     for s in _fig["series"]:
         lab : s["label"]
-        if lab = "":
+        if type(lab) = "str" and lab = "":
             lab : s["kind"]
         gfx.fill_rect(lx, ly, 10, 10, s["color"])
-        gfx.text(lx + 14, ly, lab, fg, 1)
+        if type(lab) = "str":
+            gfx.text(lx + 14, ly, lab, fg, 1)
         ly : ly + 14
 
 def draw():

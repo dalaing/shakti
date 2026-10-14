@@ -164,7 +164,16 @@ static void http_respond(int fd, int code, const char *status,
 static V *server_invoke_fn(V *fn, V **args, int nargs) {
     if (!fn || fn->t != T_FN)
         return v_err("not callable");
-    return shakti_call_fn(fn, NULL, args, nargs, NULL, NULL, 0, fn->closure);
+    V *result = shakti_call_fn(fn, NULL, args, nargs, NULL, NULL, 0, fn->closure);
+    /* A raise in the handler, or any other error that stopped it (a failed insert, say), is
+       answered as that error, and cleared so the daemon serves the next request. */
+    if (g_error) {
+        g_error = 0;
+        v_free(result);
+        result = g_error_val ? g_error_val : v_err("error");
+        g_error_val = NULL;
+    }
+    return result;
 }
 
 typedef struct {

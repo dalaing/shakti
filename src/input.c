@@ -550,6 +550,7 @@ V *input_poll_ms(int ms) {
 
 V *input_wait_ms(int64_t ms) {
     input_hub_init();
+    if (ms > INT_MAX) ms = INPUT_WAIT_FOREVER; /* a timeout no int holds waits as a negative one does */
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
     if (is_tty() && (ms < 0 || ms == INPUT_WAIT_FOREVER)) raw_wait_first();
     else if (is_tty()) raw_on();

@@ -1936,10 +1936,13 @@ static V *bi_input(V **a, in) {
         int64_t m = a[0]->j;
         if (m == 1) return v_input_stream(INPUT_STREAM_RAW, NULL);
         if (m == 2) return v_input_stream(INPUT_STREAM_KEY, NULL);
+        /* a timeout no int holds waits for the first event, as NaN does */
+        if (m < INT_MIN || m > INT_MAX) return input_wait_ms(INPUT_WAIT_FOREVER);
         return input_poll_ms((int)m);
     }
     if (n > 0 && a[0]->t == T_FLOAT) {
-        if (a[0]->f != a[0]->f || a[0]->f >= 1e30) return input_wait_ms(INPUT_WAIT_FOREVER);
+        /* NaN, or a timeout no int holds, waits for the first event */
+        if (!float_fits_int(a[0]->f)) return input_wait_ms(INPUT_WAIT_FOREVER);
         return input_poll_ms((int)a[0]->f);
     }
     return input_readline("");
@@ -1956,8 +1959,9 @@ static V *bi_wait(V **a, in) {
         return input_wait_ms(a[0]->j);
     }
     if (a[0]->t == T_FLOAT) {
-        if (a[0]->f != a[0]->f || a[0]->f >= 1e30) return input_wait_ms(INPUT_WAIT_FOREVER);
-        return input_wait_ms((int64_t)a[0]->f);
+        /* NaN, or a timeout no int holds, waits for the first event, as a negative one does */
+        if (!float_fits_int(a[0]->f)) return input_wait_ms(INPUT_WAIT_FOREVER);
+        return input_wait_ms((int)a[0]->f);
     }
     return input_wait_ms(0);
 }

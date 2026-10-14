@@ -980,37 +980,38 @@ static char *param_name(const char *star, const char *name) {
     memcpy(s + ls, name, ln + 1);
     return s;
 }
+/* One parameter: `name`, `name: default`, `*name` or `**name`, kept as the parameter's name,
+   stars and all. `*name` takes the rest of the positional arguments, so it has no default, and a
+   def has at most one (nrest counts them). */
+static void parse_param(Lexer *l, Node *params, Node *defaults, int *nrest) {
+    const char *star = "";
+    if(lex_peek(l).type == T_STAR_) { lex_next(l); star = "*"; }
+    else if(lex_peek(l).type == T_DSTAR_) { lex_next(l); star = "**"; }
+    Token p = lex_next(l);
+    Node *pn = node_new(N_NAME); pn->sval = param_name(star, p.sval);
+    node_add(params, pn);
+    int rest = !strcmp(star, "*");
+    if(rest && (*nrest)++)
+        parse_fail("parse error: a second *name parameter (*%s)", p.sval);
+    if(lex_peek(l).type == T_COLON_) {
+        lex_next(l); node_add(defaults, parse_expr(l));
+        if(rest) parse_fail("parse error: *%s takes the rest of the arguments: it has no default", p.sval);
+    } else {
+        node_add(defaults, NULL);   /* no default (a default of None is a None node) */
+    }
+}
 static Node *parse_def(Lexer *l) {
     Token name = lex_next(l);
     expect(l, T_LPAREN_);
     Node *params = node_new(N_LIST);
     Node *defaults = node_new(N_LIST);
+    int nrest = 0;
     if(lex_peek(l).type != T_RPAREN_) {
-        const char *star = "";
-        if(lex_peek(l).type == T_STAR_) { lex_next(l); star = "*"; }
-        else if(lex_peek(l).type == T_DSTAR_) { lex_next(l); star = "**"; }
-        Token p = lex_next(l);
-        Node *pn = node_new(N_NAME); pn->sval = param_name(star, p.sval);
-        node_add(params, pn);
-        if(lex_peek(l).type == T_COLON_) {
-            lex_next(l); node_add(defaults, parse_expr(l));
-        } else {
-            node_add(defaults, NULL);   /* no default (a default of None is a None node) */
-        }
+        parse_param(l, params, defaults, &nrest);
         while(lex_peek(l).type == T_COMMA_) {
             lex_next(l);
             if(lex_peek(l).type == T_RPAREN_) break;
-            star = "";
-            if(lex_peek(l).type == T_STAR_) { lex_next(l); star = "*"; }
-            else if(lex_peek(l).type == T_DSTAR_) { lex_next(l); star = "**"; }
-            p = lex_next(l);
-            pn = node_new(N_NAME); pn->sval = param_name(star, p.sval);
-            node_add(params, pn);
-            if(lex_peek(l).type == T_COLON_) {
-                lex_next(l); node_add(defaults, parse_expr(l));
-            } else {
-                node_add(defaults, NULL);
-            }
+            parse_param(l, params, defaults, &nrest);
         }
     }
     expect(l, T_RPAREN_);

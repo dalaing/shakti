@@ -178,6 +178,15 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 ## Core syntax
 
 - **Bind** with `:` — `x: 1`, `a, b: (1, 2)`, `def f(n:2):`, `table(a:[1])`
+- `def f(a, *rest):` — `*rest` takes the remaining positional arguments, as a
+  `list` (`f(0, 1, 2.5)` gives `rest` as `[1, 2.5]`); parameters after `*rest`
+  are passed by name. A def has at most one `*name`, with no default
+- `def f(a, **kw):` — `**kw` takes the keyword arguments, as a dict
+  (`f(1, b: 2)` gives `kw` as `{"b": 2}`); a keyword that names a parameter is
+  in `kw` too, and binds that parameter
+- `f(*xs)` spreads a list, vector or matrix (by rows) into positional arguments:
+  `add3(*[1, 2, 3])`, `g(*[1, 2], 3)`, `len(*["abc"])`; anything else is the
+  error `cannot unpack non-sequence`
 - **Compare** with `=` — `if x = 1:`, `while i < len(s):`
 - Dict literals and slices keep `:` — `{k: v}`, `a[1:3]`
 - `==` is not supported

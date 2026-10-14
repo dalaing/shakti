@@ -46,28 +46,28 @@ def put_json(url, obj):
     return rest_put(url, json_dumps(obj), "application/json")
 
 def post_iefs(url, obj, codec:"", level:3):
-    if codec = "":
+    if type(codec) = "str" and codec = "":
         blob : iefs_dumps(obj)
     else:
         blob : iefs_dumps(obj, codec, level)
     return rest_post(url, blob, "application/iefs")
 
 def put_iefs(url, obj, codec:"", level:3):
-    if codec = "":
+    if type(codec) = "str" and codec = "":
         blob : iefs_dumps(obj)
     else:
         blob : iefs_dumps(obj, codec, level)
     return rest_put(url, blob, "application/iefs")
 
 def post_hld(url, obj, codec:"", level:3):
-    if codec = "":
+    if type(codec) = "str" and codec = "":
         blob : hld_encode(obj)
     else:
         blob : hld_encode(obj, codec, level)
     return rest_post(url, blob, "application/x-hld")
 
 def put_hld(url, obj, codec:"", level:3):
-    if codec = "":
+    if type(codec) = "str" and codec = "":
         blob : hld_encode(obj)
     else:
         blob : hld_encode(obj, codec, level)
@@ -115,14 +115,14 @@ def respond_json(conn, status, obj):
     return rest_write(conn, status, json_dumps(obj), "application/json")
 
 def respond_iefs(conn, status, obj, codec:"", level:3):
-    if codec = "":
+    if type(codec) = "str" and codec = "":
         blob : iefs_dumps(obj)
     else:
         blob : iefs_dumps(obj, codec, level)
     return rest_write(conn, status, blob, "application/iefs")
 
 def respond_hld(conn, status, obj, codec:"", level:3):
-    if codec = "":
+    if type(codec) = "str" and codec = "":
         blob : hld_encode(obj)
     else:
         blob : hld_encode(obj, codec, level)

@@ -42,7 +42,7 @@ def _check(resp):
     raise "discord HTTP " + str(rest.status(resp)) + ": " + body
 
 def request(method, path, body:""):
-    if body = "":
+    if type(body) = "str" and body = "":
         return _check(rest.request(method, _url(path), "", "", _headers()))
     return _check(rest.request(method, _url(path), body, "application/json", _headers()))
 
@@ -125,7 +125,7 @@ def remove_role(guild_id, user_id, role_id):
 
 def create_role(guild_id, name, permissions:""):
     body : {"name": name}
-    if not (permissions = ""):
+    if not (type(permissions) = "str" and permissions = ""):
         body["permissions"] : permissions
     return post_json("/guilds/" + str(guild_id) + "/roles", body)
 

@@ -613,22 +613,19 @@ V *input_stream_next(V *stream) {
     if (stream->j == INPUT_STREAM_LINE) {
         return input_readline(stream->s ? stream->s : "");
     }
+    if (stream->j != INPUT_STREAM_RAW && stream->j != INPUT_STREAM_KEY) return v_nil();
+    /* a terminal key queues a character event, a key down and a key up (input(ms) gives all
+       three), a window key its key down and up: input(1) gives each key down's text, input(2)
+       each key down and up */
     InputEvent ev;
-    if (!stream_wait_event(&ev)) return v_nil();
-    if (stream->j == INPUT_STREAM_RAW) {
-        if (ev.kind == EV_CHAR) return v_str(ev.utf8);
-        if (ev.utf8[0]) return v_str(ev.utf8);
-        return v_str("");
-    }
-    if (stream->j == INPUT_STREAM_KEY) {
-        if (ev.kind == EV_CHAR) {
-            const char *kind = "down";
+    for (;;) {
+        if (!stream_wait_event(&ev)) return v_nil();
+        if (stream->j == INPUT_STREAM_RAW && ev.kind == EV_KEY_DOWN) return v_str(ev.utf8);
+        if (stream->j == INPUT_STREAM_KEY && ev.kind != EV_CHAR) {
+            const char *kind = ev.kind == EV_KEY_UP ? "up" : "down";
             return input_event_dict(ev.code, ev.modifiers, ev.utf8, kind);
         }
-        const char *kind = ev.kind == EV_KEY_UP ? "up" : "down";
-        return input_event_dict(ev.code, ev.modifiers, ev.utf8, kind);
     }
-    return v_nil();
 }
 
 int input_hub_read_char(char *out) {

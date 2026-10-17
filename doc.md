@@ -468,6 +468,7 @@ CSV/TSV/XML load and CSV/TSV save do **not** round-trip matrix columns as typed 
 ```ie
 d : dict(a:1, b:2)
 t : table(a:[1, 2], b:[3, 4])
+u : t[t.a > 1]    # rows where the bool mask is true; a mask whose length is not the table's row count is an error value
 t : table(a:1 2, b:3 4)
 t : table(a:1 2; b:3 4)
 k : ktable(a:1, b:2)
@@ -580,6 +581,8 @@ insert into u (id, name) values (1, "ada")
 update name : "ADA" from u where id = 1
 delete from u where id = 2
 ```
+
+A bool mask in `where` has one item per row of the table; a mask of another length is an error value.
 
 `by col1, col2` groups and sorts ascending. No separate `group by` / `order by`. Prefer core `,` / `union` / `outer` table joins (see [Table joins](#table-joins----union--outer)); SQL `t1 join t2 on col` is not yet implemented.
 

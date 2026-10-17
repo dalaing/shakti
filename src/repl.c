@@ -201,8 +201,8 @@ static void hl_render(const char *s, int len) {
             }
             printf(HL_RST); continue;
         }
-        if(isalpha(c)||c=='_') {
-            int p0=i; while(i<len&&(isalnum(s[i])||s[i]=='_'))i++;
+        if(isalpha((unsigned char)c)||c=='_') {
+            int p0=i; while(i<len&&(isalnum((unsigned char)s[i])||s[i]=='_'))i++;
             char w[256]; int wl=i-p0; if(wl>=(int)sizeof(w))wl=sizeof(w)-1;
             memcpy(w,s+p0,wl); w[wl]=0;
             if(hl_in(w,HL_KWS))       printf(HL_KW "%s" HL_RST,w);
@@ -256,11 +256,16 @@ static void hl_raw_on(void){
     tcsetattr(STDIN_FILENO,TCSAFLUSH,&r);
     hl_raw=1;
 }
+/* The line is UTF-8: a character is its first byte and the continuation bytes (10xxxxxx) after
+ * it, and takes one column (input_utf8_cols). */
+static int hl_cont(char c){return ((unsigned char)c&0xc0)==0x80;}
+static int hl_prev(const char *s,int pos){do pos--;while(pos>0&&hl_cont(s[pos]));return pos;}
+static int hl_next(const char *s,int len,int pos){do pos++;while(pos<len&&hl_cont(s[pos]));return pos;}
 static void hl_redraw(const char *prompt, const char *buf, int len, int pos) {
-    int plen=(int)strlen(prompt);
+    int col=input_utf8_cols(prompt,(int)strlen(prompt))+input_utf8_cols(buf,pos);
     printf("\r\033[K%s",prompt);
     hl_render(buf,len);
-    if(plen+pos>0) printf("\r\033[%dC",plen+pos);
+    if(col>0) printf("\r\033[%dC",col);
     else printf("\r");
     fflush(stdout);
 }
@@ -292,8 +297,8 @@ static char *hl_readline(const char *prompt, int nsp) {
         if(c=='\r'||c=='\n'){buf[len]=0;printf("\r\n");fflush(stdout);hl_raw_off();hl_hadd(buf);return buf;}
         if(c==3){len=pos=0;printf("\r\n%s",prompt);fflush(stdout);continue;}
         /* ^D: empty line is EOF; otherwise delete-forward — github.com/llelf */
-        if(c==4){if(len==0){printf("\r\n");hl_raw_off();return NULL;}if(pos<len){memmove(buf+pos,buf+pos+1,len-pos-1);len--;}else continue;}
-        else if(c==127||c==8){if(pos>0){memmove(buf+pos-1,buf+pos,len-pos);pos--;len--;}}
+        if(c==4){if(len==0){printf("\r\n");hl_raw_off();return NULL;}if(pos<len){int q=hl_next(buf,len,pos);memmove(buf+pos,buf+q,len-q);len-=q-pos;}else continue;}
+        else if(c==127||c==8){if(pos>0){int p=hl_prev(buf,pos);memmove(buf+p,buf+pos,len-pos);len-=pos-p;pos=p;}}
         else if(c==1){pos=0;}
         else if(c==5){pos=len;}
         else if(c==21){memmove(buf,buf+pos,len-pos);len-=pos;pos=0;}
@@ -315,17 +320,17 @@ static char *hl_readline(const char *prompt, int nsp) {
                 case 'A':if(hidx>0){hidx--;strncpy(buf,hl_hist[hidx],sizeof(buf)-1);len=(int)strlen(buf);pos=len;}break;
                 case 'B':if(hidx<hl_hlen-1){hidx++;strncpy(buf,hl_hist[hidx],sizeof(buf)-1);len=(int)strlen(buf);pos=len;}
                          else{hidx=hl_hlen;buf[0]=0;len=pos=0;}break;
-                case 'C':if(pos<len)pos++;break;
-                case 'D':if(pos>0)pos--;break;
+                case 'C':if(pos<len)pos=hl_next(buf,len,pos);break;
+                case 'D':if(pos>0)pos=hl_prev(buf,pos);break;
                 case 'H':pos=0;break;
                 case 'F':pos=len;break;
-                case '3':hl_read_char(&sq[2]);if(pos<len){memmove(buf+pos,buf+pos+1,len-pos-1);len--;}break;
+                case '3':hl_read_char(&sq[2]);if(pos<len){int q=hl_next(buf,len,pos);memmove(buf+pos,buf+q,len-q);len-=q-pos;}break;
                 case '1':case '7':hl_read_char(&sq[2]);pos=0;break;
                 case '4':case '8':hl_read_char(&sq[2]);pos=len;break;
                 }
             }
         }
-        else if(c>=32&&len+1<(int)sizeof(buf)){memmove(buf+pos+1,buf+pos,len-pos);buf[pos]=c;pos++;len++;}
+        else if((unsigned char)c>=32&&len+1<(int)sizeof(buf)){memmove(buf+pos+1,buf+pos,len-pos);buf[pos]=c;pos++;len++;}
         else continue;
         buf[len]=0;
         hl_redraw(prompt,buf,len,pos);

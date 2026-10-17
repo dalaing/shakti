@@ -528,6 +528,10 @@ wait(-1)                    # block until first event
 | `input("prompt")` | Stream of lines |
 | `input_set_own_gui(1)` | Synth window keys go to hub only (see [synth module](#synth-module)) |
 
+In a terminal, `readline`, `input()` and `input("prompt")` read a line with a small line editor.
+In a UTF-8 terminal the line is UTF-8 text (a typed `é` is two bytes of the `str`), and Backspace
+deletes a whole character, as in the REPL.
+
 ## SQL
 
 Run `import sql` first — see [sql module](#sql-module). Example: `sql_demo.ie`.

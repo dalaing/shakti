@@ -24,6 +24,7 @@ V *input_stream_next(V *stream);
 
 int input_hub_read_char(char *out);
 char *input_hub_readline_repl(const char *prompt);
+int input_utf8_cols(const char *s, int n);
 
 void input_hub_inject_key(int code, int modifiers, const char *utf8, int down);
 void input_hub_inject_mouse(int x, int y, int buttons);

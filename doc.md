@@ -637,6 +637,9 @@ j : t join u on id
 | Insert | `insert into name (cols...) values (...)` |
 | Join | `t1 join t2 on col` *(not yet implemented)* |
 
+`insert` names each column at most once: `insert into u (id, id) values (1, 2)` is
+`insert: column 'id' named more than once`, and inserts nothing.
+
 `by col1, col2` groups and sorts ascending. There is no separate `group by` / `order by` clause.
 
 See also [syntax and builtins](#syntax-and-builtins) for tables, `load("file.csv")`, and matrix types.

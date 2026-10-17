@@ -52,7 +52,10 @@ def drain_midi():
         elif t = "cc":
             apply_cc(ev["cc"], ev["val"])
 
-print("backend:", midi.backend())
+assert(type(synth.alive()) != "error", "synth not available (build with SHAKTI_SYNTH=1)")
+backend : midi.backend()
+assert(type(backend) != "error" and backend != "none", "midi not available (needs SHAKTI_MIDI=1 and ALSA or CoreMIDI)")
+print("backend:", backend)
 midi.open()
 print("ports:")
 for p in midi.list():

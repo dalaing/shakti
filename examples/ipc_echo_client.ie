@@ -3,6 +3,7 @@ import ipc
 
 port : 19090
 c : ipc.connect("127.0.0.1", port)
+assert(type(c) != "error", "cannot connect (is examples/ipc_echo.ie running?): " + str(c))
 ipc.send(c, "hello from client")
 msg : ipc.recv(c)
 print("reply:", msg)

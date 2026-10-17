@@ -385,8 +385,10 @@ static int vt_nav_code(unsigned char final) {
     }
 }
 
+/* the size of the buffer each caller of decode_vt_byte keeps a partly read escape sequence in */
+enum { PENDING_MAX = 16 };
+
 static int decode_vt_byte(unsigned char c, unsigned char *pending, int *pn) {
-    enum { PENDING_MAX = 16 };
     if (*pn == 0 && c == 27) {
         pending[0] = c;
         *pn = 1;
@@ -469,7 +471,7 @@ static void tty_drain(int timeout_ms) {
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
     if (!g_in.raw && is_tty()) raw_on();
 #endif
-    unsigned char pending[8];
+    unsigned char pending[PENDING_MAX];
     int pn = 0;
     double deadline = timeout_ms <= 0 ? now_ms() : now_ms() + (double)timeout_ms;
     for (;;) {
@@ -634,7 +636,7 @@ int input_hub_read_char(char *out) {
     }
     unsigned char c;
     if (!read_byte_timed(-1, &c)) return 0;
-    unsigned char pending[8];
+    unsigned char pending[PENDING_MAX];
     int pn = 0;
     decode_vt_byte(c, pending, &pn);
     if (q_pop(&ev)) {

@@ -2220,6 +2220,34 @@ V *bi_ipc_close(V **a, int n) {
     return v_nil();
 }
 
+/* Close a shm_open token: unmap it and remove its name and lock file (ipc_shm_unlock). */
+static void shm_token_close(int slot) {
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(SHAKTI_WASM)
+    munmap(g_shm[slot].ptr, g_shm[slot].size);
+    ipc_shm_unlock(g_shm[slot].name, g_shm[slot].lock_path, g_shm[slot].lock_fd, 1);
+#endif
+    memset(&g_shm[slot], 0, sizeof g_shm[slot]);
+}
+
+/* At exit, close the shared-memory rings and tokens still open, as ipc.close and ipc.shm_close
+   do: a name this process made goes with it, with its lock file, and a ring it attached to gets
+   its side or reader slot back. A process ended by a signal (Ctrl-C and SIGTERM too: none is
+   caught) leaves them; its names are replaced by the next create (its locks went with it). */
+static void shm_close_all(void) {
+    for (int i = 1; i < IPC_MAX_HANDLES; i++) {
+        if (g_handles[i].in_use && g_handles[i].kind == IPC_KIND_SHM_CHAN) ipc_free_handle(i);
+        if (g_shm[i].in_use) shm_token_close(i);
+    }
+}
+
+static void shm_close_at_exit(void) {
+    static int registered;
+    if (!registered) {
+        registered = 1;
+        atexit(shm_close_all);
+    }
+}
+
 V *bi_ipc_shm_open(V **a, int n) {
     P(n < 2 || a[0]->t != T_STR || a[1]->t != T_INT, v_err("ipc_shm_open(name, size)"))
 #if defined(SHAKTI_WASM) || (!defined(__linux__) && !defined(__APPLE__))
@@ -2272,6 +2300,7 @@ V *bi_ipc_shm_open(V **a, int n) {
         memset(&g_shm[slot], 0, sizeof g_shm[slot]);
         return v_err("ipc_shm_open: name too long");
     }
+    shm_close_at_exit();
     return v_int(slot);
 #endif
 }
@@ -2280,11 +2309,7 @@ V *bi_ipc_shm_close(V **a, int n) {
     P(n < 1 || a[0]->t != T_INT, v_err("ipc_shm_close(token)"))
     int slot = (int)a[0]->j;
     P(slot < 1 || slot >= IPC_MAX_HANDLES || !g_shm[slot].in_use, v_err("ipc_shm_close: bad token"))
-#if (defined(__linux__) || defined(__APPLE__)) && !defined(SHAKTI_WASM)
-    munmap(g_shm[slot].ptr, g_shm[slot].size);
-    ipc_shm_unlock(g_shm[slot].name, g_shm[slot].lock_path, g_shm[slot].lock_fd, 1);
-#endif
-    memset(&g_shm[slot], 0, sizeof g_shm[slot]);
+    shm_token_close(slot);
     return v_nil();
 }
 
@@ -2326,6 +2351,7 @@ V *bi_ipc_shm_create(V **a, int n) {
     g_handles[h].shm_side = 0;
     g_handles[h].shm_bcast = 0;
     ipc_copy_cstr(g_handles[h].shm_name, sizeof g_handles[h].shm_name, posix);
+    shm_close_at_exit();
     return v_int(h);
 }
 
@@ -2372,6 +2398,7 @@ V *bi_ipc_shm_attach(V **a, int n) {
     g_handles[h].shm_side = 1;
     g_handles[h].shm_bcast = 0;
     ipc_copy_cstr(g_handles[h].shm_name, sizeof g_handles[h].shm_name, posix);
+    shm_close_at_exit();
     return v_int(h);
 }
 
@@ -2448,6 +2475,7 @@ V *bi_ipc_shm_broadcast_create(V **a, int n) {
     g_handles[h].shm_side = -1;
     g_handles[h].shm_bcast = 1;
     ipc_copy_cstr(g_handles[h].shm_name, sizeof g_handles[h].shm_name, posix);
+    shm_close_at_exit();
     return v_int(h);
 #endif
 }
@@ -2519,6 +2547,7 @@ V *bi_ipc_shm_broadcast_attach(V **a, int n) {
     g_handles[h].shm_side = slot;
     g_handles[h].shm_bcast = 1;
     ipc_copy_cstr(g_handles[h].shm_name, sizeof g_handles[h].shm_name, posix);
+    shm_close_at_exit();
     return v_int(h);
 #endif
 }

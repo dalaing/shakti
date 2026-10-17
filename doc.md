@@ -186,6 +186,8 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 ## Core syntax
 
 - **Bind** with `:` — `x: 1`, `a, b: (1, 2)`, `def f(n:2):`, `table(a:[1])`
+- `for a, b in xs:` takes each item of `xs` apart, whether a list, a vector or
+  a matrix's row (`for a, b in [[1, 2], [3, 4]]:`)
 - **Compare** with `=` — `if x = 1:`, `while i < len(s):`
 - Dict literals and slices keep `:` — `{k: v}`, `a[1:3]`
 - `==` is not supported

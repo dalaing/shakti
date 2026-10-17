@@ -1070,14 +1070,14 @@ Sync and poll-based async message passing between shakti processes (`import ipc`
 
 | Target | Default | Override |
 |--------|---------|----------|
-| `127.0.0.1`, `localhost`, `::1` | Unix domain socket at `$SHAKTI_IPC_DIR/shakti-<port>.sock` (default `/tmp`) | `transport="tcp"` |
+| `127.0.0.1`, `localhost`, `::1` | Unix domain socket `shakti-<port>.sock` in the socket directory (`SHAKTI_IPC_DIR`, below) | `transport="tcp"` |
 | Remote host | RDMA (RoCE v2 via `librdmacm`) when a device exists, else TCP | `transport="tcp"` or `transport="rdma"` |
 
 A transport is `auto`, `tcp`, `uds` (or `unix`) or `rdma`; any other name is an error (`ipc_listen: unknown transport "tpc" (auto, tcp, uds, unix, rdma)`), and so is a transport that is not a `str`. With no transport (or `""`), `ipc.listen`, `ipc.connect`, `ipc_listen` and `ipc_connect` take `SHAKTI_IPC_TRANSPORT`'s, else `auto`, and an unknown name there is the same error (`... "tpc" in SHAKTI_IPC_TRANSPORT ...`).
 
 Environment:
 
-- `SHAKTI_IPC_DIR` — UDS socket directory (default `/tmp`)
+- `SHAKTI_IPC_DIR` — the socket directory, for Unix sockets and their `.lock` files (default `$XDG_RUNTIME_DIR`, else `/tmp/shakti-<uid>`, made 0700). It must be a directory of the user's own that others can't write to (so not `/tmp` itself); otherwise `ipc.listen` and `ipc.connect` over a Unix socket are an error (`ipc: uds path too long or socket dir unsafe`). Shared memory doesn't use it (see Shared memory).
 - `SHAKTI_IPC_TRANSPORT` — default transport: `auto`, `tcp`, `uds` (or `unix`), `rdma`; any other name is an error when it is used (above)
 - `SHAKTI_IPC_ALLOW_PUBLIC=1` — allow `ipc.listen` on a non-loopback address (default: loopback/UDS only)
 
@@ -1165,6 +1165,8 @@ blob : ipc.shm_view(a, 256, 64)
 ```
 
 `shm_open` is a POSIX `mmap` token. `shm_create` / `shm_attach` are SPSC duplex rings (256-byte header, futex wait on Linux). `shm_broadcast_*` is SPMC and lossy for slow readers. `shm_view` copies ring bytes (`offset` must be ≥ 256).
+
+A name is in use while the process that made it with `shm_open`, `shm_create` or `shm_broadcast_create` has it open (a ring and a broadcast ring share names). That process holds a lock on `<name>.lock` in `/tmp/shakti-<uid>`, for example `shakti_ipc_<uid>_chan.lock` on Linux and `shakti_ipc_chan.lock` on macOS, from the create until `ipc.close` (`shm_close` for a token) or the end of the process, so each name made holds one file descriptor until it is closed. The lock files are always there, whatever `SHAKTI_IPC_DIR` and `XDG_RUNTIME_DIR` say, since a name is the user's across the machine and every process of the user has to find its lock. The create makes `/tmp/shakti-<uid>` (0700) if it is missing; if it can't, or it is not a real directory of the user's own, open to no one else, the create is an error saying why (`ipc: shm lock directory /tmp/shakti-<uid>: open to other users`). Creating a name in use is an error (`ipc: shm name already in use (/shakti_ipc_<uid>_chan)`), and the ring is left alone. The close removes the name and the `.lock` while that `.lock` is still its own. A name left by a process that ended without closing it, or whose maker holds no lock (an older shakti, or a `.lock` removed by a cleaner of the directory), is replaced.
 
 ## Multicast
 
@@ -1962,7 +1964,7 @@ Also: parser nesting is capped at 40 (deeper input is a parse error, and the par
 
 - `ipc.join` accepts only datagrams addressed to the joined group (on Linux the socket binds to the group); unicast to the port is dropped. A full reply-to table evicts the oldest entry; `ipc.reply` refuses multicast, broadcast, unspecified and port-0 destinations.
 - Shared memory: on Linux segments are named `shakti_ipc_<euid>_<name>`; attach refuses segments owned by another user, group/world-accessible, or smaller than the header. Sharing a channel between users is not supported.
-- The Unix-socket fallback directory `/tmp/shakti-<uid>` must be a real directory owned by the user with no group/other permissions.
+- `/tmp/shakti-<uid>` (the Unix-socket directory when neither `SHAKTI_IPC_DIR` nor `XDG_RUNTIME_DIR` is set, and always the directory of shared-memory lock files) must be a real directory owned by the user with no group/other permissions. A socket directory named by `SHAKTI_IPC_DIR` or `XDG_RUNTIME_DIR` must be the user's and not writable by group or others.
 
 ## Build hardening
 

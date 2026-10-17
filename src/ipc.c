@@ -237,8 +237,8 @@ static int uds_lock_path(const char *sock_path, char *out, size_t cap) {
 }
 
 /* Whether the file at lock_path is still the one lock_fd has open (a /tmp cleaner may have removed
-   it, and another listen made a new one). */
-static int uds_holds(const char *lock_path, int lock_fd) {
+   it, and another listen or ring made a new one). */
+static int lock_holds(const char *lock_path, int lock_fd) {
     struct stat fd_st, path_st;
     return fstat(lock_fd, &fd_st) == 0 && lstat(lock_path, &path_st) == 0
            && fd_st.st_dev == path_st.st_dev && fd_st.st_ino == path_st.st_ino;
@@ -252,7 +252,7 @@ static int uds_holds(const char *lock_path, int lock_fd) {
 static void uds_unlock(const char *sock_path, int lock_fd, int bound) {
     char lock_path[108];
     if (lock_fd < 0) return;
-    if (uds_lock_path(sock_path, lock_path, sizeof lock_path) == 0 && uds_holds(lock_path, lock_fd)) {
+    if (uds_lock_path(sock_path, lock_path, sizeof lock_path) == 0 && lock_holds(lock_path, lock_fd)) {
         if (bound) unlink(sock_path);
         unlink(lock_path);
     }
@@ -299,7 +299,10 @@ void ipc_free_handle(int h) {
                 atomic_store_explicit(&hdr->side_b_claimed, 0, memory_order_release);
         }
         munmap(s->shm_ptr, s->shm_size);
-        if (s->shm_owner && s->shm_name[0]) shm_unlink(s->shm_name);
+        if (s->shm_owner && s->shm_name[0]) {
+            ipc_shm_unlock(s->shm_name, s->shm_lock_path, s->lock_fd, 1);
+            s->lock_fd = -1;
+        }
         s->shm_ptr = NULL;
     }
 #endif
@@ -436,21 +439,39 @@ int ipc_is_localhost(const char *host) {
     return !strcmp(host, "127.0.0.1") || !strcmp(host, "localhost") || !strcmp(host, "::1");
 }
 
+/* The user's own directory under /tmp: /tmp/shakti-<uid>, made 0700 if missing. It must be a real
+   directory (not a link) of the user's, open to no one else; if not, -1 with *why saying what is
+   wrong. */
+static int ipc_user_tmp_dir(char *out, size_t cap, const char **why) {
+    int n = snprintf(out, cap, "/tmp/shakti-%ld", (long)getuid());
+    *why = "path too long";
+    if (n < 0 || (size_t)n >= cap)
+        return -1;
+    struct stat dir_st;
+    if (mkdir(out, 0700) != 0 && errno != EEXIST) {
+        *why = strerror(errno);
+        return -1;
+    }
+    if (lstat(out, &dir_st) != 0) {
+        *why = strerror(errno);
+        return -1;
+    }
+    *why = !S_ISDIR(dir_st.st_mode)     ? "not a real directory"
+           : dir_st.st_uid != getuid()   ? "owned by another user"
+           : (dir_st.st_mode & 077) != 0 ? "open to other users"
+                                         : NULL;
+    return *why ? -1 : 0;
+}
+
 static int ipc_uds_path(int port, char *out, size_t cap) {
     const char *dir = getenv("SHAKTI_IPC_DIR");
     char owned[96];
+    const char *why;
     int n;
     if (!dir || !dir[0])
         dir = getenv("XDG_RUNTIME_DIR");
     if (!dir || !dir[0]) {
-        n = snprintf(owned, sizeof owned, "/tmp/shakti-%ld", (long)getuid());
-        if (n < 0 || (size_t)n >= sizeof owned)
-            return -1;
-        if (mkdir(owned, 0700) != 0 && errno != EEXIST)
-            return -1;
-        struct stat dir_st;
-        if (lstat(owned, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) || dir_st.st_uid != getuid() ||
-            (dir_st.st_mode & 077) != 0)
+        if (ipc_user_tmp_dir(owned, sizeof owned, &why) != 0)
             return -1;
         dir = owned;
     }
@@ -650,10 +671,12 @@ static int sock_listen_tcp(const char *host, int port, char *err, size_t err_cap
 }
 
 #if !defined(_WIN32)
-/* Take a listener's lock: an exclusive flock on its lock file, held while the listener is open.
-   The system drops it when the process ends, however it ends. Returns the lock's fd; -1 with *busy
-   set if another listener holds it; -1 with err set if the lock file can't be opened or locked. */
-static int uds_lock(const char *lock_path, int *busy, char *err, size_t err_cap) {
+/* Take a listener's or a shared-memory name's lock (what: "uds" or "shm", for errors): an exclusive
+   flock on its lock file, held while the listener or ring is open. The system drops it when the
+   process ends, however it ends. Returns the lock's fd; -1 with *busy set if the lock is held (by
+   another process, or by this one: an flock belongs to the open file, so a second take of a lock
+   this process holds is busy too); -1 with err set if the lock file can't be opened or locked. */
+static int lock_take(const char *what, const char *lock_path, int *busy, char *err, size_t err_cap) {
     *busy = 0;
     for (int tries = 0; tries < 8; tries++) {
         int fd = open(lock_path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -662,7 +685,7 @@ static int uds_lock(const char *lock_path, int *busy, char *err, size_t err_cap)
             if (fd < 0 && errno == ENOENT) continue; /* removed since: make it */
         }
         if (fd < 0) {
-            snprintf(err, err_cap, "ipc: uds lock %s: %s", lock_path, strerror(errno));
+            snprintf(err, err_cap, "ipc: %s lock %s: %s", what, lock_path, strerror(errno));
             return -1;
         }
         if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
@@ -673,17 +696,49 @@ static int uds_lock(const char *lock_path, int *busy, char *err, size_t err_cap)
                 *busy = 1;
                 return -1;
             }
-            snprintf(err, err_cap, "ipc: uds lock %s: %s", lock_path, strerror(e));
+            snprintf(err, err_cap, "ipc: %s lock %s: %s", what, lock_path, strerror(e));
             return -1;
         }
-        /* A listener closing between our open and flock removes the file it held; a lock on a
-           removed file guards nothing, so open the path again. */
-        if (uds_holds(lock_path, fd)) return fd;
+        /* A holder closing (a listener, or a ring's maker) between our open and flock removes the
+           file it held; a lock on a removed file guards nothing, so open the path again. */
+        if (lock_holds(lock_path, fd)) return fd;
         close(fd);
     }
-    snprintf(err, err_cap, "ipc: uds lock %s: removed while locking", lock_path);
+    snprintf(err, err_cap, "ipc: %s lock %s: removed while locking", what, lock_path);
     return -1;
 }
+
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(SHAKTI_WASM)
+/* The lock file for shared-memory name posix ("/<name>") is /tmp/shakti-<uid>/<name>.lock, whatever
+   SHAKTI_IPC_DIR and XDG_RUNTIME_DIR say: a name is the user's across the machine, so every
+   process of the user must find its lock in the same place. */
+int ipc_shm_lock(const char *posix, char lock_path[IPC_SHM_LOCK_MAX], char *err, size_t err_cap) {
+    char dir[96];
+    const char *why;
+    if (ipc_user_tmp_dir(dir, sizeof dir, &why) != 0) {
+        snprintf(err, err_cap, "ipc: shm lock directory %s: %s", dir, why);
+        return -1;
+    }
+    int n = snprintf(lock_path, IPC_SHM_LOCK_MAX, "%s/%s.lock", dir, posix + 1);
+    if (n < 0 || n >= IPC_SHM_LOCK_MAX) {
+        snprintf(err, err_cap, "ipc: shm lock path too long");
+        return -1;
+    }
+    int busy;
+    int lock = lock_take("shm", lock_path, &busy, err, err_cap);
+    if (lock < 0 && busy) snprintf(err, err_cap, "ipc: shm name already in use (%s)", posix);
+    return lock;
+}
+
+void ipc_shm_unlock(const char *posix, const char *lock_path, int lock_fd, int made) {
+    if (lock_fd < 0) return;
+    if (lock_holds(lock_path, lock_fd)) {
+        if (made) shm_unlink(posix);
+        unlink(lock_path);
+    }
+    close(lock_fd);
+}
+#endif
 
 /* Whether a listener is accepting on the Unix socket at addr: 1 unless a connect that doesn't wait
    is refused or finds no file (0). The connection, if made, is closed at once, and stays queued at
@@ -741,7 +796,7 @@ static int sock_listen_uds(int port, char *path_out, int *lock_out, char *err, s
         return -1;
     }
     int busy;
-    int lock = uds_lock(lock_path, &busy, err, err_cap);
+    int lock = lock_take("uds", lock_path, &busy, err, err_cap);
     if (lock < 0) {
         if (busy) snprintf(err, err_cap, "ipc: uds bind: %s", strerror(EADDRINUSE));
         return -1;
@@ -2184,26 +2239,36 @@ V *bi_ipc_shm_open(V **a, int n) {
     char name[256];
     int nn = snprintf(name, sizeof name, "/shakti_%s", a[0]->s);
     P(nn < 0 || (size_t)nn >= sizeof name, v_err("ipc_shm_open: name too long"))
+    char err[512];
+    char lock_path[IPC_SHM_LOCK_MAX];
+    int lock = ipc_shm_lock(name, lock_path, err, sizeof err);
+    if (lock < 0) return v_err(err);
     shm_unlink(name);
     int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) return v_err("ipc_shm_open: shm_open failed");
+    if (fd < 0) {
+        snprintf(err, sizeof err, "ipc_shm_open: shm_open failed: %s", strerror(errno));
+        ipc_shm_unlock(name, lock_path, lock, 0);
+        return v_err(err);
+    }
     if (ftruncate(fd, (off_t)size) != 0) {
         close(fd);
-        shm_unlink(name);
+        ipc_shm_unlock(name, lock_path, lock, 1);
         return v_err("ipc_shm_open: ftruncate failed");
     }
     void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     if (ptr == MAP_FAILED) {
-        shm_unlink(name);
+        ipc_shm_unlock(name, lock_path, lock, 1);
         return v_err("ipc_shm_open: mmap failed");
     }
     g_shm[slot].in_use = 1;
     g_shm[slot].ptr = ptr;
     g_shm[slot].size = size;
+    g_shm[slot].lock_fd = lock;
+    memcpy(g_shm[slot].lock_path, lock_path, sizeof lock_path);
     if (ipc_copy_cstr(g_shm[slot].name, sizeof g_shm[slot].name, name) != 0) {
         munmap(ptr, size);
-        shm_unlink(name);
+        ipc_shm_unlock(name, lock_path, lock, 1);
         memset(&g_shm[slot], 0, sizeof g_shm[slot]);
         return v_err("ipc_shm_open: name too long");
     }
@@ -2217,7 +2282,7 @@ V *bi_ipc_shm_close(V **a, int n) {
     P(slot < 1 || slot >= IPC_MAX_HANDLES || !g_shm[slot].in_use, v_err("ipc_shm_close: bad token"))
 #if (defined(__linux__) || defined(__APPLE__)) && !defined(SHAKTI_WASM)
     munmap(g_shm[slot].ptr, g_shm[slot].size);
-    shm_unlink(g_shm[slot].name);
+    ipc_shm_unlock(g_shm[slot].name, g_shm[slot].lock_path, g_shm[slot].lock_fd, 1);
 #endif
     memset(&g_shm[slot], 0, sizeof g_shm[slot]);
     return v_nil();
@@ -2237,15 +2302,17 @@ V *bi_ipc_shm_create(V **a, int n) {
     size_t map_size = 0;
     char posix[256];
     int owner = 0;
+    int lock = -1;
+    char lock_path[IPC_SHM_LOCK_MAX];
     if (a[1]->j < 0 || (uint64_t)a[1]->j > IPC_MAX_SHM)
         return v_err("ipc_shm_create: size too large");
-    if (ipc_shm_chan_open(a[0]->s, (size_t)a[1]->j, 1, &ptr, &map_size, posix, sizeof posix, &owner, err, sizeof err) != 0)
+    if (ipc_shm_chan_open(a[0]->s, (size_t)a[1]->j, 1, &ptr, &map_size, posix, sizeof posix, &owner, &lock, lock_path, err, sizeof err) != 0)
         return v_err(err[0] ? err : "ipc_shm_create failed");
     int h = ipc_alloc();
     if (h < 0) {
 #if (defined(__linux__) || defined(__APPLE__)) && !defined(SHAKTI_WASM)
         munmap(ptr, map_size);
-        if (owner) shm_unlink(posix);
+        if (owner) ipc_shm_unlock(posix, lock_path, lock, 1);
 #endif
         return v_err("ipc_shm_create: no handles");
     }
@@ -2254,6 +2321,8 @@ V *bi_ipc_shm_create(V **a, int n) {
     g_handles[h].shm_size = map_size;
     g_handles[h].shm_cap = (uint32_t)((map_size - IPC_SHM_HDR) / 2);
     g_handles[h].shm_owner = owner;
+    g_handles[h].lock_fd = lock;
+    memcpy(g_handles[h].shm_lock_path, lock_path, sizeof lock_path);
     g_handles[h].shm_side = 0;
     g_handles[h].shm_bcast = 0;
     ipc_copy_cstr(g_handles[h].shm_name, sizeof g_handles[h].shm_name, posix);
@@ -2268,7 +2337,9 @@ V *bi_ipc_shm_attach(V **a, int n) {
     size_t map_size = 0;
     char posix[256];
     int owner = 0;
-    if (ipc_shm_chan_open(a[0]->s, 0, 0, &ptr, &map_size, posix, sizeof posix, &owner, err, sizeof err) != 0)
+    int lock = -1;
+    char lock_path[IPC_SHM_LOCK_MAX];
+    if (ipc_shm_chan_open(a[0]->s, 0, 0, &ptr, &map_size, posix, sizeof posix, &owner, &lock, lock_path, err, sizeof err) != 0)
         return v_err(err[0] ? err : "ipc_shm_attach failed");
     IpcShmHdr *hdr = (IpcShmHdr *)ptr;
     if (hdr->magic == IPC_SHM_MAGIC_BCAST) {
@@ -2330,16 +2401,18 @@ V *bi_ipc_shm_broadcast_create(V **a, int n) {
     char posix[256];
     if (ipc_shm_chan_name(posix, sizeof posix, a[0]->s) != 0)
         return v_err("ipc_shm_broadcast_create: name too long");
-    int fd = ipc_shm_create_fd(posix, err, sizeof err);
+    int lock;
+    char lock_path[IPC_SHM_LOCK_MAX];
+    int fd = ipc_shm_create_fd(posix, &lock, lock_path, err, sizeof err);
     if (fd < 0) return v_err(err);
     if (ftruncate(fd, (off_t)map_size) != 0) {
-        close(fd); shm_unlink(posix);
+        close(fd); ipc_shm_unlock(posix, lock_path, lock, 1);
         return v_err("ipc_shm_broadcast_create: ftruncate failed");
     }
     void *ptr = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     if (ptr == MAP_FAILED) {
-        shm_unlink(posix);
+        ipc_shm_unlock(posix, lock_path, lock, 1);
         return v_err("ipc_shm_broadcast_create: mmap failed");
     }
     memset(ptr, 0, map_size);
@@ -2361,7 +2434,7 @@ V *bi_ipc_shm_broadcast_create(V **a, int n) {
     int h = ipc_alloc();
     if (h < 0) {
         munmap(ptr, map_size);
-        shm_unlink(posix);
+        ipc_shm_unlock(posix, lock_path, lock, 1);
         return v_err("ipc_shm_broadcast_create: no handles");
     }
     g_handles[h].kind = IPC_KIND_SHM_CHAN;
@@ -2370,6 +2443,8 @@ V *bi_ipc_shm_broadcast_create(V **a, int n) {
     g_handles[h].shm_cap = (uint32_t)ring_cap;
     g_handles[h].shm_max_readers = max_r;
     g_handles[h].shm_owner = 1;
+    g_handles[h].lock_fd = lock;
+    memcpy(g_handles[h].shm_lock_path, lock_path, sizeof lock_path);
     g_handles[h].shm_side = -1;
     g_handles[h].shm_bcast = 1;
     ipc_copy_cstr(g_handles[h].shm_name, sizeof g_handles[h].shm_name, posix);

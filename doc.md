@@ -523,8 +523,8 @@ wait(-1)                    # block until first event
 |------|---------|
 | `input(0)` | Pending events (non-blocking list) |
 | `input(ms)` | Events within `ms` milliseconds |
-| `input(1)` | Stream of raw characters |
-| `input(2)` | Stream of `{code, modifiers, utf8, kind}` dicts |
+| `input(1)` | Stream of typed keys: each key down's text (`""` for a key without one, such as an arrow); in a terminal, one str per byte, so a UTF-8 character gives several |
+| `input(2)` | Stream of `{code, modifiers, utf8, kind}` dicts: a `"down"` and an `"up"` for each key |
 | `input("prompt")` | Stream of lines |
 | `input_set_own_gui(1)` | Synth window keys go to hub only (see [synth module](#synth-module)) |
 
@@ -970,8 +970,8 @@ Module `lib/input.ie`.
 |------|---------|
 | `input(0)` | Pending events (non-blocking list) |
 | `input(ms)` | Events within `ms` milliseconds |
-| `input(1)` | Stream of raw characters |
-| `input(2)` | Stream of `{code, modifiers, utf8, kind}` dicts |
+| `input(1)` | Stream of typed keys: each key down's text (`""` for a key without one, such as an arrow); in a terminal, one str per byte, so a UTF-8 character gives several |
+| `input(2)` | Stream of `{code, modifiers, utf8, kind}` dicts: a `"down"` and an `"up"` for each key |
 | `input("prompt")` | Stream of lines |
 | `readline("prompt")` | One blocking line |
 | `wait(-1)` | Block until first event |

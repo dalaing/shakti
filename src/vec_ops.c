@@ -86,7 +86,8 @@ V *mat_binop(V *a, V *b, int op) {
         return v_err("arithmetic not supported on matrix[char]");
     if (is_mat_t(a->t) && (b->t == T_INT || b->t == T_FLOAT || b->t == T_CHAR)) {
         int64_t rows = a->n, cols = mat_cols(a), ne = rows * cols;
-        int out_t = (a->t == T_FMAT || b->t == T_FLOAT) ? T_FMAT : T_IMAT;
+        /* / and ** are float, as for two matrices and for vectors; the int kernel does neither. */
+        int out_t = (a->t == T_FMAT || b->t == T_FLOAT || op == OP_DIV || op == OP_POW) ? T_FMAT : T_IMAT;
         if (out_t == T_IMAT && op == OP_FLOORDIV && a->t == T_IMAT &&
             i64_span_promotes(a->J, NULL, ne, 0, 0, 1, b->j))
             out_t = T_FMAT;
@@ -119,11 +120,10 @@ V *mat_binop(V *a, V *b, int op) {
         return r;
     }
     if ((a->t == T_INT || a->t == T_FLOAT || a->t == T_CHAR) && is_mat_t(b->t)) {
-        V *r = mat_binop(b, a, op);
-        if (!r || r->t == T_ERR) return r;
-        if (op == OP_SUB || op == OP_DIV || op == OP_FLOORDIV || op == OP_MOD) {
+        /* x op m is m op x when op commutes; the others are computed here, x on the left. */
+        if (op == OP_SUB || op == OP_DIV || op == OP_FLOORDIV || op == OP_MOD || op == OP_POW) {
             int64_t rows = b->n, cols = mat_cols(b), ne = rows * cols;
-            if (b->t == T_FMAT || a->t == T_FLOAT) {
+            if (b->t == T_FMAT || a->t == T_FLOAT || op == OP_DIV || op == OP_POW) {
                 V *out = v_fmat(rows, cols);
                 double x = to_float(a);
                 if (b->t == T_FMAT) {
@@ -135,16 +135,15 @@ V *mat_binop(V *a, V *b, int op) {
                         else if (op == OP_DIV) out->F[i] = yv != 0 ? x / yv : 0;
                         else if (op == OP_FLOORDIV) out->F[i] = yv != 0 ? floor(x / yv) : 0;
                         else if (op == OP_MOD) out->F[i] = yv != 0 ? fmod(x, yv) : 0;
+                        else out->F[i] = pow(x, yv);
                     }
                 }
-                v_free(r);
                 return out;
             }
             if (op == OP_FLOORDIV && a->t != T_FLOAT &&
                 i64_span_promotes(NULL, b->J, ne, 1, a->j, 0, 0)) {
                 V *out = v_fmat(rows, cols);
                 for (int64_t i = 0; i < ne; i++) out->F[i] = i64_floordiv_f(a->j, b->J[i]);
-                v_free(r);
                 return out;
             }
             V *out = v_imat(rows, cols);
@@ -154,10 +153,9 @@ V *mat_binop(V *a, V *b, int op) {
                 out = v_fmat(rows, cols);
                 i64_arith_f(out->F, NULL, x, b->J, 0, ne, op);
             }
-            v_free(r);
             return out;
         }
-        return r;
+        return mat_binop(b, a, op);
     }
     if (!is_mat_t(a->t) || !is_mat_t(b->t))
         return v_errf("unsupported operand types for op %d: %s and %s", op, type_name(a->t), type_name(b->t));

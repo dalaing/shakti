@@ -750,11 +750,12 @@ Use `"*"` (or `""`) as a wildcard in queries.
 
 ## API
 
-Module `lib/graph.ie`:
+Module `lib/graph.ie`. The functions below act on the current graph, which `create()` and `use(g)` set.
 
 | Function | Purpose |
 |----------|---------|
-| `graph.create()` | Create a graph (returns handle id) |
+| `graph.create()` | Create a graph and make it the current one (returns handle id) |
+| `graph.use(g)` | Make graph `g` (a handle from `create()`) the current one |
 | `graph.add(s, p, o)` | Insert a triple |
 | `graph.query(s, p, o)` | Pattern match; returns table |
 | `graph.neighbors(node, direction)` | Edges touching `node` (`"out"`, `"in"`, `"both"`) |

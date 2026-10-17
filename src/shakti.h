@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <limits.h>
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
@@ -14,6 +15,9 @@
 #include <math.h>
 #include <ctype.h>
 #include "a.h"
+
+/* 1 when a float truncates to a C int: not NaN, not an infinity, and inside int's range */
+static inline int float_fits_int(double d) { return d > INT_MIN - 1.0 && d < INT_MAX + 1.0; }
 
 #ifdef __cplusplus
 extern "C" {
@@ -361,6 +365,14 @@ static inline int is_vec_t(int t) {
 }
 static inline int is_mat_t(int t) {
     return t == T_IMAT || t == T_FMAT || t == T_BMAT || t == T_CMAT;
+}
+/* A timeout in ms from an int or a float into *ms: NaN, or a timeout no int holds, is -1 and waits
+   without limit, as a negative one does. 0, or -1 when v is not a number. */
+static inline int timeout_ms_arg(const V *v, int *ms) {
+    if (v->t == T_INT) *ms = v->j >= INT_MIN && v->j <= INT_MAX ? (int)v->j : -1;
+    else if (v->t == T_FLOAT) *ms = float_fits_int(v->f) ? (int)v->f : -1;
+    else return -1;
+    return 0;
 }
 V *mat_matmul(V *a, V *b);
 V *v_mat_row(V *m, int64_t row);

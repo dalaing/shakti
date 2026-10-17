@@ -1109,9 +1109,7 @@ V *bi_ws_poll(V **a, int n) {
 #else
     P(n < 2 || (a[0]->t != T_LIST && a[0]->t != T_IVEC), v_err("ws_poll(handles, timeout_ms)"))
     int timeout;
-    if (a[1]->t == T_INT) timeout = (int)a[1]->j;
-    else if (a[1]->t == T_FLOAT) timeout = (int)a[1]->f;
-    else return v_err("ws_poll(handles, timeout_ms)");
+    if (timeout_ms_arg(a[1], &timeout) != 0) return v_err("ws_poll(handles, timeout_ms)");
     V *handles = a[0];
     int nh = (int)handles->n;
     if (nh <= 0) return v_list(0);

@@ -189,6 +189,8 @@ inlining is recovered with LTO on the default link (see [README build](README.md
 - `0xHH` (exactly two hex digits) is `char`; `0x1234` (even length except 6/8) is `list[char]`; `0c…` is always `list[char]`; 6/8-digit or odd `0x` is `int`
 - `char(n)` builds a `char` from an int (distinct from `chr`, which returns a
   one-character `str`)
+- `int(x)` of a float truncates toward zero; a NaN, an infinity or a float outside the int range
+  (`int(1e19)`) is an error value
 - `parse_check(src)` returns `dict(ok, error)` — syntax only, no eval
 
 String and formatted-string token text is limited to 8191 bytes, and source

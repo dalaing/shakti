@@ -1409,11 +1409,7 @@ V *bi_ipc_send_sync(V **a, int n) {
     size_t len = 0;
     P(ipc_payload_bytes(a[1], &data, &len) != 0, v_err("ipc_send_sync: data must be str or list[char]"))
     int timeout_ms = 5000;
-    if (n > 2) {
-        if (a[2]->t == T_INT) timeout_ms = (int)a[2]->j;
-        else if (a[2]->t == T_FLOAT) timeout_ms = (int)a[2]->f;
-        else return v_err("ipc_send_sync: bad timeout");
-    }
+    if (n > 2 && timeout_ms_arg(a[2], &timeout_ms) != 0) return v_err("ipc_send_sync: bad timeout");
     uint32_t corr = ipc_rand_corr_seed();
     if (corr == 0) corr = 1;
     s->next_corr = corr;
@@ -1873,12 +1869,7 @@ static int ipc_handle_from_elem(V *handles, int i, int *out_h) {
 V *bi_ipc_poll(V **a, int n) {
     P(n < 2 || (a[0]->t != T_LIST && a[0]->t != T_IVEC), v_err("ipc_poll(handles, timeout_ms)"))
     int timeout;
-    if (a[1]->t == T_INT)
-        timeout = (int)a[1]->j;
-    else if (a[1]->t == T_FLOAT)
-        timeout = (int)a[1]->f;
-    else
-        return v_err("ipc_poll(handles, timeout_ms)");
+    if (timeout_ms_arg(a[1], &timeout) != 0) return v_err("ipc_poll(handles, timeout_ms)");
     V *handles = a[0];
     int nh = (int)handles->n;
     if (nh <= 0) return v_list(0);

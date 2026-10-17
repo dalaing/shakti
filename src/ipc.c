@@ -283,6 +283,25 @@ static void sock_set_tcp_nodelay(int fd) {
 #endif
 }
 
+/* A write to a peer that has closed fails with EPIPE instead of raising SIGPIPE, which ends the
+ * process. Each send passes MSG_NOSIGNAL where the system has it (Linux, recent macOS), and the
+ * socket gets SO_NOSIGPIPE where the system has that (macOS), which covers systems without
+ * MSG_NOSIGNAL (older macOS). Where both exist, both apply. */
+static void sock_set_nosigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#else
+    (void)fd;
+#endif
+}
+
+#ifdef MSG_NOSIGNAL
+#define SOCK_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define SOCK_SEND_FLAGS 0
+#endif
+
 static int sock_read_some(int fd, void *buf, size_t n, int block, size_t *got) {
     size_t off = 0;
     *got = 0;
@@ -324,7 +343,11 @@ static int sock_write_full(int fd, const void *buf, size_t n) {
 static int sock_writev_all(int fd, struct iovec *iov, int iovcnt) {
 #if !defined(_WIN32)
     while (iovcnt > 0) {
-        ssize_t w = writev(fd, iov, iovcnt);
+        struct msghdr msg;
+        memset(&msg, 0, sizeof msg);
+        msg.msg_iov = iov;
+        msg.msg_iovlen = iovcnt;
+        ssize_t w = sendmsg(fd, &msg, SOCK_SEND_FLAGS);
         if (w <= 0) return -1;
         size_t wrote = (size_t)w;
         while (iovcnt > 0 && wrote >= (size_t)iov[0].iov_len) {
@@ -1195,6 +1218,7 @@ V *bi_ipc_accept(V **a, int n) {
     int cfd = accept(ls->fd, NULL, NULL);
     if (cfd < 0) return v_err("ipc_accept: accept failed");
     ipc_set_cloexec(cfd);
+    sock_set_nosigpipe(cfd);
 #if defined(__linux__)
     if (ls->uds_path[0]) {
         struct ucred cred;
@@ -1269,6 +1293,7 @@ static V *ipc_do_connect(const char *host, int port, IpcTransport req) {
     else
         fd = sock_connect_tcp(host, port, err, sizeof err);
     if (fd < 0) return v_err(err[0] ? err : "ipc_connect failed");
+    sock_set_nosigpipe(fd);
 
     int h = ipc_alloc();
     if (h < 0) {

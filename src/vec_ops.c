@@ -700,6 +700,61 @@ static int nums_equal(V *a, V *b, int64_t ne) {
     return 1;
 }
 #undef CMP_EACH
+/* whether the number b equals some item of the numeric vector a, by exact value as `=` compares
+ * them: b is converted once, as for a comparison against every item */
+int nums_have_num(V *a, V *b) {
+    int64_t ne = a->n;
+    if (a->t == T_FVEC) {
+        if (b->t == T_FLOAT || (b->j >= -9007199254740992LL && b->j <= 9007199254740992LL)) {
+            double y = b->t == T_FLOAT ? b->f : (double)b->j;
+            for (int64_t i = 0; i < ne; i++) P(a->F[i] == y, 1)
+            return 0;
+        }
+        for (int64_t i = 0; i < ne; i++) P(num_cmp(a, i, b, 0, OP_EQ), 1)
+        return 0;
+    }
+    int64_t k = b->j; int op = OP_EQ;
+    if (b->t == T_FLOAT && int_bound(b->f, OP_EQ, &op, &k) >= 0) return 0;   /* NaN, not whole, or no int */
+    if (a->t == T_IVEC) { for (int64_t i = 0; i < ne; i++) P(a->J[i] == k, 1) return 0; }
+    P(k < 0 || k > 255, 0)
+    return ne > 0 && memchr(a->B, (int)k, (size_t)ne) != NULL;
+}
+/* whether some row of the numeric matrix m (m->n rows of a->n items) equals a, a numeric vector or
+ * a list whose items are numbers, bools or chars, item by item by exact value as `=` compares them;
+ * the kinds are tested once, so rows of the same kind compare in a plain loop */
+int nums_have_row(V *m, V *a) {
+    int64_t ne = a->n, rows = m->n;
+    int km = num_kind(m->t);
+    if (a->t == T_LIST || km != num_kind(a->t)) {
+        for (int64_t r = 0; r < rows; r++) {
+            int64_t base = r * ne, k = 0;
+            if (a->t == T_LIST) while (k < ne && num_cmp(m, base + k, a->L[k], 0, OP_EQ)) k++;
+            else while (k < ne && num_cmp(m, base + k, a, k, OP_EQ)) k++;
+            P(k == ne, 1)
+        }
+        return 0;
+    }
+    if (km == 'B') {
+        for (int64_t r = 0; r < rows; r++) P(ne == 0 || memcmp(m->B + r * ne, a->B, (size_t)ne) == 0, 1)
+        return 0;
+    }
+    if (km == 'J') {
+        const int64_t *x = a->J;
+        for (int64_t r = 0; r < rows; r++) {
+            const int64_t *y = m->J + r * ne; int64_t k = 0;
+            while (k < ne && y[k] == x[k]) k++;
+            P(k == ne, 1)
+        }
+        return 0;
+    }
+    const double *x = a->F;
+    for (int64_t r = 0; r < rows; r++) {
+        const double *y = m->F + r * ne; int64_t k = 0;
+        while (k < ne && y[k] == x[k]) k++;
+        P(k == ne, 1)
+    }
+    return 0;
+}
 V *vec_cmp(V *a, V *b, int op) {
     if((a->t==T_INT||a->t==T_FLOAT||a->t==T_BOOL||a->t==T_CHAR) && (b->t==T_INT||b->t==T_FLOAT||b->t==T_BOOL||b->t==T_CHAR)) {
         return v_bool(num_cmp(a, 0, b, 0, op));

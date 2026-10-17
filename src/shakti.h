@@ -430,6 +430,8 @@ void shakti_format_date_ms(int64_t utc_midnight_ms, char *buf, size_t cap);
 void shakti_format_time_ms(int64_t ms_in_day, char *buf, size_t cap);
 const char *type_name(int t);
 V *vec_cmp(V *a, V *b, int op);
+int nums_have_num(V *a, V *b);
+int nums_have_row(V *m, V *a);
 Node *parse(const char *src);
 int shakti_parse_check(const char *src, char *err, size_t errcap);
 int shakti_parse_errors(void);

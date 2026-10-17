@@ -347,6 +347,7 @@ Leading `@` decorates. `mmul(a, b)` multiplies matrices.
 | `sublist([i, n], xs)` | `n` items starting at index `i` (`i` may be negative). |
 | `drop(n, xs)` | Drop the first `n` items. A negative `n` drops from the end. |
 | `catenate(x, y)` | Join lists, vectors, or strings. `+` on `list[int]` adds element-wise; `catenate` joins. |
+| `x in xs` | `True` when some item of a list or vector, or row of a matrix, is `= x` (`1 in [1.0, 2.0]`, `[1, 2] in [[1, 2], [3, 4]]`); in a str, a substring or a char; in a dict, a key. A `list[int]` on the left of a `list[int]`, or of a list whose items are all ints, gives a `list[bool]`, one per item (`range(3) in [1, 2]` is `[False, True, True]`); on the left of a list with an item that isn't an int it is an error (`[1, 2] in [[1, 2], [3]]`). A `list[bool]` is never found, nor is a row of a `matrix[bool]` (`=` doesn't compare a `list[bool]`). `not in` is the negation. |
 
 ```ie
 xs : 1 2 3 4 5

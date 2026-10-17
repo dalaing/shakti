@@ -101,6 +101,25 @@ static int lex_src_is_digit_start(const Lexer *l, size_t p) {
     return l->src[p] == '.' && p + 1 < l->len && isdigit((unsigned char)l->src[p + 1]);
 }
 
+/* Decimal digits from *pp on, with `_` as a separator (Python): each `_` sits between two digits. */
+static int lex_digits(Lexer *l, size_t *pp, int *under) {
+    const char *s = l->src;
+    size_t p = *pp;
+    W(p<l->len && (isdigit((unsigned char)s[p]) || s[p]=='_'), {
+        if (s[p] == '_') {
+            if (p == 0 || !isdigit((unsigned char)s[p - 1]) || p + 1 >= l->len
+                || !isdigit((unsigned char)s[p + 1])) {
+                lex_fail(l, "invalid number: '_' must sit between two digits");
+                return 0;
+            }
+            *under = 1;
+        }
+        p++;
+    })
+    *pp = p;
+    return 1;
+}
+
 int lex_peek_is_signed_literal(Lexer *l) {
     if (!l->has_peek)
         lex_peek(l);
@@ -413,19 +432,29 @@ static Token lex_raw(Lexer *l) {
                 t.ival = strtoll(s+start, NULL, 16);
                 if (neg_lit) t.ival = -t.ival;
             } else {
-                W(p<l->len && (isdigit(s[p])||s[p]=='_'),p++)
-                if(p<l->len && s[p]=='.') { is_float=1; p++; W(p<l->len && isdigit(s[p]),p++) }
+                int under = 0;
+                if(!lex_digits(l, &p, &under)) return make_tok(T_EOF_);
+                if(p<l->len && s[p]=='.') { is_float=1; p++; if(!lex_digits(l, &p, &under)) return make_tok(T_EOF_); }
                 if(p<l->len && (s[p]=='e'||s[p]=='E')) {
                     is_float=1; p++;
                     if(p<l->len && (s[p]=='+'||s[p]=='-')) p++;
-                    W(p<l->len && isdigit(s[p]),p++)
+                    if(!lex_digits(l, &p, &under)) return make_tok(T_EOF_);
+                }
+                /* With separators, convert the digits alone, gathered in the lexer's text scratch. */
+                const char *lit = s + start;
+                if(under) {
+                    int n = 0;
+                    for(size_t i = start; i < p; i++)
+                        if(s[i] != '_' && !lex_append(l, &t, &n, s[i])) return make_tok(T_EOF_);
+                    if(!lex_append(l, &t, &n, 0)) return make_tok(T_EOF_);
+                    lit = l->text;
                 }
                 if(is_float) {
                     t.type=T_FLOAT_;
-                    t.fval=strtod(s+start,NULL);
+                    t.fval=strtod(lit,NULL);
                     if (neg_lit) t.fval = -t.fval;
                 } else {
-                    t.ival = strtoll(s+start, NULL, 10);
+                    t.ival = strtoll(lit, NULL, 10);
                     if (neg_lit) t.ival = -t.ival;
                 }
             }

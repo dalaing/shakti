@@ -338,78 +338,6 @@ static V *eval_create_schema(Node *n, Env *e) {
     })
     return v_dict_own(keys, vals);
 }
-static int select_sym_is_agg_kw(const char *s) {
-    static const char *kws[] = {"count", "sum", "avg", "min", "max", NULL};
-    for (int k = 0; kws[k]; k++) {
-        if (!strcmp(s, kws[k])) {
-            return 1;
-        }
-    }
-    return 0;
-}
-static void select_strlist_add_unique(V *acc, const char *s) {
-    if (!acc || acc->t != T_LIST || !s) {
-        return;
-    }
-    for (int64_t i = 0; i < acc->n; i++) {
-        V *v = acc->L[i];
-        if (v && v->t == T_STR && !strcmp(v->s, s)) {
-            return;
-        }
-    }
-    v_list_append_own(acc, v_str(s));
-}
-static void select_collect_syms(Node *n, V *acc) {
-    if (!n) {
-        return;
-    }
-    switch (n->type) {
-    case N_NAME:
-        if (!select_sym_is_agg_kw(n->sval)) {
-            select_strlist_add_unique(acc, n->sval);
-        }
-        return;
-    case N_CALL:
-        for (int i = 1; i < n->nch; i++) {
-            select_collect_syms(n->ch[i], acc);
-        }
-        return;
-    case N_LIST:
-        for (int i = 0; i < n->nch; i++) {
-            select_collect_syms(n->ch[i], acc);
-        }
-        return;
-    case N_DOT:
-        select_collect_syms(n->ch[0], acc);
-        return;
-    default:
-        for (int i = 0; i < n->nch; i++) {
-            select_collect_syms(n->ch[i], acc);
-        }
-        return;
-    }
-}
-static V *select_load_projection(Node *sel) {
-    V *acc = v_list(0);
-    if (!sel || sel->type != N_SELECT) {
-        v_free(acc);
-        return NULL;
-    }
-    if (sel->ch[1]) {
-        select_collect_syms(sel->ch[1], acc);
-    }
-    if (sel->ch[2] && sel->ch[2]->type != N_NONE) {
-        select_collect_syms(sel->ch[2], acc);
-    }
-    if (sel->ch[3] && sel->ch[3]->type != N_NONE) {
-        select_collect_syms(sel->ch[3], acc);
-    }
-    if (acc->n == 0) {
-        v_free(acc);
-        return NULL;
-    }
-    return acc;
-}
 
 V *eval_each(Node *n, Env *e);
 
@@ -770,19 +698,14 @@ V *eval(Node *n, Env *e) {
         V *from0 = eval(n->ch[0], e);
         V *from;
         if (from0->t == T_STR) {
-            V *proj = select_load_projection(n);
             size_t plen = strlen(from0->s);
 #ifdef SHAKTI_HAVE_IEFS
             if (plen >= 5 && !strcmp(from0->s + plen - 5, ".iefs")) {
-                (void)proj;
                 from = iefs_store_map(from0->s, IEFS_MAP_PAGES_THP);
             } else
 #endif
             {
-                from = table_load(from0->s, proj);
-            }
-            if (proj) {
-                v_free(proj);
+                from = table_load(from0->s, NULL);
             }
             v_free(from0);
             P(from->t == T_ERR,from)

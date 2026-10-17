@@ -2000,6 +2000,16 @@ V *eval(Node *n, Env *e) {
                 if(g_breaking) { g_breaking=0; break; }
                 if(g_continuing) { g_continuing=0; }
             }
+        } else if(iter->t == T_TABLE) {
+            for(int64_t i=0;i<iter->n;i++) {
+                V *item = table_row(iter, i);
+                for_set_vars(vars, item, e);
+                v_free(item); v_free(r);
+                r = eval(n->ch[2], e);
+                if(g_returning||g_error) { v_free(iter); return r; }
+                if(g_breaking) { g_breaking=0; break; }
+                if(g_continuing) { g_continuing=0; }
+            }
         } else if(iter->t == T_DICT) {
             for(int64_t i=0;i<iter->n;i++) {
                 if(vars->type == N_LIST && vars->nch >= 2) {

@@ -496,23 +496,7 @@ static V *bi_list(V**a,in){
     }
     if(v->t==T_TABLE){
         V*r=v_list(v->n);
-        for(int64_t i=0;i<v->n;i++){
-            V*d=v_dict_empty();
-            for(int64_t c=0;c<v->keys->n;c++){
-                if(v->keys->L[c]->t!=T_STR) continue;
-                V*col=v->vals->L[c];
-                V*cell;
-                if(col->t==T_IVEC) cell=v_int(col->J[i]);
-                else if(col->t==T_FVEC) cell=v_float(col->F[i]);
-                else if(col->t==T_BVEC) cell=v_bool(col->B[i]!=0);
-                else if(col->t==T_CVEC) cell=v_char(col->B[i]);
-                else if(col->t==T_LIST) cell=v_ref(col->L[i]);
-                else if(is_mat_t(col->t)) cell=v_mat_row(col,i);
-                else cell=v_nil();
-                v_dict_put(d, v->keys->L[c]->s, cell);
-            }
-            r->L[i]=d;
-        }
+        for(int64_t i=0;i<v->n;i++) r->L[i]=table_row(v,i);
         return r;
     }
     if(v->t==T_DATE||v->t==T_DATETIME||v->t==T_TIME){

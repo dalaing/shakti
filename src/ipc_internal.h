@@ -214,7 +214,7 @@ int ipc_inbox_take(IpcInbox *box, int want_corr, uint32_t corr,
 
 int sock_set_block(int fd, int block);
 int ipc_is_localhost(const char *host);
-IpcTransport ipc_parse_transport(const char *s);
+int ipc_parse_transport(const char *fn, const char *s, IpcTransport *out, char *err, size_t err_cap);
 int ipc_sock_send(IpcHandle *s, const char *data, size_t len, char *err, size_t err_cap);
 int ipc_sock_send_parts(IpcHandle *s,
                         const void *p0, size_t n0,

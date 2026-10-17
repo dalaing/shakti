@@ -465,16 +465,24 @@ static int ipc_uds_path(int port, char *out, size_t cap) {
     return (n < 0 || (size_t)n >= cap) ? -1 : 0;
 }
 
-IpcTransport ipc_parse_transport(const char *s) {
-    const char *env = getenv("SHAKTI_IPC_TRANSPORT");
-    if (!s || !s[0]) s = env;
-    if (!s || !s[0] || !strcmp(s, "auto")) return IPC_TR_AUTO;
-    if (!strcmp(s, "tcp")) return IPC_TR_TCP;
-    if (!strcmp(s, "uds") || !strcmp(s, "unix")) return IPC_TR_UDS;
-    if (!strcmp(s, "rdma")) return IPC_TR_RDMA;
-    if (!strcmp(s, "udp")) return IPC_TR_UDP;
-    if (!strcmp(s, "mcast") || !strcmp(s, "multicast")) return IPC_TR_MCAST;
-    return IPC_TR_AUTO;
+/* The transport s names for ipc_listen or ipc_connect (fn), or SHAKTI_IPC_TRANSPORT when s is NULL
+   or empty; auto when neither names one. A name that is not one of them is an error naming them. */
+int ipc_parse_transport(const char *fn, const char *s, IpcTransport *out, char *err, size_t err_cap) {
+    const char *from = "";
+    if (!s || !s[0]) {
+        s = getenv("SHAKTI_IPC_TRANSPORT");
+        from = " in SHAKTI_IPC_TRANSPORT";
+    }
+    if (!s || !s[0] || !strcmp(s, "auto")) *out = IPC_TR_AUTO;
+    else if (!strcmp(s, "tcp")) *out = IPC_TR_TCP;
+    else if (!strcmp(s, "uds") || !strcmp(s, "unix")) *out = IPC_TR_UDS;
+    else if (!strcmp(s, "rdma")) *out = IPC_TR_RDMA;
+    else {
+        snprintf(err, err_cap, "%s: unknown transport \"%s\"%s (auto, tcp, uds, unix, rdma)", fn, s,
+                 from);
+        return -1;
+    }
+    return 0;
 }
 
 static int ipc_token_check(char *err, size_t err_cap) {
@@ -1290,10 +1298,13 @@ V *bi_ipc_listen(V **a, int n) {
     int port = (int)a[0]->j;
     const char *host = (n > 1 && a[1]->t == T_STR) ? a[1]->s : "127.0.0.1";
     if (!host || !host[0]) host = "127.0.0.1";
-    IpcTransport tr = ipc_parse_transport(n > 2 && a[2]->t == T_STR ? a[2]->s : NULL);
-    tr = ipc_resolve_listen(port, host, tr);
+    P(n > 2 && a[2]->t != T_STR, v_err("ipc_listen(port[, host, transport])"))
     char err[512];
     err[0] = 0;
+    IpcTransport tr;
+    if (ipc_parse_transport("ipc_listen", n > 2 ? a[2]->s : NULL, &tr, err, sizeof err) != 0)
+        return v_err(err);
+    tr = ipc_resolve_listen(port, host, tr);
     if (tr != IPC_TR_UDS) {
         if (!shakti_net_allowed())
             return v_err("ipc_listen: network disabled (SHAKTI_SAFE=1; set SHAKTI_ALLOW_NET=1)");
@@ -1470,7 +1481,11 @@ static V *ipc_do_connect(const char *host, int port, IpcTransport req) {
 
 V *bi_ipc_connect(V **a, int n) {
     P(n < 2 || a[0]->t != T_STR || a[1]->t != T_INT, v_err("ipc_connect(host, port[, transport])"))
-    IpcTransport tr = ipc_parse_transport(n > 2 && a[2]->t == T_STR ? a[2]->s : NULL);
+    P(n > 2 && a[2]->t != T_STR, v_err("ipc_connect(host, port[, transport])"))
+    char err[512];
+    IpcTransport tr;
+    if (ipc_parse_transport("ipc_connect", n > 2 ? a[2]->s : NULL, &tr, err, sizeof err) != 0)
+        return v_err(err);
     return ipc_do_connect(a[0]->s, (int)a[1]->j, tr);
 }
 

@@ -16,8 +16,6 @@ typedef enum {
     IPC_TR_TCP,
     IPC_TR_UDS,
     IPC_TR_RDMA,
-    IPC_TR_UDP,
-    IPC_TR_MCAST,
 } IpcTransport;
 
 int ipc_rdma_available(void);

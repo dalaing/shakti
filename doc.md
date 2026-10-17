@@ -1073,10 +1073,12 @@ Sync and poll-based async message passing between shakti processes (`import ipc`
 | `127.0.0.1`, `localhost`, `::1` | Unix domain socket at `$SHAKTI_IPC_DIR/shakti-<port>.sock` (default `/tmp`) | `transport="tcp"` |
 | Remote host | RDMA (RoCE v2 via `librdmacm`) when a device exists, else TCP | `transport="tcp"` or `transport="rdma"` |
 
+A transport is `auto`, `tcp`, `uds` (or `unix`) or `rdma`; any other name is an error (`ipc_listen: unknown transport "tpc" (auto, tcp, uds, unix, rdma)`), and so is a transport that is not a `str`. With no transport (or `""`), `ipc_listen` and `ipc_connect` take `SHAKTI_IPC_TRANSPORT`'s (`ipc.listen` and `ipc.connect` pass `"auto"` when given none), and an unknown name there is the same error (`... "tpc" in SHAKTI_IPC_TRANSPORT ...`).
+
 Environment:
 
 - `SHAKTI_IPC_DIR` — UDS socket directory (default `/tmp`)
-- `SHAKTI_IPC_TRANSPORT` — default transport: `auto`, `tcp`, `uds`, `rdma`
+- `SHAKTI_IPC_TRANSPORT` — default transport: `auto`, `tcp`, `uds` (or `unix`), `rdma`; any other name is an error when it is used (above)
 - `SHAKTI_IPC_ALLOW_PUBLIC=1` — allow `ipc.listen` on a non-loopback address (default: loopback/UDS only)
 
 A second `ipc.listen` on a port whose Unix listener is alive is an error (`ipc: uds bind: Address already in use`), as over TCP. A Unix listener keeps `shakti-<port>.lock` beside its socket; `ipc.close` removes both while that `.lock` is still its own; a process that ends without `ipc.close` leaves both, and the next listen reuses the lock file and replaces the socket. A non-socket at the socket path is an error (`ipc: <path> exists and is not a socket`). A socket whose listener holds no `.lock` (another program's, an older shakti's, or one whose `.lock` a cleaner of the socket directory removed) is connected to once: refused means it is replaced; otherwise the port is in use, and that listener sees one closed connection; a listener that sends on it may be ended by SIGPIPE. On macOS a full queue is refused too, and each of these connections stays queued until the listener accepts, so one that is not accepting is taken over once they fill its queue (16 for a shakti listener).

@@ -818,7 +818,7 @@ V *eval(Node *n, Env *e) {
             }
         }
 #endif
-        if(r && r->t != T_ERR && n->ch[0] && n->ch[0]->type == N_NAME)
+        if(r && r->t != T_ERR && !iefs_path && n->ch[0] && n->ch[0]->type == N_NAME)
             env_update(e, n->ch[0]->sval, r);
         own_shared_cols(r, from);   /* after env_update: see own_shared_cols */
         free(iefs_path);
@@ -860,7 +860,7 @@ V *eval(Node *n, Env *e) {
             }
         }
 #endif
-        if(r && r->t != T_ERR && n->ch[0] && n->ch[0]->type == N_NAME)
+        if(r && r->t != T_ERR && !iefs_path && n->ch[0] && n->ch[0]->type == N_NAME)
             env_update(e, n->ch[0]->sval, r);
         own_shared_cols(r, from);   /* after env_update: see own_shared_cols */
         free(iefs_path);

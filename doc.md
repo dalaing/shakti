@@ -692,6 +692,11 @@ and, if any group's int sum in the select doesn't fit in an int, every int sum i
 float column, as on main. Of a float column it is a float. `avg`
 is a float, and `count` an int.
 
+The aggregates are `count`, `sum`, `avg`, `min` and `max`; any other word in a select is a column's
+name. A column the table doesn't have is an error value, with or without `by`:
+`select sum nosuch by k from t` and `select last n by k from t` are `select: unknown column 'nosuch'`
+and `select: unknown column 'last'`, and `update nosuch : 1 from t` is `update: unknown column 'nosuch'`.
+
 See also [syntax and builtins](#syntax-and-builtins) for tables, `load("file.csv")`, and matrix types.
 
 ---

@@ -1424,6 +1424,13 @@ static V *tbl_group_select_once(V *tbl, ColSpec *specs, int nspecs, V *by, V *ro
             return v_errf("select: unknown group column '%s'", by_names[i]);
         }
     }
+    /* A name that is no column (nor an aggregate's keyword) is an error, as in a select without by. */
+    for (int s = 0; s < nspecs; s++) {
+        const char *name = specs[s].kind == COL_NAME ? specs[s].name : specs[s].src;
+        if (name[0] && tbl_col_idx(tbl, name) < 0) {
+            return v_errf("select: unknown column '%s'", name);
+        }
+    }
     GhTab tab;
     memset(&tab, 0, sizeof tab);
     V *bcols[32];

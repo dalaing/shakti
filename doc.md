@@ -1376,6 +1376,8 @@ c : ws.connect("wss://127.0.0.1:9443/echo", insecure:1)  # skip cert verify
 | `ws.close(h)` | Sends close (1000) then frees |
 | `ws.set_nonblock(h, enabled)` | Non-blocking fd |
 
+`ws.connect` asks for no extension or subprotocol. The server's answer must be `HTTP/1.1 101` with the right `Sec-WebSocket-Accept`, an `Upgrade` header that includes `websocket` and a `Connection` header that includes `Upgrade` (header names and these two values in any case), and must name no extension or subprotocol (no `Sec-WebSocket-Extensions` or `Sec-WebSocket-Protocol` header); otherwise the result is `ws_connect: websocket handshake failed`.
+
 ## Server
 
 Upgrade a connection from `rest.listen` / `rest.listen_tls` after `rest.read`:

@@ -687,6 +687,11 @@ whose items fit, and a `list` anything. `create table u (id: 0, name: "")` makes
 and `name` a `list`, so `insert into u (id, name) values ("ada", 1)` is
 `insert: column 'id' holds int, not str`.
 
+A group's `sum` of an int column is an int, added as `sum` adds a `list[int]`: exact past 2^53,
+and, if any group's int sum in the select doesn't fit in an int, every int sum in it is a
+float column, as on main. Of a float column it is a float. `avg`
+is a float, and `count` an int.
+
 See also [syntax and builtins](#syntax-and-builtins) for tables, `load("file.csv")`, and matrix types.
 
 ---

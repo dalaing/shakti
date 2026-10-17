@@ -1005,6 +1005,8 @@ Environment:
 - `SHAKTI_IPC_TRANSPORT` — default transport: `auto`, `tcp`, `uds`, `rdma`
 - `SHAKTI_IPC_ALLOW_PUBLIC=1` — allow `ipc.listen` on a non-loopback address (default: loopback/UDS only)
 
+A second `ipc.listen` on a port whose Unix listener is alive is an error (`ipc: uds bind: Address already in use`), as over TCP. A Unix listener keeps `shakti-<port>.lock` beside its socket; `ipc.close` removes both while that `.lock` is still its own; a process that ends without `ipc.close` leaves both, and the next listen reuses the lock file and replaces the socket. A non-socket at the socket path is an error (`ipc: <path> exists and is not a socket`). A socket whose listener holds no `.lock` (another program's, an older shakti's, or one whose `.lock` a cleaner of the socket directory removed) is connected to once: refused means it is replaced; otherwise the port is in use, and that listener sees one closed connection; a listener that sends on it may be ended by SIGPIPE. On macOS a full queue is refused too, and each of these connections stays queued until the listener accepts, so one that is not accepting is taken over once they fill its queue (16 for a shakti listener).
+
 Build:
 
 - `SHAKTI_IPC=1` (default) — socket IPC in the binary

@@ -77,7 +77,7 @@ static int repl_last_line(const char *buf, size_t n, const char **start, size_t 
 static int repl_buffer_needs_more(const char *buf, size_t n) {
     const char *s;
     size_t ln;
-    char tmp[65536];
+    static char tmp[65536];   /* static, like the REPL's other buffers: not on the C stack */
     P(!repl_last_line(buf, n, &s, &ln),0)
     if (ln >= sizeof tmp) ln = sizeof tmp - 1;
     memcpy(tmp, s, ln);
@@ -470,7 +470,7 @@ void run_repl(Env *e) {
     atexit(hl_raw_off);
 #endif
     enum { REPL_INPUT_CAP = 262144 };
-    char input[REPL_INPUT_CAP];
+    static char input[REPL_INPUT_CAP];   /* static: on the C stack it takes 256 KB from the evaluator */
     atexit(input_hub_shutdown);
     /* -c errors must not swallow the first interactive line. */
     if (g_error) {

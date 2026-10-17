@@ -507,7 +507,7 @@ with its value. `enumerate(d)` pairs each key with its index: `[[0, "a"], [1, "b
   `rc = 0` / `rc != 0`. Disabled when `SHAKTI_SAFE=1` or `SHAKTI_ALLOW_EXEC=0`.
   Not available on Windows or WASM builds.
 - `subprocess()` / `load(dir_with_run, …, exec:True)` — spawn a directory `run` helper (PTY). `load` on a directory runs nothing unless `exec:True` is passed; `__dir__:` is passed only to the child's environment. Disabled when `SHAKTI_SAFE=1` or `SHAKTI_ALLOW_EXEC=0`. Untrusted `.ie` input is otherwise equivalent to an untrusted shell script; see [Security](#security).
-- Parser nesting is capped at 40; interpreter call depth defaults to 3000 (`SHAKTI_CALL_MAX_DEPTH`).
+- Parser nesting is capped at 40; interpreter call depth defaults to 3000 (`SHAKTI_CALL_MAX_DEPTH`), and a call made when less than 128 KB plus a sixteenth of the C stack (at most 1 MB) is left is refused too ("recursion limit exceeded", on macOS and Linux, but not on stacks under 256 KB or, on Linux, with no stack limit); an expression too deep for the stack that is left raises the same error.
 
 ## Process / REPL
 
@@ -1920,9 +1920,9 @@ Confined builtins: `read`, `write`, `readlines`, `listdir`, `walk`, `stat`, `mkd
 |----------|---------|---------|
 | `SHAKTI_MAX_DECODE` | `1g` | Max decompressed size for in-memory decodes: `decompress`, `iefs.loads` (without `max_plain`), `hld.decode`. Accepts `k`/`m`/`g`. Clamped to the 16 GiB codec hard cap. `iefs.load` / `iefs.map` of local files keep the 64 GiB cap. |
 | `SHAKTI_REST_MAX_DECODE` | `268435456` | Max decoded size (bytes) of IEFS/HLD REST bodies. |
-| `SHAKTI_CALL_MAX_DEPTH` | `3000` | Interpreter call depth. |
+| `SHAKTI_CALL_MAX_DEPTH` | `3000` | Interpreter call depth. A call made when less than 128 KB plus a sixteenth of the C stack (at most 1 MB) is left is also refused (macOS and Linux; not on stacks under 256 KB or, on Linux, with no stack limit), so a deeper limit needs a larger stack (`ulimit -s`). |
 
-Also: parser nesting is capped at 40 (deeper input is a parse error, and the parser fits in under 256 KB of stack); expressions deeper than 4096 levels are rejected; f-string width and precision are capped at 100; `load_context` validates every length against the file size before allocating.
+Also: parser nesting is capped at 40 (deeper input is a parse error, "nesting too deep", and on macOS and Linux so is source nested, in brackets or blocks, deeper than the C stack that is left allows); expressions deeper than 4096 levels are rejected; f-string width and precision are capped at 100; `load_context` validates every length against the file size before allocating.
 
 ## REST and WebSocket
 

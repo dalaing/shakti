@@ -8,6 +8,16 @@
 #endif
 #include <stdlib.h>
 #include <limits.h>
+#if defined(__APPLE__) || defined(__linux__)
+#include <pthread.h>
+#endif
+#if defined(__linux__)
+#include <sys/auxv.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+extern char **environ;
+#endif
 
 void shakti_clear_flow(void) {
     g_breaking = 0;
@@ -17,6 +27,8 @@ void shakti_clear_flow(void) {
 }
 static int g_call_depth;
 static int g_call_depth_limit = -1;
+static uintptr_t g_stack_floor;   /* eval_fn refuses a call whose frame is below this address; 0: none */
+static uintptr_t g_stack_limit;   /* eval raises an error once its frame is below this address; 0: none */
 
 /* Raise g_error and free assign temps when materializing a mapped column fails. */
 static V *assign_map_oom(V *a, V *b, V *c, V *d) {
@@ -519,8 +531,82 @@ static int shakti_call_depth_limit(void) {
     return g_call_depth_limit;
 }
 
+/* The C stack guard. Below g_stack_floor a call is refused, as at the call-depth limit, so deep
+ * recursion is "recursion limit exceeded" rather than a crash however much stack a level takes
+ * (that depends on the compiler and on what the recursion goes through). Below the floor, a
+ * sixteenth of the stack (at most 1 MB) is left for what the last call evaluates; an expression too
+ * deep for that (a long chain of operators, calls or nested blocks) reaches g_stack_limit, where
+ * eval raises the same error. The 128 KB below the limit (512 KB under AddressSanitizer, whose
+ * frames are larger) is for C code that does not go through eval: a builtin, printing a value as
+ * deep as the printer's depth limit (SHAKTI_PRINT_MAX_DEPTH) allows, or parsing source, which
+ * checks the stack itself (parse.c). Stacks under twice that, and other systems, have only the
+ * call-depth limit. */
+#ifdef SHAKTI_ASAN
+#define SHAKTI_STACK_SPARE ((size_t)512 << 10)
+#else
+#define SHAKTI_STACK_SPARE ((size_t)128 << 10)
+#endif
+void shakti_stack_start(void) {
+    uintptr_t top = 0;
+    size_t size = 0;
+#if defined(__APPLE__)
+    top = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+    size = pthread_get_stacksize_np(pthread_self());
+#elif defined(__linux__)
+    pthread_attr_t a;
+    void *low;
+    if (pthread_getattr_np(pthread_self(), &a) == 0) {
+        if (pthread_attr_getstack(&a, &low, &size) == 0) top = (uintptr_t)low + size;
+        pthread_attr_destroy(&a);
+    }
+    /* The main thread's stack grows on demand up to RLIMIT_STACK, measured from the top of its
+     * mapping; with no limit, only the call-depth limit applies. glibc and musl both report a top
+     * below the argument and environment strings at the top of the stack (and musl only the part
+     * mapped so far), so large arguments or environment would put the bottom too low. The topmost
+     * string is the program's path (AT_EXECFN); the mapping ends on the page boundary above it. */
+    if (top && (long)getpid() == (long)syscall(SYS_gettid)) {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) {
+            uintptr_t fn = (uintptr_t)getauxval(AT_EXECFN), page = (uintptr_t)getauxval(AT_PAGESZ);
+            size = rl.rlim_cur;
+            if (fn) {
+                uintptr_t end = fn + strlen((const char *)fn) + 1;
+                if (page && !(page & (page - 1))) end = (end + page - 1) & ~(page - 1);
+                if (end > top && end - top < size) top = end;
+            } else {
+                for (char **p = environ; p && *p; p++) {
+                    uintptr_t end = (uintptr_t)*p + strlen(*p) + 1;
+                    if (end > top && end - top < size) top = end;
+                }
+            }
+        } else top = 0;
+    }
+#endif
+    size_t spare = SHAKTI_STACK_SPARE;
+    size_t room = size / 16 < ((size_t)1 << 20) ? size / 16 : ((size_t)1 << 20);
+    /* the parser's check needs only the bottom, so it holds on small stacks too */
+    g_parse_stack_bottom = top && size < top && size >= 2 * SHAKTI_PARSE_STACK_RESERVE ? top - size : 0;
+    if (!top || size >= top || size < 2 * spare) {
+        g_stack_limit = g_stack_floor = 0;
+        return;
+    }
+    g_stack_limit = top - size + spare;
+    g_stack_floor = g_stack_limit + room;
+}
+
+__attribute__((noinline, cold)) static V *eval_stack_exhausted(void) {
+    g_error = 1;
+    if (g_error_val) v_free(g_error_val);
+    g_error_val = v_err("recursion limit exceeded");
+    return v_nil();
+}
+/* At the top of every case of eval whose node has children (only those nest), so the leaves, the
+ * commonest nodes, cost nothing; the others a load, a compare and a branch. */
+#define EVAL_STACK_GUARD() \
+    do { if ((uintptr_t)__builtin_frame_address(0) < g_stack_limit) return eval_stack_exhausted(); } while (0)
+
 V *eval_fn(Node *body, Env *e) {
-    if (g_call_depth >= shakti_call_depth_limit())
+    if (g_call_depth >= shakti_call_depth_limit() || (uintptr_t)__builtin_frame_address(0) < g_stack_floor)
         return v_err("recursion limit exceeded");
     g_call_depth++;
     V *r = eval(body, e);
@@ -693,6 +779,7 @@ V *eval(Node *n, Env *e) {
     case N_PASS: return v_nil();
     case N_DATETIME: return v_datetime(n->ival);
     case N_SELECT: {
+        EVAL_STACK_GUARD();
         V *sql_err = require_sql(e);
         P(sql_err,sql_err)
         V *from0 = eval(n->ch[0], e);
@@ -723,6 +810,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_UPDATE: {
+        EVAL_STACK_GUARD();
         V *sql_err = require_sql(e);
         P(sql_err,sql_err)
         V *from0 = eval(n->ch[0], e);
@@ -770,6 +858,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_DELETE: {
+        EVAL_STACK_GUARD();
         V *sql_err = require_sql(e);
         P(sql_err,sql_err)
         V *from0 = eval(n->ch[0], e);
@@ -812,6 +901,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_CREATE_TABLE: {
+        EVAL_STACK_GUARD();
         V *sql_err = require_sql(e);
         P(sql_err,sql_err)
         V *schema = eval_create_schema(n->ch[0], e);
@@ -823,6 +913,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_INSERT: {
+        EVAL_STACK_GUARD();
         V *sql_err = require_sql(e);
         P(sql_err,sql_err)
         V *existing = env_get(e, n->sval);
@@ -843,6 +934,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_JOIN: {
+        EVAL_STACK_GUARD();
         V *sql_err = require_sql(e);
         P(sql_err,sql_err)
         V *left = eval(n->ch[0], e);
@@ -853,6 +945,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_UNION_JOIN: {
+        EVAL_STACK_GUARD();
         V *left = eval(n->ch[0], e);
         V *right = eval(n->ch[1], e);
         P(left->t==T_ERR,(v_free(right),left))
@@ -866,6 +959,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_OUTER_JOIN: {
+        EVAL_STACK_GUARD();
         V *left = eval(n->ch[0], e);
         V *right = eval(n->ch[1], e);
         P(left->t==T_ERR,(v_free(right),left))
@@ -886,6 +980,7 @@ V *eval(Node *n, Env *e) {
         return v_errf("name '%s' is not defined", n->sval);
     }
     case N_FSTRING: {
+        EVAL_STACK_GUARD();
         const char *s = n->sval;
         char *result = malloc(8192);
         if (!result) return v_err("out of memory");
@@ -967,7 +1062,8 @@ V *eval(Node *n, Env *e) {
                         }
                         char fmt[64];
                         snprintf(fmt, sizeof fmt, "%%%s", fmt_spec);
-                        char buf[512];
+                        /* static: on the stack it would be in every eval frame, so in every call */
+                        static char buf[512];
                         double dv = val->t == T_FLOAT ? val->f : (double)val->j;
                         snprintf(buf, sizeof buf, fmt, dv);
                         vs = strdup(buf);
@@ -1020,6 +1116,7 @@ V *eval(Node *n, Env *e) {
         return v_err("out of memory");
     }
     case N_LIST: {
+        EVAL_STACK_GUARD();
         int nch = n->nch;
         V **elems = calloc(nch?nch:1, sizeof(V*));
         int all_int=1, all_u8=1, all_num=1, all_bool=1;
@@ -1066,6 +1163,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_DICT: {
+        EVAL_STACK_GUARD();
         int np = n->nch / 2;
         V *keys = v_list(np);
         V *vals = v_list(np);
@@ -1084,6 +1182,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_BINOP: {
+        EVAL_STACK_GUARD();
         if(n->op == OP_ASOF_COMMA) {
             V *a=eval(n->ch[0],e);
             V *b=eval(n->ch[1],e);
@@ -1130,6 +1229,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_CMP: {
+        EVAL_STACK_GUARD();
         V *a = eval(n->ch[0], e);
         V *b = eval(n->ch[1], e);
         P(a->t==T_ERR,(v_free(b),a))
@@ -1242,6 +1342,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_UNOP: {
+        EVAL_STACK_GUARD();
         V *a = eval(n->ch[0], e);
         if(n->op == OP_NEG) {
             if(a->t==T_INT || a->t==T_CHAR)  {
@@ -1272,6 +1373,7 @@ V *eval(Node *n, Env *e) {
         return v_err("bad unop");
     }
     case N_ASSIGN: {
+        EVAL_STACK_GUARD();
         Node *target = n->ch[0];
         V *val = eval(n->ch[1], e);
         if(g_error) { v_free(val); return v_nil(); }
@@ -1419,6 +1521,7 @@ V *eval(Node *n, Env *e) {
         return v_err("bad assignment target");
     }
     case N_AUGASSIGN: {
+        EVAL_STACK_GUARD();
         Node *target = n->ch[0];
         if(target->type == N_NAME) {
             V *local = env_get_here(e, target->sval);
@@ -1478,6 +1581,7 @@ V *eval(Node *n, Env *e) {
         return v_err("bad augmented assignment target");
     }
     case N_INDEX: {
+        EVAL_STACK_GUARD();
         V *obj = eval(n->ch[0], e);
         P(n->nch < 2, obj)
         if (obj->t == T_ERR) return obj;
@@ -1546,6 +1650,7 @@ V *eval(Node *n, Env *e) {
         return obj;
     }
     case N_SLICE: {
+        EVAL_STACK_GUARD();
         V *obj = eval(n->ch[0], e);
         V *start_v = eval(n->ch[1], e);
         V *stop_v = eval(n->ch[2], e);
@@ -1555,6 +1660,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_DOT: {
+        EVAL_STACK_GUARD();
         V *obj = eval(n->ch[0], e);
         if(obj->t == T_TABLE) {
             V *cols = obj->keys;
@@ -1580,6 +1686,7 @@ V *eval(Node *n, Env *e) {
     case N_EACH:
         return eval_each(n, e);
     case N_CALL: {
+        EVAL_STACK_GUARD();
         Node *fn_node = n->ch[0];
         if(fn_node->type == N_LIST && fn_node->ival > 0) {
             if(n->nch==1) {
@@ -1831,6 +1938,7 @@ V *eval(Node *n, Env *e) {
         return result;
     }
     case N_IF: {
+        EVAL_STACK_GUARD();
         for(int i=0; i<n->nch; i+=2) {
             V *cond = eval(n->ch[i], e);
             int t = is_truthy(cond);
@@ -1840,6 +1948,7 @@ V *eval(Node *n, Env *e) {
         return v_nil();
     }
     case N_WHILE: {
+        EVAL_STACK_GUARD();
         V *fast = try_fast_counting_while(n, e);
         if(fast) return fast;
         V *r = v_nil();
@@ -1856,6 +1965,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_FOR: {
+        EVAL_STACK_GUARD();
         Node *vars = n->ch[0];
         V *iter = eval(n->ch[1], e);
         V *r = v_nil();
@@ -1983,6 +2093,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_DEF: {
+        EVAL_STACK_GUARD();
         V *params = v_list(n->ch[0]->nch);
         V *defaults = v_list(n->ch[0]->nch);
         for(int i=0; i<n->ch[0]->nch; i++) {
@@ -2007,6 +2118,7 @@ V *eval(Node *n, Env *e) {
         return v_nil();
     }
     case N_LAMBDA: {
+        EVAL_STACK_GUARD();
         V *params = v_list(n->ch[0]->nch);
         V *defaults = v_list(n->ch[0]->nch);
         for(int i=0; i<n->ch[0]->nch; i++) {
@@ -2030,6 +2142,7 @@ V *eval(Node *n, Env *e) {
         return fn;
     }
     case N_RETURN: {
+        EVAL_STACK_GUARD();
         V *rv;
         if(n->nch > 0) rv = eval(n->ch[0], e);
         else rv = v_nil();
@@ -2041,6 +2154,7 @@ V *eval(Node *n, Env *e) {
     case N_BREAK:    { g_breaking = 1; return v_nil(); }
     case N_CONTINUE: { g_continuing = 1; return v_nil(); }
     case N_RAISE: {
+        EVAL_STACK_GUARD();
         V *val = n->nch > 0 ? eval(n->ch[0], e) : v_err("Exception");
         g_error = 1;
         if (val->t == T_ERR) {
@@ -2054,6 +2168,7 @@ V *eval(Node *n, Env *e) {
         return v_nil();
     }
     case N_TRY: {
+        EVAL_STACK_GUARD();
         /* Slots: 0 try, 1 except, 2 else, 3 finally. Missing clauses are N_PASS. */
         int prev_error = g_error;
         int has_except = n->nch > 1 && n->ch[1]->type != N_PASS;
@@ -2132,6 +2247,7 @@ V *eval(Node *n, Env *e) {
         return r;
     }
     case N_WITH: {
+        EVAL_STACK_GUARD();
         V *ctx = eval(n->ch[0], e);
         if(n->sval) env_set(e, n->sval, ctx);
         V *r = eval(n->ch[1], e);
@@ -2141,6 +2257,7 @@ V *eval(Node *n, Env *e) {
     case N_DEL: return v_nil();
     case N_GLOBAL: return v_nil();
     case N_CLASS: {
+        EVAL_STACK_GUARD();
         Env *cls_env = env_new(e);
         V *r = eval(n->ch[0], cls_env);
         v_free(r);
@@ -2183,6 +2300,7 @@ V *eval(Node *n, Env *e) {
         return v_nil();
     }
     case N_BLOCK: {
+        EVAL_STACK_GUARD();
         V *r = v_nil();
         i(n->nch,{
             v_free(r);

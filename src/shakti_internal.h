@@ -28,6 +28,27 @@
 #ifndef SHAKTI_PRINT_MAX_DEPTH
 #define SHAKTI_PRINT_MAX_DEPTH 512
 #endif
+/* AddressSanitizer's frames are several times larger, so the C stack reserves below are too. */
+#if defined(__SANITIZE_ADDRESS__)
+#define SHAKTI_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SHAKTI_ASAN 1
+#endif
+#endif
+/* The parser gives "nesting too deep" when less than this much C stack is left below its frame
+ * (brackets nest to SHAKTI_PARSE_MAX_DEPTH, but blocks to 255 levels, which the cap doesn't count).
+ * One level and reporting a parse error there take under 8 KB (gcc -O2). */
+#ifndef SHAKTI_PARSE_STACK_RESERVE
+#ifdef SHAKTI_ASAN
+#define SHAKTI_PARSE_STACK_RESERVE ((size_t)64 << 10)
+#else
+#define SHAKTI_PARSE_STACK_RESERVE ((size_t)16 << 10)
+#endif
+#endif
+/* The lowest usable address of the C stack, for the parser's check; set by shakti_stack_start
+ * (eval.c), 0 (no check) when the stack is not known. */
+extern uintptr_t g_parse_stack_bottom;
 
 #ifdef _WIN32
 #define SHAKTI_TIMEGM(tm) _mkgmtime(tm)

@@ -428,9 +428,9 @@ V *vec_binop(V *a, V *b, int op) {
     }
     if(a->t==T_STR && b->t==T_INT && op==OP_MUL) {
         int64_t n = b->j;
-        if (n <= 0) return v_str("");
         size_t slen = strlen(a->s);
-        if (slen > 0 && (uint64_t)n > (SIZE_MAX - 1) / slen)
+        if (n <= 0 || slen == 0) return v_str("");
+        if ((uint64_t)n > (SIZE_MAX - 1) / slen)
             return v_err("string repeat too large");
         size_t total = slen * (size_t)n;
         char *r = malloc(total + 1);

@@ -279,7 +279,11 @@ static V *eval_insert_values(Node *n, Env *e) {
     }
     return r;
 }
-static V *eval_update_cols(Node *n, V *tbl, Env *e) {
+/* The assignments of an update, as a dict. A raise in one stops there and is returned. An error
+ * value in one is kept in *errv (the first one) and the rest are still evaluated, so a raise after
+ * it, or in where, still stops the update; the caller makes it the update's result after where. */
+static V *eval_update_cols(Node *n, V *tbl, Env *e, V **errv) {
+    *errv = NULL;
     P(!n || n->type == N_NONE,v_dict_empty())
     Env *inner = env_new(e);
     if(tbl && tbl->t == T_TABLE) {
@@ -293,12 +297,26 @@ static V *eval_update_cols(Node *n, V *tbl, Env *e) {
     i(nitems,{
         Node *item = items[i];
         if(item->type == N_ASSIGN && item->nch >= 2 && item->ch[0]->type == N_NAME) {
+            V *val = eval(item->ch[1], inner);
+            if (g_error) {   /* a raise (in from, or here on the right): the update stops */
+                env_free(inner);
+                v_free(keys);
+                v_free(vals);
+                v_free(*errv); *errv = NULL;
+                return val ? val : v_err("update: value error");
+            }
+            if (!val || val->t == T_ERR) {   /* an error value: the update's result, after where */
+                if (!*errv) *errv = val ? val : v_err("update: value error");
+                else v_free(val);
+                continue;
+            }
             v_list_append_own(keys, v_str(item->ch[0]->sval));
-            v_list_append_own(vals, eval(item->ch[1], inner));
+            v_list_append_own(vals, val);
         } else {
             env_free(inner);
             v_free(keys);
             v_free(vals);
+            v_free(*errv); *errv = NULL;
             return v_err("update: expected col: expr");
         }
     })
@@ -743,13 +761,20 @@ V *eval(Node *n, Env *e) {
             }
         }
 #endif
-        V *assignments = eval_update_cols(n->ch[1], from, e);
-        if (assignments->t == T_ERR) {
+        V *rerr;   /* an error value on the right */
+        V *assignments = eval_update_cols(n->ch[1], from, e, &rerr);
+        /* a raise in from or on the right stops the update here, before where */
+        if (g_error || assignments->t == T_ERR) {
             free(iefs_path);
             v_free(from);
             return assignments;
         }
         V *where = eval_with_table_columns(from, n->ch[3], e);
+        if (rerr) {   /* the update's result, before the table and its columns are looked at */
+            free(iefs_path);
+            v_free(from); v_free(assignments); v_free(where);
+            return rerr;
+        }
         V *r = table_sql_update(from, assignments, where);
 #ifdef SHAKTI_HAVE_IEFS
         if (r && r->t != T_ERR && iefs_path) {

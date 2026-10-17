@@ -713,6 +713,17 @@ whose items fit, and a `list` anything. `create table u (id: 0, name: "")` makes
 and `name` a `list`, so `insert into u (id, name) values ("ada", 1)` is
 `insert: column 'id' holds int, not str`.
 
+`update` puts values in a column by the same rule (though `insert` puts in the value itself, so a
+dict it inserts is shared with its variable), or is an error and changes nothing:
+`update id : "x" from u` is `update: column 'id' holds int, not str`, whichever rows `where` picks.
+In `col : expr`, a vector, list or matrix is a column, with a value for each row of the table
+(`update amount : amount * 2 from t`), except that a vector is one row for a matrix column
+(`update m : [0, 0] from t where id = 1` for a `matrix[int]` column `m`); anything else is one
+value for every row `where` picks, each row with its own copy of it (a dict put in a `list`
+column is not shared by the rows, or with the variable it came from). A column of another
+height is `update: column length mismatch`, and an error value is the update's result (a raise in
+`where` still stops it).
+
 A group's `sum` of an int column is an int, added as `sum` adds a `list[int]`: exact past 2^53,
 and, if any group's int sum in the select doesn't fit in an int, every int sum in it is a
 float column, as on main. Of a float column it is a float. `avg`

@@ -9,7 +9,10 @@ extern "C" {
 #endif
 
 /* Thin OpenSSL transport for long-lived sockets (WebSocket wss://, rest.listen_tls).
- * Opaque SSL* / SSL_CTX* are void* so callers need not include openssl headers. */
+ * Opaque SSL* / SSL_CTX* are void* so callers need not include openssl headers.
+ * A peer that has closed makes a call fail (EPIPE, ECONNRESET) instead of raising SIGPIPE: on
+ * macOS shakti_tls_connect and shakti_tls_accept set SO_NOSIGPIPE on the socket; elsewhere (Linux)
+ * SIGPIPE is blocked in the calling thread around each call that can write. */
 
 void shakti_tls_init(void);
 
@@ -30,6 +33,8 @@ void *shakti_tls_accept(int fd, void *server_ctx);
 void *shakti_tls_accept_timeout(int fd, void *server_ctx, int timeout_ms);
 
 ssize_t shakti_tls_read(void *ssl, void *buf, size_t n);
+/* -1 on failure, with errno EAGAIN (would block), the socket's error, or EIO (a TLS failure that
+ * left no socket error). */
 ssize_t shakti_tls_write(void *ssl, const void *buf, size_t n);
 
 /* Bytes buffered in SSL that can be read without blocking the fd. */

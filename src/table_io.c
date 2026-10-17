@@ -1,5 +1,6 @@
 #include "shakti_internal.h"
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <float.h>
 #include <stdio.h>
@@ -56,7 +57,10 @@ static unsigned long csv_max_file_bytes(void) {
     }
     return 1024ul * 1024ul * 1024ul;
 }
-static char *read_all(const char *s) {
+/* The whole file, or NULL when it can't be read in one go: it can't be opened, its size isn't known
+   (a pipe), it is too big for one read, or there is no memory for it (the caller streams it then).
+   *bad is set when reading it fails or reads less than its size. */
+static char *read_all(const char *s, size_t *len, int *bad) {
     FILE *f = fopen(s, "rb");
     P(!f, NULL)
     fseek(f, 0, SEEK_END);
@@ -71,10 +75,15 @@ static char *read_all(const char *s) {
         fclose(f);
         return NULL;
     }
-    /* Use the actual byte count so a short read can't leave the tail
-     * uninitialized before the NUL terminator. */
     size_t got = fread(b, 1, (size_t)z, f);
+    if (got != (size_t)z || ferror(f)) {
+        free(b);
+        fclose(f);
+        *bad = 1;
+        return NULL;
+    }
     b[got] = 0;
+    *len = got;
     fclose(f);
     return b;
 }
@@ -108,6 +117,16 @@ static const char *delim_skip_field(const char *p, char c, int *ate_delim) {
     if (*p == c) { p++; *ate_delim = 1; }
     return p;
 }
+/* Trim the padding of a quoted field: spaces, and tabs unless the tab is the delimiter, as strip_pad
+   does, but not a \r or \n at the end: a line break inside the quotes is part of the field. */
+static void strip_quoted_pad(char *s, char delim) {
+    char *a = s;
+    W(*a == ' ' || (*a == '\t' && delim != '\t'), a++)
+    if (a != s)
+        memmove(s, a, strlen(a) + 1);
+    size_t n = strlen(s);
+    W(n && (s[n - 1] == ' ' || (s[n - 1] == '\t' && delim != '\t')), s[--n] = 0)
+}
 static int split_delim_line(char *line, char **out, int max, char c) {
     int n = 0;
     char *p = line;
@@ -127,7 +146,7 @@ static int split_delim_line(char *line, char **out, int max, char c) {
             }
             *w = 0;
             if (*r == c) { r++; ate = 1; }
-            strip_pad(out[n - 1], c);
+            strip_quoted_pad(out[n - 1], c);
             p = r;
         } else {
             char *start = p;
@@ -139,6 +158,91 @@ static int split_delim_line(char *line, char **out, int max, char c) {
         if (!ate) break;
     }
     return n;
+}
+
+/* Where the record at p ends: its first newline outside a quoted field, or end. A field is quoted
+   when it starts with '"' (the record's first field once its padding is off), as split_delim_line
+   reads it. *quoted says whether p is inside a quoted field already, and is left saying whether the
+   text ends inside one. The text runs to end: inside quotes a NUL is a byte like any other here,
+   but outside them it ends the record's text, so the record runs to the next newline. */
+static char *record_end(char *p, char *end, char c, int *quoted) {
+    if (!*quoted) {
+        char *e = memchr(p, '\n', (size_t)(end - p));
+        if (!e) e = end;
+        if (!memchr(p, '"', (size_t)(e - p))) return e; /* no quote in the line: the usual case */
+        W(*p == ' ' || (*p == '\t' && c != '\t'), p++)
+    }
+    for (;;) {
+        if (!*quoted && p < end && *p == '"') { *quoted = 1; p++; }
+        if (*quoted) {
+            char *q;
+            while ((q = memchr(p, '"', (size_t)(end - p))) && q + 1 < end && q[1] == '"')
+                p = q + 2;
+            if (!q) return end;
+            *quoted = 0;
+            p = q + 1;
+        }
+        while (p < end && *p != c && *p != '\n' && *p) p++;
+        if (p < end && !*p) {
+            char *e = memchr(p, '\n', (size_t)(end - p));
+            return e ? e : end;
+        }
+        if (p == end || *p != c) return p;
+        p++;
+    }
+}
+/* What get_record returns when there is no record. */
+enum { REC_EOF = -1, REC_UNCLOSED = -2, REC_NOMEM = -3, REC_READ_ERR = -4 };
+static V *record_error(ssize_t got, const char *fmt, const char *path) {
+    if (got == REC_NOMEM) return v_errf("%s: out of memory", fmt);
+    if (got == REC_UNCLOSED) return v_errf("%s: quoted field not closed", fmt);
+    if (got == REC_READ_ERR) return v_errf("%s: cannot read '%s'", fmt, path);
+    return v_errf("%s: need header + rows", fmt);
+}
+/* Why getline failed: the end of the file, or no memory for the line, or a read error. */
+static int line_error(FILE *f) {
+    return feof(f) ? REC_EOF : errno == ENOMEM ? REC_NOMEM : REC_READ_ERR;
+}
+/* getline for a record: while a quoted field is open at the end of a line, the next line is part
+   of it. Returns the record's length, or REC_EOF at the end of the file, REC_UNCLOSED when the file
+   ends inside a quoted field, REC_NOMEM when there is no memory to hold the record, REC_READ_ERR
+   when reading it fails. With bom, a byte order mark at the start is skipped when looking for quotes
+   (the caller takes it off). */
+static ssize_t get_record(char **line, size_t *cap, FILE *f, char c, int bom) {
+    errno = 0;
+    ssize_t got = getline(line, cap, f);
+    char *more = NULL;
+    size_t more_cap = 0, from = 0;
+    int quoted = 0;
+    if (got < 0) return line_error(f);
+    if (!memchr(*line, '"', (size_t)got)) return got; /* no quote in the line: the usual case */
+    if (bom && got >= 3 && (unsigned char)(*line)[0] == 0xef && (unsigned char)(*line)[1] == 0xbb &&
+        (unsigned char)(*line)[2] == 0xbf)
+        from = 3;
+    for (;;) {
+        record_end(*line + from, *line + got, c, &quoted);
+        if (!quoted) break;
+        errno = 0;
+        ssize_t n = getline(&more, &more_cap, f);
+        if (n < 0) {
+            int err = line_error(f);
+            free(more);
+            return err == REC_EOF ? REC_UNCLOSED : err;
+        }
+        if ((size_t)got + (size_t)n + 1 > *cap) {
+            size_t want = (size_t)got + (size_t)n + 1;
+            if (want < *cap * 2) want = *cap * 2;
+            char *grown = realloc(*line, want);
+            if (!grown) { free(more); return REC_NOMEM; }
+            *line = grown;
+            *cap = want;
+        }
+        memcpy(*line + got, more, (size_t)n + 1);
+        from = (size_t)got;
+        got += n;
+    }
+    free(more);
+    return got;
 }
 
 static int field_needs_quote(const char *s, char delim) {
@@ -315,9 +419,12 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
     /* Prefer a single buffered read for normal-sized files (fast path / benches).
      * Fall back to two-pass getline streaming when the file exceeds
      * SHAKTI_CSV_MAX_BYTES (default 1 GiB) or cannot be mapped that way. */
-    char *raw = read_all(path);
+    size_t raw_len = 0;
+    int raw_bad = 0;
+    char *raw = read_all(path, &raw_len, &raw_bad);
+    P(raw_bad, v_errf("%s: cannot read '%s'", fmt, path))
     if (raw) {
-        char *buf = raw;
+        char *buf = raw, *end = raw + raw_len;
         if ((unsigned char)buf[0] == 0xef && (unsigned char)buf[1] == 0xbb &&
             (unsigned char)buf[2] == 0xbf)
             buf += 3;
@@ -328,7 +435,7 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
             return v_errf("%s: out of memory", fmt);
         }
         char *at = buf;
-        while (*at) {
+        while (at < end) {
             if (nl >= cap) {
                 if (cap > (INT64_C(1) << 30)) {
                     free(lines);
@@ -344,8 +451,14 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
                 }
                 lines = nlines;
             }
-            char *e = strchr(at, '\n');
-            if (e) {
+            int quoted = 0;
+            char *e = record_end(at, end, c, &quoted);
+            if (quoted) {
+                free(lines);
+                free(raw);
+                return v_errf("%s: quoted field not closed", fmt);
+            }
+            if (e < end) {
                 *e = 0;
                 if (e > at && e[-1] == '\r')
                     e[-1] = 0;
@@ -361,6 +474,7 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
             free(raw);
             return v_errf("%s: need header + rows", fmt);
         }
+        strip_pad(lines[0], c);
         int nh_count = count_delim_fields(lines[0], c);
         if (nh_count <= 0 || nh_count > 1000000) {
             free(lines);
@@ -458,11 +572,11 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
     P(!f, v_errf("%s: cannot read '%s'", fmt, path))
     char *line = NULL;
     size_t line_cap = 0;
-    ssize_t got = getline(&line, &line_cap, f);
+    ssize_t got = get_record(&line, &line_cap, f, c, 1);
     if (got < 0) {
         fclose(f);
         free(line);
-        return v_errf("%s: need header + rows", fmt);
+        return record_error(got, fmt, path);
     }
     char *header = line;
     if (got >= 3 && (unsigned char)header[0] == 0xef &&
@@ -504,7 +618,7 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
     }
     free(hdr_cells);
     int64_t data_rows = 0;
-    while ((got = getline(&line, &line_cap, f)) >= 0) {
+    while ((got = get_record(&line, &line_cap, f, c, 0)) >= 0) {
         strip_pad(line, c);
         if (!line[0])
             continue;
@@ -522,13 +636,13 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
                 use_float[cj] = 1;
         }
     }
-    if (data_rows <= 0) {
+    if (got < REC_EOF || data_rows <= 0) {
         for (int ci = 0; ci < nh; ci++)
             free(headers[ci]);
         free(headers); free(cells); free(use_float);
         fclose(f);
         free(line);
-        return v_errf("%s: need header + rows", fmt);
+        return record_error(got, fmt, path);
     }
     V **cols = calloc((size_t)nh, sizeof(V *));
     if (!cols) {
@@ -545,10 +659,12 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
         if (!use_float[cj])
             memset(cols[cj]->J, 0, (size_t)data_rows * sizeof(int64_t));
 
-    rewind(f);
-    (void)getline(&line, &line_cap, f); /* header */
+    /* Pass 2 reads the file again from the start: it is a read error if it can't go back there (a
+       pipe), or if the file now ends before the rows pass 1 counted (it shrank), or "quoted field
+       not closed" if it now ends inside one. */
+    got = fseek(f, 0, SEEK_SET) ? REC_READ_ERR : get_record(&line, &line_cap, f, c, 1); /* header */
     int64_t row = 0;
-    while ((got = getline(&line, &line_cap, f)) >= 0) {
+    while (got >= 0 && (got = get_record(&line, &line_cap, f, c, 0)) >= 0) {
         strip_pad(line, c);
         if (!line[0])
             continue;
@@ -565,6 +681,17 @@ static V *table_delim_load(const char *path, V *columns_opt, char c, const char 
                 cols[cj]->J[row] = (int64_t)strtoll(cell, NULL, 10);
         }
         row++;
+    }
+    if (got < REC_EOF || row < data_rows) {
+        if (got >= REC_EOF) got = REC_READ_ERR;
+        for (int ci = 0; ci < nh; ci++) {
+            free(headers[ci]);
+            v_free(cols[ci]);
+        }
+        free(headers); free(cells); free(use_float); free(cols);
+        fclose(f);
+        free(line);
+        return record_error(got, fmt, path);
     }
     V *kl = v_list(nh);
     V *dl = v_list(nh);

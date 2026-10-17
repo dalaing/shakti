@@ -340,6 +340,7 @@ Leading `@` decorates. `mmul(a, b)` multiplies matrices.
 
 | Call | Meaning |
 |------|---------|
+| `any(xs)`, `all(xs)` | Of one list or vector: whether some item, or every item, is true (`any([0, 0])` is `False`, `all([])` is `True`). With several arguments, `any(a, b, …)` and `all(a, b, …)` test the arguments. One str, matrix, dict or number is tested whole (`all("")` is `False`). |
 | `sublist(n, xs)` | First `n` items. A negative `n` takes from the end. |
 | `sublist([i, n], xs)` | `n` items starting at index `i` (`i` may be negative). |
 | `drop(n, xs)` | Drop the first `n` items. A negative `n` drops from the end. |

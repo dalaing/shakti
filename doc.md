@@ -1804,6 +1804,7 @@ print(iefs.direct_available(), iefs.uring_available(), iefs.libaio_available())
 - Host codecs: `zstd`, `snappy`, plus residual `delta_i64` / `fire_i64` / `gorilla_f64` / `date` / `time` / `datetime` (v3 extents; compounds like `fire_i64+zstd`). Also interned as `compress` / `decompress`.
 - SQL `select … from "….iefs"` opens via **map**. `update … from` and `delete from` a `.iefs` path write their result back to the file; a variable holding the path keeps the path.
 - Whole-file zstd/snappy on v1/v2; v3 per-extent codec + optional outer LZ.
+- `codecs:` (on `save` and `dumps`) is a dict from column name to codec, and a dict (even `{}`) makes format 3 the default. `""` (the default), `[]` or an empty vector (`list[int]`, `list[float]`, `list[bool]` or `list[char]`) means no codecs. An error value given as `codecs:` is returned as it is. Anything else (`codecs:"zstd"`, a table, a matrix) is an error value, and `save` writes nothing. `codec:` is the codec for the whole file (format 2) or for each column (format 3); with `codecs:`, for every column it doesn't name.
 
 Type layout 1 (`char`=4, `str`=5) is stored at header offset 20. Env: `SHAKTI_IEFS_DIRECT=0|1`, `SHAKTI_IEFS_DIRECT_MIN=<bytes>`, `SHAKTI_IEFS_VERSION=3`, `SHAKTI_IEFS_LIBAIO=0|1`.
 On Darwin, `direct_available()` is 0; large AUTO reads/writes still set `F_NOCACHE` above the same size threshold.

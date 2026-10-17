@@ -27,11 +27,19 @@ def save(x, path, direct:-1, codec:"", level:3, format:0, codecs:"", sync:"full"
     c : codec
     fmt : format
     cs : codecs
-    if type(cs) = "dict":
+    # codecs: an empty str, list or vector (list[int], list[float], list[bool], list[char])
+    # is no codecs, which the builtin takes as []; an error value comes back as it is;
+    # anything else goes to the builtin, which refuses what isn't a dict
+    t : type(cs)
+    if t = "error":
+        return cs
+    if t = "str" or t = "list" or t = "list[int]" or t = "list[float]" or t = "list[bool]" or t = "list[char]":
+        if len(cs) = 0:
+            cs : []
+    if t = "dict":
         if fmt = 0:
             fmt : 3
-        return iefs_save(x, path, d, c, level, fmt, cs, sync)
-    return iefs_save(x, path, d, c, level, fmt, [], sync)
+    return iefs_save(x, path, d, c, level, fmt, cs, sync)
 
 def load(path):
     return iefs_load(path)
@@ -44,16 +52,21 @@ def map(path, pages:"thp", device:"", columns:[]):
     return iefs_map(path, pages, device)
 
 def dumps(x, codec:"", level:3, format:0, codecs:""):
-    if type(codecs) = "dict":
-        fmt : format
+    fmt : format
+    cs : codecs
+    # codecs: an empty str, list or vector (list[int], list[float], list[bool], list[char])
+    # is no codecs, which the builtin takes as []; an error value comes back as it is;
+    # anything else goes to the builtin, which refuses what isn't a dict
+    t : type(cs)
+    if t = "error":
+        return cs
+    if t = "str" or t = "list" or t = "list[int]" or t = "list[float]" or t = "list[bool]" or t = "list[char]":
+        if len(cs) = 0:
+            cs : []
+    if t = "dict":
         if fmt = 0:
             fmt : 3
-        return iefs_dumps(x, codec, level, fmt, codecs)
-    if format = 0:
-        if codec = "":
-            return iefs_dumps(x)
-        return iefs_dumps(x, codec, level)
-    return iefs_dumps(x, codec, level, format)
+    return iefs_dumps(x, codec, level, fmt, cs)
 
 def loads(blob, max_plain:-1):
     if max_plain < 0:

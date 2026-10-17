@@ -2574,7 +2574,8 @@ static V *u8vec_from_buf(const unsigned char *p, size_t n) {
 }
 
 V *bi_iefs_dumps(V **a, int n) {
-    /* iefs_dumps(value[, codec[, level[, format[, codecs]]]]) */
+    /* iefs_dumps(value[, codec[, level[, format[, codecs]]]]); format 0 is the default format,
+     * as iefs_save's eight-argument form (the one lib/iefs.ie calls) takes it. */
     if (n < 1 || !a[0])
         return v_err("iefs_dumps(value[, codec[, level[, format[, codecs]]]])");
     int codec = SHAKTI_CODEC_NONE;
@@ -2597,9 +2598,11 @@ V *bi_iefs_dumps(V **a, int n) {
     if (n > 3) {
         if (a[3]->t != T_INT )
             return v_err("iefs_dumps: format must be 2 or 3");
-        ver = (unsigned)a[3]->j;
-        if (ver != 2 && ver != 3)
-            return v_err("iefs_dumps: format must be 2 or 3");
+        if (a[3]->j != 0) {
+            ver = (unsigned)a[3]->j;
+            if (ver != 2 && ver != 3)
+                return v_err("iefs_dumps: format must be 2 or 3");
+        }
     }
     if (n > 4) {
         if (a[4]->t != T_DICT && !(a[4]->t == T_LIST && a[4]->n == 0))

@@ -351,6 +351,7 @@ print(len(xs))                # 5
 | `sum(v)` | Sum of elements |
 | `min(v)`, `max(v)`, `avg(v)` | Reducers |
 | `abs(v)` | Element-wise absolute value |
+| `sqrt(v)`, `exp`, `log`, `sin`, `cos`, `tan`, `floor`, `ceil` | Element-wise on int, float and char vectors and matrices, giving floats; an int, float or char (its code) gives a float; an error is passed through; anything else (a bool, str, list, dict, table or None) is an error |
 
 ```ie
 a : range(1000000)
@@ -408,7 +409,8 @@ Mixed int/float operands promote to `matrix[float]` where needed.
 
 ### Builtins
 
-Same reducers as vectors, applied over all elements: `sum`, `min`, `max`, `avg`, `abs`. `dot` applies to vectors only, not matrices. `mmul(a, b)` is matrix multiply.
+Reducers over all elements: `sum`, `min`, `max`, `avg`. Element-wise: `abs`, and the math builtins
+(`sqrt`, `exp`, `log`, `sin`, `cos`, `tan`, `floor`, `ceil`), which give `matrix[float]`. `dot` applies to vectors only, not matrices. `mmul(a, b)` is matrix multiply.
 
 ### Performance
 

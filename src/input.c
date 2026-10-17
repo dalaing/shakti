@@ -474,10 +474,15 @@ static void tty_drain(int timeout_ms) {
     unsigned char pending[PENDING_MAX];
     int pn = 0;
     double deadline = timeout_ms <= 0 ? now_ms() : now_ms() + (double)timeout_ms;
+    int forever = timeout_ms < 0, got = 0;
     for (;;) {
         unsigned char c;
+        /* a wait without limit ends once this call has queued an event: the rest of what has
+         * arrived (the rest of a paste) is read without waiting, and an escape sequence already
+         * begun is given up to 50 ms for its next byte, as a terminal's escape delay does */
+        if (forever) timeout_ms = got ? 0 : -1;
         int wait = timeout_ms < 0 ? -1 : (int)(deadline - now_ms());
-        if (timeout_ms == 0) wait = 0;
+        if (timeout_ms == 0) wait = forever && pn ? 50 : 0;
         if (wait < 0 && timeout_ms >= 0 && timeout_ms != 0 && now_ms() >= deadline) break;
         if (!read_byte_timed(wait, &c)) {
             if (timeout_ms == 0) break;
@@ -488,6 +493,7 @@ static void tty_drain(int timeout_ms) {
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         raw_after_first();
 #endif
+        int qt = g_in.qt;
         if (!decode_vt_byte(c, pending, &pn)) {
             if (c == '\r' || c == '\n') {
                 char u[2] = {(char)c, 0};
@@ -504,7 +510,7 @@ static void tty_drain(int timeout_ms) {
                 emit_key((int)c, u, 0);
             }
         }
-        if (timeout_ms == 0) continue;
+        if (g_in.qt != qt) got = 1;
     }
 }
 

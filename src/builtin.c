@@ -556,13 +556,29 @@ static V *vec_reduce_sum(V *v) {
         return i64_sum_value(v->J, v->n);
     if (v->t == T_FVEC)
         return v_float(shakti_sum_f64(v->F, v->n));
+    if (v->t == T_CVEC || v->t == T_CMAT) {
+        /* the sum of the codes, as a char in arithmetic is its code */
+        int64_t s = 0;
+        int64_t ne = v->t == T_CMAT ? mat_nelem(v) : v->n;
+        for (int64_t i = 0; i < ne; i++) s += v->B[i];
+        return v_int(s);
+    }
+    if (v->t == T_BVEC || v->t == T_BMAT) {
+        /* the count of Trues: a bool counts as 0 or 1, as in Python */
+        int64_t s = 0;
+        int64_t ne = v->t == T_BMAT ? mat_nelem(v) : v->n;
+        for (int64_t i = 0; i < ne; i++) s += v->B[i] != 0;
+        return v_int(s);
+    }
     if (v->t == T_LIST) {
         double s = 0;
         int all_int = 1;
         for (int64_t i = 0; i < v->n; i++) {
             V *e = v->L[i];
             if (e->t == T_INT) s += (double)e->j;
+            else if (e->t == T_BOOL) s += e->j != 0;
             else if (e->t == T_FLOAT) { s += e->f; all_int = 0; }
+            else if (e->t == T_ERR) return v_ref(e);
             else return v_err("sum: bad list element");
         }
         return sum_double_value(s, all_int);
@@ -573,12 +589,30 @@ static V *vec_reduce_avg(V *v) {
     V *s = vec_reduce_sum(v);
     if (s->t == T_ERR) return s;
     int64_t cnt = v->t >= T_IMAT && v->t <= T_BMAT ? mat_nelem(v) : v->n;
-    if (cnt == 0) { v_free(s); return v_float(0); }
+    if (cnt == 0) { v_free(s); return v_float(NAN); }   /* mean of nothing */
     V *r;
     if (s->t == T_INT) r = v_float((double)s->j / (double)cnt);
     else r = v_float(s->f / (double)cnt);
     v_free(s);
     return r;
+}
+/* min or max of several values (the arguments, or the items of a generic list) compares them with <
+ * (min) or > (max), as in Python, and gives the first extreme one itself (max(3, 9, 4) is 9); values
+ * that don't compare (an int and a str, a vector, or a None among them) are an error, and an error
+ * value passes through. */
+static V *bi_extreme(const char *fn, V **a, int64_t n, int op) {
+    V *m = a[0];
+    if (m->t == T_ERR) return v_ref(m);
+    for (int64_t i = 1; i < n; i++) {
+        if (a[i]->t == T_ERR) return v_ref(a[i]);
+        V *c = vec_cmp(a[i], m, op);
+        /* None compares False either way, so it would win or lose by its place: refuse it */
+        int win = c->t == T_BOOL && c->j, ok = c->t == T_BOOL && m->t != T_NIL && a[i]->t != T_NIL;
+        v_free(c);
+        if (!ok) return v_errf("%s: cannot compare %s and %s", fn, type_name(m->t), type_name(a[i]->t));
+        if (win) m = a[i];
+    }
+    return v_ref(m);
 }
 static V *vec_reduce_min(V *v) {
     if (v->t == T_IMAT) {
@@ -611,16 +645,24 @@ static V *vec_reduce_min(V *v) {
         for (int64_t i = 1; i < v->n; i++) if (v->F[i] < m) m = v->F[i];
         return v_float(m);
     }
+    if (v->t == T_CVEC || v->t == T_CMAT) {
+        /* chars order by code: the least char */
+        int64_t ne = v->t == T_CMAT ? mat_nelem(v) : v->n;
+        P(ne == 0,v_nil())
+        unsigned char m = v->B[0];
+        for (int64_t i = 1; i < ne; i++) if (v->B[i] < m) m = v->B[i];
+        return v_char(m);
+    }
+    if (v->t == T_BVEC || v->t == T_BMAT) {
+        /* False < True: min is whether all are True */
+        int64_t ne = v->t == T_BMAT ? mat_nelem(v) : v->n;
+        P(ne == 0,v_nil())
+        for (int64_t i = 0; i < ne; i++) if (!v->B[i]) return v_bool(0);
+        return v_bool(1);
+    }
     if (v->t == T_LIST) {
         P(v->n == 0,v_nil())
-        V *m = v_ref(v->L[0]);
-        for (int64_t i = 1; i < v->n; i++) {
-            V *c = vec_cmp(m, v->L[i], OP_LT);
-            int lt = c->t == T_BOOL && c->j;
-            v_free(c);
-            if (lt) { v_free(m); m = v_ref(v->L[i]); }
-        }
-        return m;
+        return bi_extreme("min", v->L, v->n, OP_LT);
     }
     return v_err("min: need vector");
 }
@@ -655,16 +697,24 @@ static V *vec_reduce_max(V *v) {
         for (int64_t i = 1; i < v->n; i++) if (v->F[i] > m) m = v->F[i];
         return v_float(m);
     }
+    if (v->t == T_CVEC || v->t == T_CMAT) {
+        /* chars order by code: the greatest char */
+        int64_t ne = v->t == T_CMAT ? mat_nelem(v) : v->n;
+        P(ne == 0,v_nil())
+        unsigned char m = v->B[0];
+        for (int64_t i = 1; i < ne; i++) if (v->B[i] > m) m = v->B[i];
+        return v_char(m);
+    }
+    if (v->t == T_BVEC || v->t == T_BMAT) {
+        /* False < True: max is whether any is True */
+        int64_t ne = v->t == T_BMAT ? mat_nelem(v) : v->n;
+        P(ne == 0,v_nil())
+        for (int64_t i = 0; i < ne; i++) if (v->B[i]) return v_bool(1);
+        return v_bool(0);
+    }
     if (v->t == T_LIST) {
         P(v->n == 0,v_nil())
-        V *m = v_ref(v->L[0]);
-        for (int64_t i = 1; i < v->n; i++) {
-            V *c = vec_cmp(m, v->L[i], OP_GT);
-            int gt = c->t == T_BOOL && c->j;
-            v_free(c);
-            if (gt) { v_free(m); m = v_ref(v->L[i]); }
-        }
-        return m;
+        return bi_extreme("max", v->L, v->n, OP_GT);
     }
     return v_err("max: need vector");
 }
@@ -739,16 +789,20 @@ static V *bi_sum(V **a, in) {
     P(n < 1,v_int(0))
     if (n == 1) {
         V *v = a[0];
+        P(v->t == T_ERR,v_ref(v))
         P(v->t >= T_IVEC && v->t <= T_LIST,vec_reduce_sum(v))
-        P(v->t >= T_IMAT && v->t <= T_FMAT,vec_reduce_sum(v))
+        P(v->t >= T_IMAT && v->t <= T_BMAT,vec_reduce_sum(v))
+        P(v->t == T_CHAR,v_int(v->j))
         P(v->t == T_FLOAT,v_float(v->f))
         P(v->t == T_INT,v_int(v->j))
-        return v_int(0);
+        P(v->t == T_BOOL,v_int(v->j != 0))
+        return v_errf("sum: unsupported operand type %s", type_name(v->t));
     }
     double s = 0;
     int all_int = 1;
     for (int i = 0; i < n; i++) {
-        if (a[i]->t == T_INT) s += (double)a[i]->j;
+        if (a[i]->t == T_INT || a[i]->t == T_CHAR) s += (double)a[i]->j;
+        else if (a[i]->t == T_BOOL) s += a[i]->j != 0;
         else if (a[i]->t == T_FLOAT) { s += a[i]->f; all_int = 0; }
         else if (a[i]->t >= T_IVEC && a[i]->t <= T_LIST) {
             V *p = vec_reduce_sum(a[i]);
@@ -756,13 +810,14 @@ static V *bi_sum(V **a, in) {
             if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
             else s += (double)p->j;
             v_free(p);
-        } else if (a[i]->t >= T_IMAT && a[i]->t <= T_FMAT) {
+        } else if (a[i]->t >= T_IMAT && a[i]->t <= T_BMAT) {
             V *p = vec_reduce_sum(a[i]);
             P(p->t == T_ERR,p)
             if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
             else s += (double)p->j;
             v_free(p);
-        } else return v_err("sum: bad arg");
+        } else if (a[i]->t == T_ERR) return v_ref(a[i]);
+        else return v_errf("sum: unsupported operand type %s", type_name(a[i]->t));
     }
     return sum_double_value(s, all_int);
 }
@@ -792,29 +847,39 @@ static V *bi_mmul(V **a, in) {
     return mat_matmul(a[0], a[1]);
 }
 static V *bi_avg(V **a, in) {
-    P(n < 1,v_float(0))
-    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_avg(a[0]))
-    return v_float(0);
+    P(n < 1,v_err("avg(v)"))
+    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_BMAT),vec_reduce_avg(a[0]))
+    P(a[0]->t == T_ERR,v_ref(a[0]))
+    return v_errf("avg: unsupported operand type %s", type_name(a[0]->t));
+}
+/* min or max of one argument: a vector or matrix reduces over its items, and a str over its
+ * characters, giving the least (greatest) char by code (None when empty); a scalar that orders (a bool,
+ * int, float, char, date, datetime or time) is its own min and max; an error passes through, and
+ * anything else is an error. */
+static V *minmax_one(const char *fn, V *v, int op) {
+    if ((v->t >= T_IVEC && v->t <= T_LIST) || (v->t >= T_IMAT && v->t <= T_BMAT))
+        return op == OP_LT ? vec_reduce_min(v) : vec_reduce_max(v);
+    if (v->t == T_STR) {
+        const unsigned char *s = (const unsigned char *)v->s;
+        P(!*s,v_nil())
+        unsigned char m = *s;
+        for (s++; *s; s++) if (op == OP_LT ? *s < m : *s > m) m = *s;
+        return v_char(m);
+    }
+    if (v->t == T_ERR) return v_ref(v);
+    if (v->t == T_BOOL || v->t == T_INT || v->t == T_FLOAT || v->t == T_CHAR ||
+        v->t == T_DATE || v->t == T_DATETIME || v->t == T_TIME) return v_ref(v);
+    return v_errf("%s: unsupported operand type %s", fn, type_name(v->t));
 }
 static V *bi_min(V **a, in) {
-    P(n < 1,v_nil())
-    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_min(a[0]))
-    if (n == 2) {
-        double x = a[0]->t == T_INT ? (double)a[0]->j : a[0]->f;
-        double y = a[1]->t == T_INT ? (double)a[1]->j : a[1]->f;
-        return x < y ? v_float(x) : v_float(y);
-    }
-    return v_nil();
+    P(n < 1,v_err("min(v)"))
+    P(n > 1,bi_extreme("min", a, n, OP_LT))
+    return minmax_one("min", a[0], OP_LT);
 }
 static V *bi_max(V **a, in) {
-    P(n < 1,v_nil())
-    P((a[0]->t >= T_IVEC && a[0]->t <= T_LIST) || (a[0]->t >= T_IMAT && a[0]->t <= T_FMAT),vec_reduce_max(a[0]))
-    if (n == 2) {
-        double x = a[0]->t == T_INT ? (double)a[0]->j : a[0]->f;
-        double y = a[1]->t == T_INT ? (double)a[1]->j : a[1]->f;
-        return x > y ? v_float(x) : v_float(y);
-    }
-    return v_nil();
+    P(n < 1,v_err("max(v)"))
+    P(n > 1,bi_extreme("max", a, n, OP_GT))
+    return minmax_one("max", a[0], OP_GT);
 }
 static V *bi_abs(V **a, in) {
     P(n < 1,v_int(0))

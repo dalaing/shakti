@@ -461,6 +461,8 @@ Example: `matrix.ie`.
 
 A matrix column stores one matrix per table row (table height = matrix row count). SQL `where` filters copy matrix rows like other column types.
 
+`t.c : v` replaces or adds column `c`. `v` must be a vector, list or matrix with the table's height; a scalar, a string or a column of another height is an error value.
+
 CSV/TSV/XML load and CSV/TSV save do **not** round-trip matrix columns as typed matrices; use in-memory tables or nested lists. See [Tables from files](#tables-from-files) for string-column and short-row behavior.
 
 ## Data

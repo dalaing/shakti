@@ -269,6 +269,8 @@ int shakti_lang_main(int argc, char **argv) {
         /* A program that doesn't parse is refused whole: nothing runs. */
         int parse_err = g_error && !interactive;
         V *r = parse_err ? NULL : eval(prog, global);
+        /* An uncaught error ends the program with status 1, as in a script. */
+        int cmd_err = g_error || (r && r->t == T_ERR);
         if(g_error && g_error_val) { fprintf(stderr, "Error: %s\n", g_error_val->s); v_free(g_error_val); g_error_val=NULL; }
         if(parse_err) { node_free(prog); env_free(global); return 1; }
         if(r && r->t == T_ERR) fprintf(stderr, "Error: %s\n", r->s);
@@ -279,6 +281,7 @@ int shakti_lang_main(int argc, char **argv) {
         v_free(r);
         shakti_clear_flow();
         node_free(prog);
+        if(cmd_err && !interactive) { env_free(global); return 1; }
         if(interactive) run_repl(global);
     } else if(i < argc) {
         if (shakti_require_ie(argv[i])) { env_free(global); return 2; }

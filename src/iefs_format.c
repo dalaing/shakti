@@ -1830,29 +1830,56 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
         }
         n_keep++;
     }
+    int is_dict = (get_u16(buf + 6) & IEFS_FLAG_V3_DICT) != 0;
     if (iefs_colnames_active(colnames)) {
         int bio_blob = (n_keep == 1 && !named && cols[0] && v_is_rel(cols[0]));
         if (!bio_blob) {
-        for (int64_t ci = 0; ci < colnames->n; ci++) {
+        /* Keep the columns in the order named. A table repeats a column named twice, as
+         * iefs_table_select_cols does; a dict holds its key once. */
+        V **pcols = calloc((size_t)colnames->n, sizeof(V *));
+        V **pkeys = calloc((size_t)colnames->n, sizeof(V *));
+        uint32_t n_pick = 0;
+        V *err = (pcols && pkeys) ? NULL : v_err("iefs: out of memory");
+        for (int64_t ci = 0; !err && ci < colnames->n; ci++) {
             V *want = colnames->L[ci];
             const char *wn = (want && want->t == T_STR) ? want->s : NULL;
             if (!wn) {
-                for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);}
-                free(cols); free(keys);
-                return v_err("iefs: column names must be strings");
+                err = v_err("iefs: column names must be strings");
+                break;
             }
-            int found = 0;
+            int found = -1;
             for (uint32_t j = 0; j < n_keep; j++) {
                 if (keys[j] && keys[j]->s && strcmp(keys[j]->s, wn) == 0) {
-                    found = 1;
+                    found = (int)j;
                     break;
                 }
             }
-            if (!found) {
-                for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);}
-                free(cols); free(keys);
-                return v_errf("iefs: column '%s' not in file", wn);
+            if (found < 0) {
+                err = v_errf("iefs: column '%s' not in file", wn);
+                break;
             }
+            int again = 0;
+            for (uint32_t k = 0; is_dict && k < n_pick; k++) {
+                if (strcmp(pkeys[k]->s, wn) == 0) {
+                    again = 1;
+                    break;
+                }
+            }
+            if (again)
+                continue;
+            pcols[n_pick] = v_ref(cols[found]);
+            pkeys[n_pick] = v_ref(keys[found]);
+            n_pick++;
+        }
+        for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);}
+        free(cols); free(keys);
+        cols = pcols;
+        keys = pkeys;
+        n_keep = n_pick;
+        if (err) {
+            for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); v_free(keys[j]);}
+            free(cols); free(keys);
+            return err;
         }
         }
     }
@@ -1875,7 +1902,7 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
         vlist->L[i] = cols[i];
     }
     free(cols); free(keys);
-    out = (get_u16(buf + 6) & IEFS_FLAG_V3_DICT) ? v_dict_own(klist, vlist) : v_table_own(klist, vlist);
+    out = is_dict ? v_dict_own(klist, vlist) : v_table_own(klist, vlist);
     return out;
 }
 

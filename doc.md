@@ -1799,7 +1799,7 @@ print(iefs.direct_available(), iefs.uring_available(), iefs.libaio_available())
 ```
 
 - `iefs.load` / global `load("….iefs")` — full read + CRC + malloc copy.
-- `iefs.map` — `mmap` the file, skip CRC, alias contiguous vector/matrix payloads. Compressed files require `load` / `loads`. A `select` from a mapped table held in a variable (`m : iefs.map("….iefs")`, then `select from m`) copies the columns it selects into memory, as a select from any table variable does (see [`sql` module](#sql-module)); `select … from "….iefs"` reads them from the mapping when it keeps every row.
+- `iefs.map` — `mmap` the file, skip CRC, alias contiguous vector/matrix payloads. Compressed files require `load` / `loads`. `iefs.map(path, columns: ["b", "a"])` gives only those columns of a table, in the order named, and a name given twice gives the column twice; a format-3 dict whose values are all vectors or matrices takes `columns:` too and keeps each key once. A name not in the file is an error. A `select` from a mapped table held in a variable (`m : iefs.map("….iefs")`, then `select from m`) copies the columns it selects into memory, as a select from any table variable does (see [`sql` module](#sql-module)); `select … from "….iefs"` reads them from the mapping when it keeps every row.
 - `iefs.dumps` / `iefs.loads` — in-memory frames as `list[char]`.
 - Host codecs: `zstd`, `snappy`, plus residual `delta_i64` / `fire_i64` / `gorilla_f64` / `date` / `time` / `datetime` (v3 extents; compounds like `fire_i64+zstd`). Also interned as `compress` / `decompress`.
 - SQL `select … from "….iefs"` opens via **map**. `update … from` and `delete from` a `.iefs` path write their result back to the file; a variable holding the path keeps the path.

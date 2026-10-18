@@ -267,7 +267,7 @@ static void cell_to_str(V *col, int64_t row, char *buf, size_t cap) {
         free(t);
     } else if (col->t == T_INT) snprintf(buf, cap, "%lld", (long long)col->j);
     else if (col->t == T_IVEC && row < col->n) snprintf(buf, cap, "%lld", (long long)col->J[row]);
-    else if (col->t == T_FVEC && row < col->n) snprintf(buf, cap, "%g", col->F[row]);
+    else if (col->t == T_FVEC && row < col->n) snprintf(buf, cap, "%g", nan_unsigned(col->F[row]));
 }
 
 static int64_t graph_id_arg(V **a, int n, int *pos) {

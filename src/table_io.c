@@ -161,7 +161,7 @@ static int fputs_field(FILE *f, const char *s, char delim) {
    the same float (a whole float below 1e15 in full), always with a '.' or an exponent so that load
    reads its column back as floats; inf and nan as strtod reads them. */
 static void save_float_format(double d, char *buf, size_t cap) {
-    if (!isfinite(d)) { snprintf(buf, cap, "%g", d); return; }
+    if (!isfinite(d)) { snprintf(buf, cap, "%g", nan_unsigned(d)); return; }
     if (d < 1e15 && d > -1e15 && d == (int64_t)d) { snprintf(buf, cap, "%.1f", d); return; }
     /* Below DBL_MIN (subnormal) fewer than 15 digits may be all there are. */
     for (int prec = fabs(d) < DBL_MIN ? 1 : 15; prec <= 17; prec++) {

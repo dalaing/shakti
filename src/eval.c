@@ -969,7 +969,7 @@ V *eval(Node *n, Env *e) {
                         snprintf(fmt, sizeof fmt, "%%%s", fmt_spec);
                         char buf[512];
                         double dv = val->t == T_FLOAT ? val->f : (double)val->j;
-                        snprintf(buf, sizeof buf, fmt, dv);
+                        snprintf(buf, sizeof buf, fmt, nan_unsigned(dv));
                         vs = strdup(buf);
                     } else {
                         vs = v_to_str(val);

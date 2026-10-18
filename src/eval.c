@@ -476,11 +476,11 @@ static int cow_list_arg(Env *e, Node *slot, V **objp) {
                 box->L[i] = v_ref(copy);
                 placed = 1;
             }
-        } else if (box && box->t == T_DICT && idx && idx->t == T_INT && box->vals) {
-            int64_t i = idx->j;
-            if (i < 0) i += box->n;
+        } else if (box && box->t == T_DICT && idx && box->vals) {
+            /* the value under key idx, matched as d[k] matches it, for every key type */
+            int64_t i = v_dict_index(box, idx);
             v_list_unshare(&box->vals);
-            if (i >= 0 && i < box->n && box->vals->L[i] == obj) {
+            if (i >= 0 && box->vals->L[i] == obj) {
                 v_free(box->vals->L[i]);
                 box->vals->L[i] = v_ref(copy);
                 placed = 1;

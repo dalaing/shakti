@@ -727,11 +727,13 @@ static int parse_by_names(V *by, const char **names, int max_names) {
 }
 /* min and max of a column that isn't a list[float] are the builtins min and max of each group's
    items: an int column gives ints, a bool, char, generic or matrix column what min and max give
-   for it.
+   for it. So are sum and avg of a generic or char column, which the float accumulators can't add.
    They are made once the groups are (build_group_result), not by the float accumulators. */
-static int minmax_by_builtin(V *tbl, const ColSpec *spec) {
+static int agg_by_builtin(V *tbl, const ColSpec *spec) {
     V *src = spec->src[0] ? tbl_col(tbl, tbl_col_idx(tbl, spec->src)) : NULL;
-    return (spec->kind == COL_MIN || spec->kind == COL_MAX) && src && src->t != T_FVEC;
+    if (!src) return 0;
+    if (spec->kind == COL_MIN || spec->kind == COL_MAX) return src->t != T_FVEC;
+    return agg_needs_sum(spec->kind) && (src->t == T_LIST || src->t == T_CVEC);
 }
 static void prep_agg_cols(V *tbl, ColSpec *specs, int nspecs,
                           V **sp_col, int *col_t, int *name_idx, int *agg_sp, int *n_agg) {
@@ -741,7 +743,7 @@ static void prep_agg_cols(V *tbl, ColSpec *specs, int nspecs,
         sp_col[sp] = idx >= 0 ? tbl_col(tbl, idx) : NULL;
         name_idx[sp] = specs[sp].kind == COL_NAME ? tbl_col_idx(tbl, specs[sp].name) : -1;
         col_t[sp] = sp_col[sp] ? sp_col[sp]->t : 0;
-        if (specs[sp].kind != COL_COUNT && specs[sp].kind != COL_NAME && !minmax_by_builtin(tbl, &specs[sp])) {
+        if (specs[sp].kind != COL_COUNT && specs[sp].kind != COL_NAME && !agg_by_builtin(tbl, &specs[sp])) {
             agg_sp[(*n_agg)++] = sp;
         }
     }
@@ -1438,10 +1440,12 @@ static int group_rows(GroupRows *gr, const int64_t *gid, int64_t nr, int64_t ng)
     gr->rows = rows;
     return 0;
 }
-/* One result column: each group's min (or max) of col. An int column is folded here, exactly, as
-   the builtins fold one; any other is gathered by group and given to the builtin. */
-static V *group_minmax_col(V *col, const int64_t *gid, int64_t nr, int64_t ng, int is_min, GroupRows *gr) {
-    if (col->t == T_IVEC) {
+/* One result column: each group's min, max, sum or avg of col. An int column's min and max are
+   folded here, exactly, as the builtins fold one; any other is gathered by group and given to the
+   builtin. */
+static V *group_agg_col(V *col, const int64_t *gid, int64_t nr, int64_t ng, int kind, GroupRows *gr) {
+    int is_min = kind == COL_MIN;
+    if (col->t == T_IVEC && (kind == COL_MIN || kind == COL_MAX)) {
         V *r = v_ivec(ng);
         unsigned char *seen = calloc((size_t)(ng ? ng : 1), 1);
         if (!seen) { v_free(r); return NULL; }
@@ -1455,10 +1459,11 @@ static V *group_minmax_col(V *col, const int64_t *gid, int64_t nr, int64_t ng, i
         return r;
     }
     if (group_rows(gr, gid, nr, ng) != 0) return NULL;
+    const char *fn = kind == COL_MIN ? "min" : kind == COL_MAX ? "max" : kind == COL_SUM ? "sum" : "avg";
     V *r = v_list(ng);
     for (int64_t g = 0, start = 0; g < ng; g++) {
         V *items = col_take(col, gr->rows + start, gr->end[g] - start);
-        r->L[g] = builtin_call(is_min ? "min" : "max", &items, 1, NULL, NULL, 0, NULL);
+        r->L[g] = builtin_call(fn, &items, 1, NULL, NULL, 0, NULL);
         v_free(items);
         start = gr->end[g];
     }
@@ -1485,7 +1490,7 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
     int all_int_keys = tab->nslots == 0 || (tab->slots[0].use_int);
     int64_t *gid = NULL;
     GroupRows grows = {NULL, NULL};
-    int mm_done[64] = {0}, mm_oom = 0;
+    int agg_done[64] = {0}, agg_oom = 0;
     if (nspecs == 0) {
         for (int i = 0; i < nby; i++) {
             keys->L[c] = v_ref(tbl->keys->L[by_idx[i]]);
@@ -1506,11 +1511,11 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
                 data->L[c] = v_ivec(tab->nslots);
             } else if (specs[s].kind == COL_NAME) {
                 data->L[c] = v_list(tab->nslots);
-            } else if (minmax_by_builtin(tbl, &specs[s])) {
+            } else if (agg_by_builtin(tbl, &specs[s])) {
                 if (!gid) gid = group_ids(tbl, tab, by_idx, nby, MB, rowslot);
-                data->L[c] = gid ? group_minmax_col(src, gid, tbl->n, tab->nslots, specs[s].kind == COL_MIN, &grows) : NULL;
-                if (!data->L[c]) { mm_oom = 1; data->L[c] = v_list(0); }
-                mm_done[s] = 1;
+                data->L[c] = gid ? group_agg_col(src, gid, tbl->n, tab->nslots, specs[s].kind, &grows) : NULL;
+                if (!data->L[c]) { agg_oom = 1; data->L[c] = v_list(0); }
+                agg_done[s] = 1;
             } else {
                 data->L[c] = v_fvec(tab->nslots);
             }
@@ -1543,7 +1548,7 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
             }
             for (int s = 0; s < nspecs; s++) {
                 V *colv = data->L[col];
-                if (mm_done[s]) {
+                if (agg_done[s]) {
                     /* filled above */
                 } else if (colv->t == T_IVEC) {
                     if (specs[s].kind == COL_SUM && slot->icarry[s]) g_isum_ovf = 1;
@@ -1566,7 +1571,7 @@ static V *build_group_result(V *tbl, GhTab *tab, ColSpec *specs, int nspecs,
     free(gid);
     free(grows.end);
     free(grows.rows);
-    if (mm_oom) { v_free(keys); v_free(data); return v_err("select: out of memory"); }
+    if (agg_oom) { v_free(keys); v_free(data); return v_err("select: out of memory"); }
     return v_table_own(keys, data);
 }
 static V *tbl_group_select_once(V *tbl, ColSpec *specs, int nspecs, V *by, V *row_mask) {
@@ -1629,7 +1634,7 @@ static V *tbl_group_select_once(V *tbl, ColSpec *specs, int nspecs, V *by, V *ro
         prep_agg_cols(tbl, specs, nspecs, sp_col, col_t, name_idx, agg_sp, &n_agg);
         if (gh_init(&tab, 256) != 0) return v_err("select: out of memory");
         for (int sp = 0; sp < nspecs && !rowslot; sp++) {
-            if (!minmax_by_builtin(tbl, &specs[sp])) continue;
+            if (!agg_by_builtin(tbl, &specs[sp])) continue;
             rowslot = malloc((size_t)(tbl->n ? tbl->n : 1) * sizeof(int64_t));
             if (!rowslot) { gh_free(&tab); return v_err("select: out of memory"); }
             for (int64_t row = 0; row < tbl->n; row++) rowslot[row] = -1;

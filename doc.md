@@ -1805,6 +1805,7 @@ print(iefs.direct_available(), iefs.uring_available(), iefs.libaio_available())
 - SQL `select … from "….iefs"` opens via **map**. `update … from` and `delete from` a `.iefs` path write their result back to the file; a variable holding the path keeps the path.
 - Whole-file zstd/snappy on v1/v2; v3 per-extent codec + optional outer LZ.
 - `codecs:` (on `save` and `dumps`) is a dict from column name to codec, and a dict (even `{}`) makes format 3 the default. `""` (the default), `[]` or an empty vector (`list[int]`, `list[float]`, `list[bool]` or `list[char]`) means no codecs. An error value given as `codecs:` is returned as it is. Anything else (`codecs:"zstd"`, a table, a matrix) is an error value, and `save` writes nothing. `codec:` is the codec for the whole file (format 2) or for each column (format 3); with `codecs:`, for every column it doesn't name.
+- Each key of a `codecs:` dict (on `save`, `dumps` and [`hdb.write`](#hdb-module)) is the name of a column of the value: a table's column, or a dict's key. A key that names none, such as `"pz"` in `codecs:{"pz": "zstd"}` for a table with a column `px`, is an error value (`iefs: codecs names no column 'pz'`, or `hdb_write: …` from `hdb.write`) and nothing is written. A value with no columns, such as a vector, takes only `{}`.
 
 Type layout 1 (`char`=4, `str`=5) is stored at header offset 20. Env: `SHAKTI_IEFS_DIRECT=0|1`, `SHAKTI_IEFS_DIRECT_MIN=<bytes>`, `SHAKTI_IEFS_VERSION=3`, `SHAKTI_IEFS_LIBAIO=0|1`.
 On Darwin, `direct_available()` is 0; large AUTO reads/writes still set `F_NOCACHE` above the same size threshold.
@@ -1832,7 +1833,7 @@ while hdb.next(c):
 
 Range prune uses inclusive `lo`/`hi` (`strcmp`); `eq` selects one partition. Vertical concat on `list[int]` / `list[float]` / `list[char]` / string lists / matrices.
 
-`codecs:` (on `write`) is a dict from column name to [IEFS](#iefs-module) codec, as in `codecs:{"px": "zstd"}`; `""` (the default), `[]` or an empty vector (`list[int]`, `list[float]`, `list[bool]` or `list[char]`) means no codecs; an error value given as `codecs:` is returned as it is; anything else (`codecs:"zstd"`, a table, a matrix) is an error value. Either error value writes nothing.
+`codecs:` (on `write`) is a dict from column name to [IEFS](#iefs-module) codec, as in `codecs:{"px": "zstd"}`; each key names a column of the table (a key that names none is `hdb_write: codecs names no column '…'`); `""` (the default), `[]` or an empty vector (`list[int]`, `list[float]`, `list[bool]` or `list[char]`) means no codecs; an error value given as `codecs:` is returned as it is; anything else (`codecs:"zstd"`, a table, a matrix) is an error value. Each error value writes nothing.
 
 ---
 

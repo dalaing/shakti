@@ -896,6 +896,38 @@ static int lookup_col_codec(V *codecs, const char *name, int def_codec, int def_
     return 0;
 }
 
+int iefs_codecs_check(V *v, V *codecs, const char *who, char *err, size_t err_cap) {
+    if (!codecs || codecs->t != T_DICT || !codecs->keys || codecs->keys->t != T_LIST)
+        return 0;
+    V *cols = (v && (v->t == T_TABLE || v->t == T_DICT) && v->keys && v->keys->t == T_LIST)
+                  ? v->keys : NULL;
+    for (int64_t i = 0; i < codecs->keys->n; i++) {
+        V *k = codecs->keys->L[i];
+        int is_str = k && k->t == T_STR && k->s;
+        int found = 0;
+        for (int64_t j = 0; is_str && cols && j < cols->n && !found; j++) {
+            V *c = cols->L[j];
+            found = c && c->t == T_STR && c->s && strcmp(c->s, k->s) == 0;
+        }
+        if (found)
+            continue;
+        if (is_str) {
+            /* a long key is cut to its first 60 bytes (at a character boundary), then "..." */
+            size_t len = strlen(k->s), cut = len > 60 ? 60 : len;
+            while (cut < len && cut > 0 && ((unsigned char)k->s[cut] & 0xC0) == 0x80)
+                cut--;
+            snprintf(err, err_cap, "%s: codecs names no column '%.*s%s'", who, (int)cut, k->s,
+                     cut < len ? "..." : "");
+        } else {
+            char *r = k ? v_repr(k) : NULL;
+            snprintf(err, err_cap, "%s: codecs names no column %s", who, r ? r : "None");
+            free(r);
+        }
+        return -1;
+    }
+    return 0;
+}
+
 typedef struct {
     IefsExtentW *ext;
     int n_ext;
@@ -924,6 +956,11 @@ static int iefs_v3_prepare(V *v, int codec, int outer, int level, V *codecs, Ief
     IefsExtentW *ext = NULL;
     int n_ext = 0;
     uint16_t v3_flags = 0;
+    char cerr[256];
+    if (iefs_codecs_check(v, codecs, "iefs", cerr, sizeof cerr) != 0) {
+        set_err(err, err_cap, cerr);
+        return -1;
+    }
 
     if ((v->t == T_TABLE || v->t == T_DICT) && v->keys && v->vals &&
         v->keys->t == T_LIST && v->vals->t == T_LIST && v->keys->n == v->vals->n) {

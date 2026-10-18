@@ -43,7 +43,12 @@ int iefs_encode_codec(V *v, int codec, int level, unsigned char **out, size_t *o
 /* ver: 2 (TLV) or 3 (TOC + 2MiB extents). codec is whole-file (v2) or per-extent (v3). */
 int iefs_encode_ex(V *v, int codec, int level, unsigned ver, unsigned char **out, size_t *out_len,
                    char *err, size_t err_cap);
-/* outer: optional LZ after residual (v3 er[3]). codecs: optional dict name→codec string (v3). */
+/* 0 when every key of codecs names a column of v (a table's columns, a dict's keys; any other
+ * value has none), else -1 with "<who>: codecs names no column '<key>'" in err (a key longer
+ * than 60 bytes is cut, then "..."; a key that is not a str: its repr, unquoted). */
+int iefs_codecs_check(V *v, V *codecs, const char *who, char *err, size_t err_cap);
+/* outer: optional LZ after residual (v3 er[3]). codecs: optional dict name→codec string (v3);
+ * every key must name a column of v (iefs_codecs_check). */
 int iefs_encode_full(V *v, int codec, int outer, int level, unsigned ver, V *codecs,
                      unsigned char **out, size_t *out_len, char *err, size_t err_cap);
 /* In-memory decode capped at shakti_decode_limit(); file loads use IEFS_MAX_PAYLOAD. */

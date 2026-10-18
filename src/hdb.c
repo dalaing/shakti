@@ -535,8 +535,9 @@ V *bi_hdb_write(V **a, int n) {
         hdb_part_path(pfile, sizeof pfile, root, a[1]->s, a[2]->s) != 0)
         return v_err("hdb_write: path too long");
 
-    /* codecs: a dict, or [] for none, as iefs_save takes them; checked before anything is
-     * written, so a refused write makes no partition and leaves one already there as it was */
+    /* codecs: a dict whose keys name columns of the table, or [] for none, as iefs_save takes
+     * them; checked before anything is written, so a refused write makes no partition and
+     * leaves one already there as it was */
     V *codecs = NULL;
     if (n > 4 && a[4]) {
         if (a[4]->t == T_DICT)
@@ -544,6 +545,9 @@ V *bi_hdb_write(V **a, int n) {
         else if (!(a[4]->t == T_LIST && a[4]->n == 0))
             return v_err("hdb_write: codecs must be a dict");
     }
+    char cerr[256];
+    if (codecs && iefs_codecs_check(a[3], codecs, "hdb_write", cerr, sizeof cerr) != 0)
+        return v_err(cerr);
 
     if (hdb_mkdir_p(pdir) != 0) return v_errf("hdb_write: mkdir: %s", strerror(errno));
 

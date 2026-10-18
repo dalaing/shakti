@@ -530,15 +530,22 @@ V *bi_hdb_write(V **a, int n) {
     V *schema = v_dict_get(entry, "schema");
     if (!hdb_schema_ok(schema, a[3])) return v_err("hdb_write: table schema mismatch");
 
-    V *codecs = NULL;
-    if (n > 4 && a[4] && a[4]->t == T_DICT) codecs = a[4];
-
     char pdir[HDB_PATH_MAX], pfile[HDB_PATH_MAX];
-    if (hdb_join3(pdir, sizeof pdir, root, a[1]->s, a[2]->s) != 0)
+    if (hdb_join3(pdir, sizeof pdir, root, a[1]->s, a[2]->s) != 0 ||
+        hdb_part_path(pfile, sizeof pfile, root, a[1]->s, a[2]->s) != 0)
         return v_err("hdb_write: path too long");
+
+    /* codecs: a dict, or [] for none, as iefs_save takes them; checked before anything is
+     * written, so a refused write makes no partition and leaves one already there as it was */
+    V *codecs = NULL;
+    if (n > 4 && a[4]) {
+        if (a[4]->t == T_DICT)
+            codecs = a[4];
+        else if (!(a[4]->t == T_LIST && a[4]->n == 0))
+            return v_err("hdb_write: codecs must be a dict");
+    }
+
     if (hdb_mkdir_p(pdir) != 0) return v_errf("hdb_write: mkdir: %s", strerror(errno));
-    if (hdb_part_path(pfile, sizeof pfile, root, a[1]->s, a[2]->s) != 0)
-        return v_err("hdb_write: path too long");
 
     char err[256];
     if (iefs_store_write_full(a[3], pfile, 0, 0, 0, 3, 3, codecs, err, sizeof err) != 0) {

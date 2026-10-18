@@ -1832,6 +1832,8 @@ while hdb.next(c):
 
 Range prune uses inclusive `lo`/`hi` (`strcmp`); `eq` selects one partition. Vertical concat on `list[int]` / `list[float]` / `list[char]` / string lists / matrices.
 
+`codecs:` (on `write`) is a dict from column name to [IEFS](#iefs-module) codec, as in `codecs:{"px": "zstd"}`; `""` (the default), `[]` or an empty vector (`list[int]`, `list[float]`, `list[bool]` or `list[char]`) means no codecs; an error value given as `codecs:` is returned as it is; anything else (`codecs:"zstd"`, a table, a matrix) is an error value. Either error value writes nothing.
+
 ---
 
 # `hld` module

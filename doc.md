@@ -596,6 +596,9 @@ delete from u where id = 2
 ```
 
 A bool mask in `where` has one item per row of the table; a mask of another length is an error value.
+An error value in `where` is the statement's result (a `from` that isn't a table, or an error value
+on the right of an `update`, comes first), and a raise in it stops the statement: either way
+`update` and `delete` change nothing (a `.iefs` file is not rewritten).
 
 `by col1, col2` groups and sorts ascending. No separate `group by` / `order by`. Prefer core `,` / `union` / `outer` table joins (see [Table joins](#table-joins----union--outer)); SQL `t1 join t2 on col` is not yet implemented.
 

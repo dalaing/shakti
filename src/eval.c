@@ -733,6 +733,10 @@ V *eval(Node *n, Env *e) {
         V *cols = eval_select_cols(n->ch[1], e);
         V *by = eval_select_name(n->ch[2], e);
         V *where = eval_with_table_columns(from, n->ch[3], e);
+        if (g_error) {   /* a raise (in from or where): the select stops */
+            v_free(from); v_free(cols); v_free(by);
+            return where;
+        }
         V *r = table_sql_select(from, cols, by, where);
         v_free(from);
         v_free(cols);
@@ -770,6 +774,11 @@ V *eval(Node *n, Env *e) {
             return assignments;
         }
         V *where = eval_with_table_columns(from, n->ch[3], e);
+        if (g_error) {   /* a raise in where: the update stops, and nothing changes */
+            free(iefs_path);
+            v_free(from); v_free(assignments); v_free(rerr);
+            return where;
+        }
         if (rerr) {   /* the update's result, before the table and its columns are looked at */
             free(iefs_path);
             v_free(from); v_free(assignments); v_free(where);
@@ -817,6 +826,11 @@ V *eval(Node *n, Env *e) {
 #endif
         V *cols = eval_select_cols(n->ch[1], e);
         V *where = eval_with_table_columns(from, n->ch[3], e);
+        if (g_error) {   /* a raise (in from or where): the delete stops, and nothing changes */
+            free(iefs_path);
+            v_free(from); v_free(cols);
+            return where;
+        }
         V *r = table_sql_delete(from, cols, where);
 #ifdef SHAKTI_HAVE_IEFS
         if (r && r->t != T_ERR && iefs_path) {

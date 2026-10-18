@@ -75,6 +75,7 @@ static V*where_mask(V*tbl,V*where){
  if(where->t==T_BVEC){P(where->n!=tbl->n,v_err("where: mask length mismatch"))return v_copy(where);}
  if(where->t==T_BOOL){V*all=v_bvec(tbl->n);for(int64_t i=0;i<tbl->n;i++)all->B[i]=where->j?1:0;return all;}
  if(where->t==T_INT){V*all=v_bvec(tbl->n);for(int64_t i=0;i<tbl->n;i++)all->B[i]=where->j?1:0;return all;}
+ if(where->t==T_ERR)return v_ref(where); /* an error value in where is the statement's result */
  return v_err("where: need boolean mask");}
 static V*tbl_filter_mask(V*tbl,V*mask){
  P(tbl->t!=T_TABLE||mask->t!=T_BVEC,v_err("bad filter"))

@@ -727,13 +727,14 @@ static int parse_by_names(V *by, const char **names, int max_names) {
 }
 /* min and max of a column that isn't a list[float] are the builtins min and max of each group's
    items: an int column gives ints, a bool, char, generic or matrix column what min and max give
-   for it. So are sum and avg of a generic or char column, which the float accumulators can't add.
+   for it. So are sum and avg of a generic, char or matrix column, which the float accumulators
+   can't add (they read a matrix row's first item).
    They are made once the groups are (build_group_result), not by the float accumulators. */
 static int agg_by_builtin(V *tbl, const ColSpec *spec) {
     V *src = spec->src[0] ? tbl_col(tbl, tbl_col_idx(tbl, spec->src)) : NULL;
     if (!src) return 0;
     if (spec->kind == COL_MIN || spec->kind == COL_MAX) return src->t != T_FVEC;
-    return agg_needs_sum(spec->kind) && (src->t == T_LIST || src->t == T_CVEC);
+    return agg_needs_sum(spec->kind) && (src->t == T_LIST || src->t == T_CVEC || is_mat_t(src->t));
 }
 static void prep_agg_cols(V *tbl, ColSpec *specs, int nspecs,
                           V **sp_col, int *col_t, int *name_idx, int *agg_sp, int *n_agg) {

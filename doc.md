@@ -723,7 +723,8 @@ float column are floats; of any other column they are what the builtins `min` an
 the group's items: an int for an int column, a bool for a `list[bool]` column, a char for a
 `list[char]` column, and for a `list` column the group's least and greatest item (an error value
 for a group whose items don't compare, as `min([1, None])` is). Of a matrix column, a group's
-`min` and `max` are those of the matrix of the group's rows.
+`sum`, `avg`, `min` and `max` are those of the matrix of the group's rows, taken over all its
+items: rows `[1, 10]` and `[2, 20]` have `sum` 33 and `avg` 8.25.
 
 The aggregates are `count`, `sum`, `avg`, `min` and `max`; any other word in a select is a column's
 name. A column the table doesn't have is an error value, with or without `by`:

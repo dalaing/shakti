@@ -1073,7 +1073,7 @@ Sync and poll-based async message passing between shakti processes (`import ipc`
 | `127.0.0.1`, `localhost`, `::1` | Unix domain socket at `$SHAKTI_IPC_DIR/shakti-<port>.sock` (default `/tmp`) | `transport="tcp"` |
 | Remote host | RDMA (RoCE v2 via `librdmacm`) when a device exists, else TCP | `transport="tcp"` or `transport="rdma"` |
 
-A transport is `auto`, `tcp`, `uds` (or `unix`) or `rdma`; any other name is an error (`ipc_listen: unknown transport "tpc" (auto, tcp, uds, unix, rdma)`), and so is a transport that is not a `str`. With no transport (or `""`), `ipc_listen` and `ipc_connect` take `SHAKTI_IPC_TRANSPORT`'s (`ipc.listen` and `ipc.connect` pass `"auto"` when given none), and an unknown name there is the same error (`... "tpc" in SHAKTI_IPC_TRANSPORT ...`).
+A transport is `auto`, `tcp`, `uds` (or `unix`) or `rdma`; any other name is an error (`ipc_listen: unknown transport "tpc" (auto, tcp, uds, unix, rdma)`), and so is a transport that is not a `str`. With no transport (or `""`), `ipc.listen`, `ipc.connect`, `ipc_listen` and `ipc_connect` take `SHAKTI_IPC_TRANSPORT`'s, else `auto`, and an unknown name there is the same error (`... "tpc" in SHAKTI_IPC_TRANSPORT ...`).
 
 Environment:
 

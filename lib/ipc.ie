@@ -18,13 +18,14 @@
 # handshake (required for non-loopback listen). SHAKTI_IPC_MCAST_KEY
 # authenticates multicast datagrams.
 
-def listen(port, host:"127.0.0.1", transport:"auto"):
+# transport "" (none named): ipc_listen and ipc_connect take SHAKTI_IPC_TRANSPORT's, else auto
+def listen(port, host:"127.0.0.1", transport:""):
     return ipc_listen(port, host, transport)
 
 def accept(listen_h):
     return ipc_accept(listen_h)
 
-def connect(host, port, transport:"auto"):
+def connect(host, port, transport:""):
     return ipc_connect(host, port, transport)
 
 def send(h, msg):

@@ -2320,7 +2320,7 @@ V *eval(Node *n, Env *e) {
         v_free(bases);
         V *cls = v_dict(keys, vals);
         env_set(e, n->sval, cls);
-        v_free(keys); v_free(vals);
+        v_free(keys); v_free(vals); v_free(cls);
         env_free(cls_env);
         return v_nil();
     }

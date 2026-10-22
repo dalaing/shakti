@@ -164,6 +164,54 @@ static uint32_t crc32_update_zeros(uint32_t crc, size_t n) {
     return crc;
 }
 
+/* CRC arithmetic without the bytes (as zlib's crc32_combine): polynomials mod the CRC
+ * polynomial, reflected, so bit 31 is x^0. a * b mod p. */
+static uint32_t crc32_multmodp(uint32_t a, uint32_t b) {
+    uint32_t m = 1u << 31, p = 0;
+    for (;;) {
+        if (a & m) {
+            p ^= b;
+            if ((a & (m - 1)) == 0)
+                break;
+        }
+        m >>= 1;
+        b = (b & 1u) ? (b >> 1) ^ 0xEDB88320u : b >> 1;
+    }
+    return p;
+}
+
+/* x^(8n) mod p: the operator that appends n bytes to a CRC register, a product of at most
+ * one table entry per byte of n. */
+static uint32_t crc32_x8n(uint64_t n) {
+    static uint32_t tab[8][256]; /* tab[k][v] = x^(8 * v * 256^k) mod p */
+    static int ready;
+    if (!ready) {
+        uint32_t step = 1u << 23; /* x^8 */
+        for (int k = 0; k < 8; k++) {
+            tab[k][0] = 1u << 31; /* x^0 */
+            for (int v = 1; v < 256; v++)
+                tab[k][v] = crc32_multmodp(tab[k][v - 1], step);
+            step = crc32_multmodp(tab[k][255], step); /* x^(8 * 256^(k+1)) */
+        }
+        ready = 1;
+    }
+    uint32_t p = 1u << 31;
+    for (int k = 0; n; n >>= 8, k++)
+        if (n & 0xffu)
+            p = crc32_multmodp(tab[k][n & 0xffu], p);
+    return p;
+}
+
+/* The CRC of n zero bytes appended to bytes whose CRC is crc, in O(log n). */
+static uint32_t crc32_zeros(uint32_t crc, uint64_t n) {
+    return n ? ~crc32_multmodp(crc32_x8n(n), ~crc) : crc;
+}
+
+/* The CRC of bytes A then B, from crc1 = CRC(A), crc2 = CRC(B) and len2 = |B|. */
+static uint32_t crc32_combine(uint32_t crc1, uint32_t crc2, uint64_t len2) {
+    return len2 ? crc32_multmodp(crc32_x8n(len2), crc1) ^ crc2 : crc1 ^ crc2;
+}
+
 /* ---- little-endian helpers ---- */
 static void put_u16(unsigned char *p, uint16_t v) {
     p[0] = (unsigned char)(v & 0xff);
@@ -1681,8 +1729,111 @@ static int iefs_want_col(V *colnames, const char *name) {
 
 static V *iefs_table_select_cols(V *tbl, V *colnames);
 
+static int cmp_name_ptr(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* 1 when every extent in the TOC has a NUL-terminated name and no two names are the same,
+ * as the writer names a dict's values unless the dict repeats a key; 0 otherwise (or out
+ * of memory). */
+static int iefs_v3_names_distinct(const unsigned char *body, uint32_t n_ext,
+                                  const unsigned char *names, uint32_t names_len) {
+    if (n_ext == 0)
+        return 1;
+    const char **s = malloc((size_t)n_ext * sizeof *s);
+    if (!s)
+        return 0;
+    int ok = 1;
+    for (uint32_t i = 0; ok && i < n_ext; i++) {
+        uint32_t off = get_u32(body + 8 + (size_t)i * IEFS_V3_EXTENT_SIZE + 40);
+        if (off >= names_len || !memchr(names + off, 0, (size_t)names_len - off))
+            ok = 0;
+        else
+            s[i] = (const char *)(names + off);
+    }
+    if (ok) {
+        qsort(s, n_ext, sizeof *s, cmp_name_ptr);
+        for (uint32_t i = 1; ok && i < n_ext; i++)
+            ok = strcmp(s[i - 1], s[i]) != 0;
+    }
+    free(s);
+    return ok;
+}
+
+typedef struct {
+    uint64_t off, len;
+    uint32_t crc;
+} IefsExtSpan;
+
+static int cmp_ext_span(const void *a, const void *b) {
+    uint64_t x = ((const IefsExtSpan *)a)->off, y = ((const IefsExtSpan *)b)->off;
+    return (x > y) - (x < y);
+}
+
+/* The file's checksum as load computes it, without reading a value, into *crc; -1 when out
+ * of memory. Load reads the bytes before the first extent as they are (the header, the TOC
+ * and the padding after it), then each extent, and counts the space between and after
+ * extents as zeros. Here each extent counts as the CRC the TOC stores for it, except one
+ * that starts inside the TOC, whose bytes are read. Where load reads the file whole instead
+ * (an extent that starts in the header, overlaps another or runs past the end, or a million
+ * extents), so does this. */
+static int crc32_iefs_v3_toc(const unsigned char *buf, uint64_t payload_len, uint32_t n_ext,
+                             size_t toc_bytes, uint32_t *crc) {
+    const unsigned char *body = buf + IEFS_HEADER_SIZE;
+    uint64_t end = IEFS_HEADER_SIZE + payload_len, toc_end = IEFS_HEADER_SIZE + toc_bytes;
+    if (n_ext >= 1000000u) {
+        *crc = crc32_iefs_layout(buf, body, (size_t)payload_len);
+        return 0;
+    }
+    IefsExtSpan *x = malloc((n_ext ? n_ext : 1) * sizeof *x);
+    if (!x)
+        return -1;
+    uint32_t m = 0;
+    for (uint32_t i = 0; i < n_ext; i++) {
+        const unsigned char *er = body + 8 + (size_t)i * IEFS_V3_EXTENT_SIZE;
+        x[m].off = get_u64(er + 20);
+        x[m].len = get_u64(er + 28);
+        x[m].crc = get_u32(er + 36);
+        if (x[m].len)
+            m++;
+    }
+    qsort(x, m, sizeof *x, cmp_ext_span);
+    for (uint32_t i = 0; i < m; i++) {
+        if (x[i].off < IEFS_HEADER_SIZE || x[i].off > end || x[i].len > end - x[i].off ||
+            (i && x[i].off < x[i - 1].off + x[i - 1].len)) {
+            free(x);
+            *crc = crc32_iefs_layout(buf, body, (size_t)payload_len);
+            return 0;
+        }
+    }
+    /* The bytes before the first extent: the header and TOC, then the padding, which the
+     * writer leaves as zeros and under 2 MiB, and finding that it is takes less time than its
+     * CRC. A file laid out otherwise has all its padding read, whatever its size. */
+    uint64_t pos = m ? x[0].off : end, head = pos < toc_end ? pos : toc_end;
+    uint32_t c = crc32_iefs_layout(buf, body, (size_t)(head - IEFS_HEADER_SIZE));
+    const unsigned char *pad = buf + head;
+    size_t pad_len = (size_t)(pos - head);
+    if (pad_len && (pad[0] != 0 || memcmp(pad, pad + 1, pad_len - 1) != 0))
+        c = crc32_update(c, pad, pad_len);
+    else
+        c = crc32_zeros(c, pad_len);
+    for (uint32_t i = 0; i < m; i++) {
+        c = crc32_zeros(c, x[i].off - pos);
+        if (x[i].off < toc_end)
+            c = crc32_update(c, buf + x[i].off, (size_t)x[i].len);
+        else
+            c = crc32_combine(c, x[i].crc, x[i].len);
+        pos = x[i].off + x[i].len;
+    }
+    free(x);
+    *crc = crc32_zeros(c, end - pos);
+    return 0;
+}
+
+/* verify_crc: check the checksum (load, loads). check_names (map of the file as it is,
+ * not a compacted copy): check it from the TOC when a dict's names look damaged. */
 static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *reg, int verify_crc,
-                         V *colnames, uint64_t max_plain) {
+                         int check_names, V *colnames, uint64_t max_plain) {
     uint64_t payload_len = get_u64(buf + 8);
     uint32_t expect_crc = get_u32(buf + 16);
     if (payload_len > IEFS_MAX_PAYLOAD)
@@ -1705,6 +1856,18 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
     if (payload_len < toc_need)
         return v_err("iefs: truncated v3 TOC");
     const unsigned char *names = body + 8 + (size_t)n_ext * IEFS_V3_EXTENT_SIZE;
+    /* A dict's keys are its extents' names. When map skipped the checksum and a name is
+     * missing, not NUL-terminated or repeated, check the header and TOC against it now: a
+     * damaged name is refused as load refuses it, and a dict that repeats a key (a literal
+     * can) still maps. */
+    int is_dict = (get_u16(buf + 6) & IEFS_FLAG_V3_DICT) != 0;
+    if (check_names && is_dict && !iefs_v3_names_distinct(body, n_ext, names, names_len)) {
+        uint32_t got_crc;
+        if (crc32_iefs_v3_toc(buf, payload_len, n_ext, toc_need, &got_crc) != 0)
+            return v_err("iefs: out of memory");
+        if (got_crc != expect_crc)
+            return v_err("iefs: checksum mismatch");
+    }
     V **cols = calloc(n_ext ? n_ext : 1, sizeof(V *));
     V **keys = calloc(n_ext ? n_ext : 1, sizeof(V *));
     if (!cols || !keys) {
@@ -1833,26 +1996,52 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
     if (iefs_colnames_active(colnames)) {
         int bio_blob = (n_keep == 1 && !named && cols[0] && v_is_rel(cols[0]));
         if (!bio_blob) {
-        for (int64_t ci = 0; ci < colnames->n; ci++) {
+        /* Keep the columns in the order named. A table repeats a column named twice, as
+         * iefs_table_select_cols does; a dict holds its key once. */
+        V **pcols = calloc((size_t)colnames->n, sizeof(V *));
+        V **pkeys = calloc((size_t)colnames->n, sizeof(V *));
+        uint32_t n_pick = 0;
+        V *err = (pcols && pkeys) ? NULL : v_err("iefs: out of memory");
+        for (int64_t ci = 0; !err && ci < colnames->n; ci++) {
             V *want = colnames->L[ci];
             const char *wn = (want && want->t == T_STR) ? want->s : NULL;
             if (!wn) {
-                for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);}
-                free(cols); free(keys);
-                return v_err("iefs: column names must be strings");
+                err = v_err("iefs: column names must be strings");
+                break;
             }
-            int found = 0;
+            int found = -1;
             for (uint32_t j = 0; j < n_keep; j++) {
                 if (keys[j] && keys[j]->s && strcmp(keys[j]->s, wn) == 0) {
-                    found = 1;
+                    found = (int)j;
                     break;
                 }
             }
-            if (!found) {
-                for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);}
-                free(cols); free(keys);
-                return v_errf("iefs: column '%s' not in file", wn);
+            if (found < 0) {
+                err = v_errf("iefs: column '%s' not in file", wn);
+                break;
             }
+            int again = 0;
+            for (uint32_t k = 0; is_dict && k < n_pick; k++) {
+                if (strcmp(pkeys[k]->s, wn) == 0) {
+                    again = 1;
+                    break;
+                }
+            }
+            if (again)
+                continue;
+            pcols[n_pick] = v_ref(cols[found]);
+            pkeys[n_pick] = v_ref(keys[found]);
+            n_pick++;
+        }
+        for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); if(keys[j]) v_free(keys[j]);}
+        free(cols); free(keys);
+        cols = pcols;
+        keys = pkeys;
+        n_keep = n_pick;
+        if (err) {
+            for (uint32_t j=0;j<n_keep;j++){v_free(cols[j]); v_free(keys[j]);}
+            free(cols); free(keys);
+            return err;
         }
         }
     }
@@ -1875,7 +2064,7 @@ static V *iefs_decode_v3(const unsigned char *buf, size_t len, IefsMapRegion *re
         vlist->L[i] = cols[i];
     }
     free(cols); free(keys);
-    out = (get_u16(buf + 6) & IEFS_FLAG_V3_DICT) ? v_dict_own(klist, vlist) : v_table_own(klist, vlist);
+    out = is_dict ? v_dict_own(klist, vlist) : v_table_own(klist, vlist);
     return out;
 }
 
@@ -1905,7 +2094,7 @@ V *iefs_decode_max(const unsigned char *buf, size_t len, size_t max_plain) {
         uint64_t v3_payload = get_u64(buf + 8);
         if (v3_payload > max_plain)
             return v_err("iefs: payload too large");
-        return iefs_decode_v3(buf, len, NULL, 1, NULL, max_plain);
+        return iefs_decode_v3(buf, len, NULL, 1, 0, NULL, max_plain);
     }
     uint16_t flags = get_u16(buf + 6);
     int codec = iefs_codec_from_flags(flags);
@@ -2035,6 +2224,9 @@ static V *iefs_table_select_cols(V *tbl, V *colnames) {
     return v_table_own(klist, vlist);
 }
 
+static V *iefs_decode_mapped_cols_names(const unsigned char *buf, size_t len, IefsMapRegion *reg,
+                                        V *colnames, int check_names);
+
 V *iefs_map_v3_cols_pread(int fd, size_t file_len, V *colnames) {
     if (fd < 0 || file_len < IEFS_HEADER_SIZE || !iefs_colnames_active(colnames))
         return NULL;
@@ -2126,12 +2318,18 @@ V *iefs_map_v3_cols_pread(int fd, size_t file_len, V *colnames) {
         cursor += (size_t)elen;
     }
     put_u64(compact + 8, (uint64_t)(cursor - IEFS_HEADER_SIZE));
-    V *v = iefs_decode_mapped_cols(compact, cursor, NULL, colnames);
+    /* The copy's TOC and length no longer match the file's checksum: don't check it. */
+    V *v = iefs_decode_mapped_cols_names(compact, cursor, NULL, colnames, 0);
     free(compact);
     return v;
 }
 
 V *iefs_decode_mapped_cols(const unsigned char *buf, size_t len, IefsMapRegion *reg, V *colnames) {
+    return iefs_decode_mapped_cols_names(buf, len, reg, colnames, 1);
+}
+
+static V *iefs_decode_mapped_cols_names(const unsigned char *buf, size_t len, IefsMapRegion *reg,
+                                        V *colnames, int check_names) {
     if (!buf || len < IEFS_HEADER_SIZE)
         return v_err("iefs: truncated header");
     if (memcmp(buf, IEFS_MAGIC, 4) != 0)
@@ -2145,7 +2343,7 @@ V *iefs_decode_mapped_cols(const unsigned char *buf, size_t len, IefsMapRegion *
     if (ver != 1 && ver != 2 && ver != 3)
         return v_errf("iefs: unsupported version %u", (unsigned)ver);
     if (ver == 3)
-        return iefs_decode_v3(buf, len, reg, 0, colnames, IEFS_MAX_PAYLOAD);
+        return iefs_decode_v3(buf, len, reg, 0, check_names, colnames, IEFS_MAX_PAYLOAD);
     uint16_t flags = get_u16(buf + 6);
     if (flags & IEFS_FLAG_CODEC_MASK)
         return v_err("iefs.map: compressed IEFS requires iefs.load");

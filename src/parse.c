@@ -12,6 +12,8 @@ static char g_parse_err_first[256] = "";
  * reported is whichever came first. */
 static const Lexer *g_parse_lexer = NULL;
 static int  g_parse_first_after_lex = 0;
+/* Lowest usable address of the C stack, set by shakti_stack_start; 0: no check. */
+uintptr_t g_parse_stack_bottom;
 
 static int src_has_semi_in_parens(const char *s) {
     int d = 0;
@@ -359,9 +361,16 @@ static Node *parse_atom_body(Lexer *l) {
         return node_new(N_NONE);
     }
 }
+/* Nonzero when less than SHAKTI_PARSE_STACK_RESERVE of the C stack is left: nesting the cap allows
+ * (blocks, or brackets at the bottom of a deep recursion) would otherwise run the stack out. A
+ * frame on another stack is far from the bottom, and the unsigned difference is large. */
+static int parse_stack_short(void) {
+    return g_parse_stack_bottom
+        && (uintptr_t)__builtin_frame_address(0) - g_parse_stack_bottom < SHAKTI_PARSE_STACK_RESERVE;
+}
 static int parse_enter(Lexer *l) {
     if (l->failed) return 0;
-    if (l->parse_depth >= SHAKTI_PARSE_MAX_DEPTH) {
+    if (l->parse_depth >= SHAKTI_PARSE_MAX_DEPTH || parse_stack_short()) {
         lex_fail(l, "nesting too deep");
         return 0;
     }
@@ -945,6 +954,8 @@ static Node *parse_asof_comma(Lexer *l) {
     return n;
 }
 static Node *parse_block(Lexer *l) {
+    /* blocks nest without parse_enter (the lexer caps them at 255 levels), so check the stack here */
+    if (!l->failed && parse_stack_short()) lex_fail(l, "nesting too deep");
     expect(l, T_INDENT_);
     Node *block = node_new(N_BLOCK);
     while(lex_peek(l).type != T_DEDENT_ && lex_peek(l).type != T_EOF_ && !l->failed) {

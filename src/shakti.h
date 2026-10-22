@@ -438,6 +438,8 @@ int shakti_parse_errors(void);
 V *eval(Node *n, Env *e);
 /* Evaluate a user-function body with interpreter call-depth accounting. */
 V *eval_fn(Node *body, Env *e);
+/* Note the calling thread's C stack for eval_fn's guard; shakti_lang_main calls it first. */
+void shakti_stack_start(void);
 int shakti_lang_main(int argc, char **argv);
 V *table_load(const char *path, V *columns_opt);
 int table_save(V *table, const char *path);

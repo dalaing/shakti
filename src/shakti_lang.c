@@ -155,6 +155,7 @@ static void shakti_find_lib(void) {
 }
 #endif
 int shakti_lang_main(int argc, char **argv) {
+    shakti_stack_start();
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
     shakti_find_lib();
 #endif

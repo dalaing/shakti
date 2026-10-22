@@ -509,6 +509,11 @@ static V *bi_bool(V**a,in){
     P(n<1,v_bool(0))return v_bool(is_truthy(a[0]));}   /* the truth `if` uses */
 static int bi_numvec(V *v) { return v->t == T_IVEC || v->t == T_FVEC || v->t == T_IMAT || v->t == T_FMAT; }
 static int64_t mat_nelem(V *v) { return v->n * mat_cols(v); }
+/* An exact int total: an int if it fits, else a float, as scalar + promotes on overflow. */
+static V *i128_value(__int128 t) {
+    if (t >= INT64_MIN && t <= INT64_MAX) return v_int((int64_t)t);
+    return v_float((double)t);
+}
 /* Exact int64 sum; promotes to float on overflow like scalar +. Split halves keep the loop vectorizable. */
 static V *i64_sum_value(const int64_t *p, int64_t n) {
     __int128 t = 0;
@@ -522,13 +527,22 @@ static V *i64_sum_value(const int64_t *p, int64_t n) {
         }
         t += (__int128)hi * ((int64_t)1 << 32) + (__int128)lo;
     }
-    if (t >= INT64_MIN && t <= INT64_MAX) return v_int((int64_t)t);
-    return v_float((double)t);
+    return i128_value(t);
 }
-static V *sum_double_value(double s, int all_int) {
-    if (all_int && s >= -9223372036854775808.0 && s < 9223372036854775808.0) return v_int((int64_t)s);
-    return v_float(s);
+/* A running sum of items in order: exact in t while every item so far is an int (a char counts as
+ * its code, a bool as 0 or 1), as a list[int] sums (an int if the total fits, else a float), not as
+ * + folds them, which turns to float at the first overflow on the way; a float in f from the first
+ * float item on (fl). */
+typedef struct { __int128 t; double f; int fl; } SumAcc;
+static void sum_add_int(SumAcc *s, int64_t j) {
+    if (s->fl) s->f += (double)j;
+    else s->t += j;
 }
+static void sum_add_float(SumAcc *s, double x) {
+    if (!s->fl) { s->f = (double)s->t; s->fl = 1; }
+    s->f += x;
+}
+static V *sum_acc_value(const SumAcc *s) { return s->fl ? v_float(s->f) : i128_value(s->t); }
 static V *vec_reduce_sum(V *v) {
     if (v->t == T_IMAT)
         return i64_sum_value(v->J, mat_nelem(v));
@@ -555,17 +569,25 @@ static V *vec_reduce_sum(V *v) {
         return v_int(s);
     }
     if (v->t == T_LIST) {
-        double s = 0;
-        int all_int = 1;
-        for (int64_t i = 0; i < v->n; i++) {
+        /* the items up to the first that isn't an int, bool or char go straight into t (an all-int
+         * list stays in this loop); the rest are added as sum(a, b, ...) adds its arguments */
+        SumAcc s = {0};
+        int64_t i = 0;
+        for (; i < v->n; i++) {
             V *e = v->L[i];
-            if (e->t == T_INT) s += (double)e->j;
-            else if (e->t == T_BOOL) s += e->j != 0;
-            else if (e->t == T_FLOAT) { s += e->f; all_int = 0; }
+            if (e->t == T_INT || e->t == T_CHAR) s.t += e->j;
+            else if (e->t == T_BOOL) s.t += e->j != 0;
+            else break;
+        }
+        for (; i < v->n; i++) {
+            V *e = v->L[i];
+            if (e->t == T_INT || e->t == T_CHAR) sum_add_int(&s, e->j);
+            else if (e->t == T_BOOL) sum_add_int(&s, e->j != 0);
+            else if (e->t == T_FLOAT) sum_add_float(&s, e->f);
             else if (e->t == T_ERR) return v_ref(e);
             else return v_err("sum: bad list element");
         }
-        return sum_double_value(s, all_int);
+        return sum_acc_value(&s);
     }
     return v_err("sum: need vector");
 }
@@ -782,28 +804,27 @@ static V *bi_sum(V **a, in) {
         P(v->t == T_BOOL,v_int(v->j != 0))
         return v_errf("sum: unsupported operand type %s", type_name(v->t));
     }
-    double s = 0;
-    int all_int = 1;
+    SumAcc s = {0};   /* the arguments' sums, added in order */
     for (int i = 0; i < n; i++) {
-        if (a[i]->t == T_INT || a[i]->t == T_CHAR) s += (double)a[i]->j;
-        else if (a[i]->t == T_BOOL) s += a[i]->j != 0;
-        else if (a[i]->t == T_FLOAT) { s += a[i]->f; all_int = 0; }
+        if (a[i]->t == T_INT || a[i]->t == T_CHAR) sum_add_int(&s, a[i]->j);
+        else if (a[i]->t == T_BOOL) sum_add_int(&s, a[i]->j != 0);
+        else if (a[i]->t == T_FLOAT) sum_add_float(&s, a[i]->f);
         else if (a[i]->t >= T_IVEC && a[i]->t <= T_LIST) {
             V *p = vec_reduce_sum(a[i]);
             P(p->t == T_ERR,p)
-            if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
-            else s += (double)p->j;
+            if (p->t == T_FLOAT) sum_add_float(&s, p->f);
+            else sum_add_int(&s, p->j);
             v_free(p);
         } else if (a[i]->t >= T_IMAT && a[i]->t <= T_BMAT) {
             V *p = vec_reduce_sum(a[i]);
             P(p->t == T_ERR,p)
-            if (p->t == T_FLOAT) { s += p->f; all_int = 0; }
-            else s += (double)p->j;
+            if (p->t == T_FLOAT) sum_add_float(&s, p->f);
+            else sum_add_int(&s, p->j);
             v_free(p);
         } else if (a[i]->t == T_ERR) return v_ref(a[i]);
         else return v_errf("sum: unsupported operand type %s", type_name(a[i]->t));
     }
-    return sum_double_value(s, all_int);
+    return sum_acc_value(&s);
 }
 static V *bi_dot(V **a, in) {
     P(n < 2, v_err("dot(x, y)"))

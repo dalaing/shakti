@@ -94,6 +94,7 @@ enum {
 struct Env {
     int rc;
     int cap, len;
+    int cand;  /* 1 + its index in the collector's list of candidates, 0, or -1: never freed (env.c) */
     char **names;
     V **vals;
     uint32_t *hashes;

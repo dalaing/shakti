@@ -259,7 +259,7 @@ static V *eval_with_table_columns(V *tbl, Node *expr, Env *e) {
             env_set(inner, cn->L[i]->s, dv->L[i]);
     }
     V *r = eval(expr, inner);
-    env_free(inner);
+    env_leave(inner);
     return r;
 }
 static V *eval_name_list(Node *n) {
@@ -311,7 +311,7 @@ static V *eval_update_cols(Node *n, V *tbl, Env *e, V **errv) {
         if(item->type == N_ASSIGN && item->nch >= 2 && item->ch[0]->type == N_NAME) {
             V *val = eval(item->ch[1], inner);
             if (g_error) {   /* a raise (in from, or here on the right): the update stops */
-                env_free(inner);
+                env_leave(inner);
                 v_free(keys);
                 v_free(vals);
                 v_free(*errv); *errv = NULL;
@@ -325,14 +325,14 @@ static V *eval_update_cols(Node *n, V *tbl, Env *e, V **errv) {
             v_list_append_own(keys, v_str(item->ch[0]->sval));
             v_list_append_own(vals, val);
         } else {
-            env_free(inner);
+            env_leave(inner);
             v_free(keys);
             v_free(vals);
             v_free(*errv); *errv = NULL;
             return v_err("update: expected col: expr");
         }
     })
-    env_free(inner);
+    env_leave(inner);
     return v_dict_own(keys, vals);
 }
 /* update and delete give a new table r that may still hold some of the old table's
@@ -713,7 +713,7 @@ static inline V *call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, 
         r = g_retval ? g_retval : v_nil();
         g_retval = NULL;
     }
-    env_free(ce);
+    env_leave(ce);
     return r;
 }
 V *shakti_call_fn(V *fn, V *self, V **args, int nargs, V **kwn, V **kwv, int nkw, Env *e) {
@@ -1955,7 +1955,7 @@ V *eval(Node *n, Env *e) {
             result = g_retval ? g_retval : v_nil();
             g_retval = NULL;
         }
-        env_release(call_env);
+        env_leave(call_env);
         v_free(fn);
         for(int i=0;i<nargs;i++) v_free(args[i]);
         for(int i=0;i<nkw;i++) { v_free(kwnames[i]); v_free(kwvals[i]); }
@@ -2300,7 +2300,7 @@ V *eval(Node *n, Env *e) {
                 V *base = eval(n->ch[1]->ch[b], e);
                 if(!shakti_is_class(base)) {
                     v_free(base); v_free(bases); v_free(keys); v_free(vals);
-                    env_free(cls_env);
+                    env_leave(cls_env);
                     return v_errf("class %s: base is not a class", n->sval);
                 }
                 for(int64_t j=0; j<base->keys->n; j++) {
@@ -2321,7 +2321,7 @@ V *eval(Node *n, Env *e) {
         V *cls = v_dict(keys, vals);
         env_set(e, n->sval, cls);
         v_free(keys); v_free(vals); v_free(cls);
-        env_free(cls_env);
+        env_leave(cls_env);
         return v_nil();
     }
     case N_BLOCK: {

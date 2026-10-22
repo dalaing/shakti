@@ -484,6 +484,11 @@ CSV/TSV/XML load and CSV/TSV save do **not** round-trip matrix columns as typed 
 
 ## Data
 
+`d[k]` reads key `k`, `d[k]: v` sets it (a new key goes at the end) and `d[k] += v` (or `-=`,
+`*=`, `/=`) updates it (with a missing key it does nothing), for keys of every kind: a string key
+matches by text, any other by `=` (`d: {1: "a"}; d[1]: "b"` changes key 1), and a key that `=`
+finds equal to no key (NaN, a function, a table) is never found, so each `d[k]: v` adds it again.
+
 ```ie
 d : dict(a:1, b:2)
 t : table(a:[1, 2], b:[3, 4])

@@ -506,11 +506,11 @@ static int cow_list_arg(Env *e, Node *slot, V **objp) {
                 box->L[i] = v_ref(copy);
                 placed = 1;
             }
-        } else if (box && box->t == T_DICT && idx && idx->t == T_INT && box->vals) {
-            int64_t i = idx->j;
-            if (i < 0) i += box->n;
+        } else if (box && box->t == T_DICT && idx && box->vals) {
+            /* the value under key idx, matched as d[k] matches it, for every key type */
+            int64_t i = v_dict_index(box, idx);
             v_list_unshare(&box->vals);
-            if (i >= 0 && i < box->n && box->vals->L[i] == obj) {
+            if (i >= 0 && box->vals->L[i] == obj) {
                 v_free(box->vals->L[i]);
                 box->vals->L[i] = v_ref(copy);
                 placed = 1;
@@ -1364,14 +1364,8 @@ V *eval(Node *n, Env *e) {
                 found = strstr(b->s, a->s) != NULL;
             } else if(b->t==T_STR && a->t==T_CHAR) {
                 found = memchr(b->s, (int)a->j, strlen(b->s)) != NULL;
-            } else if(b->t==T_DICT && a->t==T_STR) {
-                found = v_dict_get(b, a->s) != NULL;
             } else if(b->t==T_DICT) {
-                for(int64_t i=0;i<b->n;i++) {
-                    V *c = vec_cmp(a, b->keys->L[i], OP_EQ);
-                    if(c->t==T_BOOL && c->j) { found=1; v_free(c); break; }
-                    v_free(c);
-                }
+                found = v_dict_index(b, a) >= 0;
             }
             v_free(a); v_free(b);
             return v_bool(n->op == OP_IN ? found : !found);
@@ -1472,19 +1466,7 @@ V *eval(Node *n, Env *e) {
             V *idx = eval(target->ch[1], e);
             if (!idx || idx->t == T_ERR) { v_free(obj); v_free(val); return idx ? idx : v_err("bad assignment index"); }
             if(obj->t==T_DICT) {
-                if(idx->t==T_STR) {
-                    v_dict_set(obj, idx->s, val);
-                } else if(idx->t==T_INT) {
-                    int64_t i = idx->j;
-                    if(i<0) i+=obj->n;
-                    if(i>=0 && i<obj->n && obj->vals) {
-                        v_list_unshare(&obj->vals);
-                        if (i < obj->vals->n) {
-                            v_free(obj->vals->L[i]);
-                            obj->vals->L[i] = v_ref(val);
-                        }
-                    }
-                }
+                v_dict_set_key(obj, idx, val);
                 v_free(obj); v_free(idx); v_free(val);
                 return v_nil();
             }
@@ -1606,12 +1588,13 @@ V *eval(Node *n, Env *e) {
             V *obj = eval(target->ch[0], e);
             V *idx = eval(target->ch[1], e);
             V *delta = eval(n->ch[1], e);
-            if(obj->t==T_DICT && idx->t==T_STR) {
-                V *cur = v_dict_get(obj, idx->s);
-                if(cur) {
-                    V *newval = vec_binop(cur, delta, n->op);
-                    v_dict_set(obj, idx->s, newval);
-                    v_free(newval);
+            if(obj->t==T_DICT) {
+                int64_t i = v_dict_index(obj, idx);
+                if(i >= 0) {
+                    V *newval = vec_binop(obj->vals->L[i], delta, n->op);
+                    v_list_unshare(&obj->vals);
+                    v_free(obj->vals->L[i]);
+                    obj->vals->L[i] = newval;
                 }
             }
             v_free(obj); v_free(idx); v_free(delta);
@@ -1660,17 +1643,8 @@ V *eval(Node *n, Env *e) {
                     else next = v_ref(obj->L[j]);
                 } else next = v_err("index out of range");
             } else if(obj->t==T_DICT) {
-                if(idx->t==T_STR) {
-                    V *found = v_dict_get(obj, idx->s);
-                    next = found ? v_ref(found) : v_nil();
-                } else {
-                    next = v_nil();
-                    for(int64_t j=0;j<obj->n;j++) {
-                        V *c = vec_cmp(idx, obj->keys->L[j], OP_EQ);
-                        if(c->t==T_BOOL && c->j) { v_free(next); next = v_ref(obj->vals->L[j]); v_free(c); break; }
-                        v_free(c);
-                    }
-                }
+                V *found = v_dict_find(obj, idx);
+                next = found ? v_ref(found) : v_nil();
             } else if(obj->t==T_STR && (idx->t==T_INT||idx->t==T_CHAR)) {
                 int64_t j = idx->j;
                 int64_t slen = strlen(obj->s);

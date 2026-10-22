@@ -895,6 +895,38 @@ V *vec_cmp(V *a, V *b, int op) {
     }
     return v_errf("cannot compare types %s and %s", type_name(a->t), type_name(b->t));
 }
+/* Dict keys other than strings match by `=`, as vec_cmp decides it. A string or number key
+   (int, float, bool or char) is found by v_dict_hashed_index, through the dict's hash table once
+   it has more than 8 keys (it compares numbers as vec_cmp does); any other key is compared with
+   each key by vec_cmp, here beside it, so that value.c doesn't depend on vec_ops.c. */
+int64_t v_dict_index(V *d, V *k) {
+    P(d->t != T_DICT,-1)
+    int64_t h = v_dict_hashed_index(d, k);
+    if (h != DICT_UNHASHED) return h;
+    for (int64_t i = 0; i < d->n; i++) {
+        V *c = vec_cmp(k, d->keys->L[i], OP_EQ);
+        int eq = c->t == T_BOOL && c->j;
+        v_free(c);
+        if (eq) return i;
+    }
+    return -1;
+}
+V *v_dict_find(V *d, V *k) {
+    int64_t i = v_dict_index(d, k);
+    return i < 0 ? NULL : d->vals->L[i];
+}
+void v_dict_set_key(V *d, V *k, V *val) {
+    Pv(d->t != T_DICT)
+    if (k->t == T_STR) { v_dict_set(d, k->s, val); return; }
+    int64_t i = v_dict_index(d, k);
+    if (i >= 0) {
+        v_list_unshare(&d->vals);
+        v_free(d->vals->L[i]);
+        d->vals->L[i] = v_ref(val);
+        return;
+    }
+    v_dict_push(d, k, val);
+}
 V *table_filter(V *tbl, V *mask) {
     P(tbl->t != T_TABLE || mask->t != T_BVEC,v_err("bad filter"))
     P(mask->n != tbl->n,v_err("table mask length mismatch"))

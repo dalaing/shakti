@@ -140,7 +140,7 @@ int env_set_int_inplace(Env *e, const char *name, int64_t j) {
         for(int i=0; i<e->len; i++)
             if(e->hashes[i] == h && strcmp(e->names[i], name)==0) {
                 V *cur = e->vals[i];
-                if(cur && cur->t == T_INT && cur->rc == 1) {
+                if(cur && cur->t == T_INT && shakti_count(cur) == 1) {
                     cur->j = j;
                     return 1;
                 }
@@ -173,15 +173,19 @@ int env_update(Env *e, const char *name, V *val) {
             }
     return 0;
 }
-V *env_get_here(Env *e, const char *name) {
+int env_index_here(Env *e, const char *name) {
     uint32_t h;
     int i;
-    if (!e || !name) return NULL;
+    if (!e || !name) return -1;
     h = fnv1a(name);
     for (i = 0; i < e->len; i++)
         if (e->hashes[i] == h && strcmp(e->names[i], name) == 0)
-            return e->vals[i];
-    return NULL;
+            return i;
+    return -1;
+}
+V *env_get_here(Env *e, const char *name) {
+    int i = env_index_here(e, name);
+    return i < 0 ? NULL : e->vals[i];
 }
 V *env_get(Env *e, const char *name) {
     uint32_t h = fnv1a(name);

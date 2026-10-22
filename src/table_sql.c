@@ -19,7 +19,6 @@
 #ifndef SQL_OMP_GROUP_MIN
 #define SQL_OMP_GROUP_MIN 50000
 #endif
-static inline double sql_to_float(V*v){return !v?0.:v->t==T_INT?(double)v->j:v->t==T_FLOAT?v->f:v->t==T_BOOL?v->j?1.:0.:0.;}
 enum {
     COL_NAME = 0,
     COL_COUNT = 1,
@@ -76,6 +75,7 @@ static V*where_mask(V*tbl,V*where){
  if(where->t==T_BVEC){P(where->n!=tbl->n,v_err("where: mask length mismatch"))return v_copy(where);}
  if(where->t==T_BOOL){V*all=v_bvec(tbl->n);for(int64_t i=0;i<tbl->n;i++)all->B[i]=where->j?1:0;return all;}
  if(where->t==T_INT){V*all=v_bvec(tbl->n);for(int64_t i=0;i<tbl->n;i++)all->B[i]=where->j?1:0;return all;}
+ if(where->t==T_ERR)return v_ref(where); /* an error value in where is the statement's result */
  return v_err("where: need boolean mask");}
 static V*tbl_filter_mask(V*tbl,V*mask){
  P(tbl->t!=T_TABLE||mask->t!=T_BVEC,v_err("bad filter"))
@@ -1584,180 +1584,6 @@ V *table_sql_select(V *from, V *cols, V *by, V *where) {
     if (free_filtered) v_free(filtered);
     return result;
 }
-static V *merge_update_col(V *old_col, V *new_col, V *mask) {
-    int64_t n = mask->n;
-    if (old_col->t == T_IVEC &&
-        (new_col->t == T_FLOAT || new_col->t == T_FVEC || new_col->t == T_STR || new_col->t == T_LIST))
-        return v_err("update: type mismatch");
-    if (old_col->t == T_FVEC && (new_col->t == T_STR || new_col->t == T_LIST))
-        return v_err("update: type mismatch");
-    if (old_col->t == T_LIST && new_col->t != T_STR && new_col->t != T_LIST)
-        return v_err("update: type mismatch");
-    if (new_col->t == T_INT || new_col->t == T_FLOAT || new_col->t == T_BOOL || new_col->t == T_STR || new_col->t == T_CHAR) {
-        if (old_col->t == T_IVEC) {
-            V *out = v_copy(old_col);
-            for (int64_t i = 0; i < n && i < out->n; i++) {
-                if (mask->B[i]) {
-                    out->J[i] = new_col->t == T_INT ? new_col->j :
-                                new_col->t == T_BOOL ? new_col->j :
-                                (int64_t)sql_to_float(new_col);
-                }
-            }
-            return out;
-        }
-        if (old_col->t == T_FVEC) {
-            V *out = v_copy(old_col);
-            double x = new_col->t == T_FLOAT ? new_col->f :
-                       new_col->t == T_INT ? (double)new_col->j :
-                       new_col->t == T_BOOL ? (double)new_col->j : 0.0;
-            for (int64_t i = 0; i < n && i < out->n; i++) {
-                if (mask->B[i]) {
-                    out->F[i] = x;
-                }
-            }
-            return out;
-        }
-        if (old_col->t == T_LIST && new_col->t == T_STR) {
-            V *out = v_copy(old_col);
-            for (int64_t i = 0; i < n && i < out->n; i++) {
-                if (mask->B[i]) {
-                    v_free(out->L[i]);
-                    out->L[i] = v_str(new_col->s);
-                }
-            }
-            return out;
-        }
-        if (old_col->t == T_BVEC && (new_col->t == T_BOOL || new_col->t == T_INT)) {
-            V *out = v_copy(old_col);
-            unsigned char bit = new_col->j ? 1 : 0;
-            for (int64_t i = 0; i < n && i < out->n; i++)
-                if (mask->B[i]) out->B[i] = bit;
-            return out;
-        }
-        if (old_col->t == T_CVEC && (new_col->t == T_CHAR || new_col->t == T_INT)) {
-            V *out = v_copy(old_col);
-            unsigned char ch = (unsigned char)new_col->j;
-            for (int64_t i = 0; i < n && i < out->n; i++)
-                if (mask->B[i]) out->B[i] = ch;
-            return out;
-        }
-    }
-    if (new_col->n != old_col->n) {
-        return v_err("update: column length mismatch");
-    }
-    if (old_col->t == T_IVEC && new_col->t == T_IVEC) {
-        V *out = v_copy(old_col);
-        for (int64_t i = 0; i < n && i < out->n; i++) {
-            if (mask->B[i]) {
-                out->J[i] = new_col->J[i];
-            }
-        }
-        return out;
-    }
-    if ((old_col->t == T_IVEC || old_col->t == T_FVEC) && (new_col->t == T_IVEC || new_col->t == T_FVEC)) {
-        V *out = v_copy(old_col);
-        if (out->t == T_IVEC) {
-            for (int64_t i = 0; i < n && i < out->n; i++) {
-                if (mask->B[i]) {
-                    out->J[i] = (int64_t)cell_float(new_col, i);
-                }
-            }
-        } else {
-            for (int64_t i = 0; i < n && i < out->n; i++) {
-                if (mask->B[i]) {
-                    out->F[i] = cell_float(new_col, i);
-                }
-            }
-        }
-        return out;
-    }
-    if (old_col->t == T_FVEC && new_col->t == T_FVEC) {
-        V *out = v_copy(old_col);
-        for (int64_t i = 0; i < n && i < out->n; i++) {
-            if (mask->B[i]) {
-                out->F[i] = new_col->F[i];
-            }
-        }
-        return out;
-    }
-    if (old_col->t == T_LIST && new_col->t == T_LIST) {
-        V *out = v_copy(old_col);
-        for (int64_t i = 0; i < n && i < out->n; i++) {
-            if (mask->B[i]) {
-                v_free(out->L[i]);
-                out->L[i] = v_ref(new_col->L[i]);
-            }
-        }
-        return out;
-    }
-    if (old_col->t == T_BVEC && new_col->t == T_BVEC) {
-        V *out = v_copy(old_col);
-        for (int64_t i = 0; i < n && i < out->n; i++)
-            if (mask->B[i]) out->B[i] = new_col->B[i] ? 1 : 0;
-        return out;
-    }
-    if (old_col->t == T_CVEC && new_col->t == T_CVEC) {
-        V *out = v_copy(old_col);
-        for (int64_t i = 0; i < n && i < out->n; i++)
-            if (mask->B[i]) out->B[i] = new_col->B[i];
-        return out;
-    }
-    if ((old_col->t == T_IMAT || old_col->t == T_FMAT || old_col->t == T_BMAT || old_col->t == T_CMAT) &&
-        old_col->t == new_col->t && mat_cols(old_col) == mat_cols(new_col)) {
-        V *out = v_copy(old_col);
-        int64_t cols = mat_cols(old_col);
-        for (int64_t i = 0; i < n && i < out->n; i++) {
-            if (!mask->B[i]) continue;
-            if (old_col->t == T_IMAT)
-                memcpy(out->J + (size_t)i * (size_t)cols, new_col->J + (size_t)i * (size_t)cols, (size_t)cols * 8);
-            else if (old_col->t == T_FMAT)
-                memcpy(out->F + (size_t)i * (size_t)cols, new_col->F + (size_t)i * (size_t)cols, (size_t)cols * 8);
-            else
-                memcpy(out->B + (size_t)i * (size_t)cols, new_col->B + (size_t)i * (size_t)cols, (size_t)cols);
-        }
-        return out;
-    }
-    return v_err("update: type mismatch");
-}
-V *table_sql_update(V *from, V *cols, V *where) {
-    if (!from || from->t == T_ERR) {
-        return from ? v_ref(from) : v_err("update: missing table");
-    }
-    if (from->t != T_TABLE) {
-        return v_err("update: need table");
-    }
-    if (!cols || cols->t != T_DICT) {
-        return v_err("update: need assignment dict");
-    }
-    V *mask = where_mask(from, where);
-    if (mask->t == T_ERR) {
-        return mask;
-    }
-    V *new_data = v_list(from->keys->n);
-    for (int64_t c = 0; c < from->keys->n; c++) {
-        new_data->L[c] = v_ref(from->vals->L[c]);
-    }
-    for (int64_t u = 0; u < cols->keys->n; u++) {
-        const char *name = cols->keys->L[u]->s;
-        V *new_col = cols->vals->L[u];
-        int idx = tbl_col_idx(from, name);
-        if (idx < 0) {
-            v_free(mask);
-            v_free(new_data);
-            return v_errf("update: unknown column '%s'", name);
-        }
-        V *merged = merge_update_col(from->vals->L[idx], new_col, mask);
-        if (merged->t == T_ERR) {
-            v_free(mask);
-            v_free(new_data);
-            return merged;
-        }
-        v_free(new_data->L[idx]);
-        new_data->L[idx] = merged;
-    }
-    v_free(mask);
-    return v_table_own(v_copy(from->keys), new_data);
-}
 V *table_sql_delete(V *from, V *cols, V *where) {
     (void)cols;
     if (!from || from->t == T_ERR) {
@@ -1837,28 +1663,39 @@ static int col_item_t(int t) {
     default: return T_LIST;
     }
 }
-/* Sets row col->n of out to cell (insert_fit_err has checked that it fits). */
-static void mat_append_row(V *out, V *col, V *cell) {
-    int64_t cols = mat_cols(col), at = mat_idx(out, col->n, 0);
-    if (cell->t != T_LIST && col_item_t(cell->t) == col_item_t(col->t)) {
-        if (col->t == T_IMAT) memcpy(out->J + at, cell->J, (size_t)cols * 8);
-        else if (col->t == T_FMAT) memcpy(out->F + at, cell->F, (size_t)cols * 8);
-        else memcpy(out->B + at, cell->B, (size_t)cols);
+/* Sets row i of matrix m to cell (fit_err has checked that it fits). */
+static void mat_put_row(V *m, int64_t i, V *cell) {
+    int64_t cols = mat_cols(m), at = mat_idx(m, i, 0);
+    if (cell->t != T_LIST && col_item_t(cell->t) == col_item_t(m->t)) {
+        if (m->t == T_IMAT) memcpy(m->J + at, cell->J, (size_t)cols * 8);
+        else if (m->t == T_FMAT) memcpy(m->F + at, cell->F, (size_t)cols * 8);
+        else memcpy(m->B + at, cell->B, (size_t)cols);
         return;
     }
     /* a list row, or ints or chars into a matrix[float], or chars into a matrix[int] */
     for (int64_t j = 0; j < cols; j++) {
         V *e = cell->t == T_LIST ? cell->L[j] : NULL;
-        if (e && e->t == T_FLOAT) { out->F[at + j] = e->f; continue; }
+        if (e && e->t == T_FLOAT) { m->F[at + j] = e->f; continue; }
         int64_t x = e ? e->j : cell->t == T_IVEC ? cell->J[j] : cell->B[j];
-        if (col->t == T_FMAT) out->F[at + j] = (double)x;
-        else if (col->t == T_IMAT) out->J[at + j] = x;
-        else out->B[at + j] = (unsigned char)x;
+        if (m->t == T_FMAT) m->F[at + j] = (double)x;
+        else if (m->t == T_IMAT) m->J[at + j] = x;
+        else m->B[at + j] = (unsigned char)x;
+    }
+}
+/* Sets row i of col to cell, as insert and update put a value in a column (fit_err has checked that
+   it fits; a list's item i is the caller's to free first). */
+static inline void col_put(V *col, int64_t i, V *cell) {
+    switch (col->t) {
+    case T_IVEC: col->J[i] = cell->j; break;
+    case T_FVEC: col->F[i] = cell->t == T_FLOAT ? cell->f : (double)cell->j; break;
+    case T_BVEC: col->B[i] = cell->j ? 1 : 0; break;
+    case T_CVEC: col->B[i] = (unsigned char)cell->j; break;
+    case T_LIST: col->L[i] = cell->t == T_STR ? v_str(cell->s) : v_ref(cell); break;
+    default: mat_put_row(col, i, cell);
     }
 }
 static V *append_cell(V *col, V *cell) {
     if (col->t == T_IVEC) {
-        int64_t val = cell->j;
         if (col->rc == 1) {
             if (col->owner_kind == V_OWNER_MAP_ALIAS) {
                 if (v_ensure_writable(col) != 0)
@@ -1875,58 +1712,58 @@ static V *append_cell(V *col, V *cell) {
                 col->J = nj;
                 col->_ht_cap = (uint32_t)new_cap;
             }
-            col->J[col->n++] = val;
+            col_put(col, col->n++, cell);
             return col;
         }
         V *out = v_ivec(col->n + 1);
         memcpy(out->J, col->J, (size_t)col->n * sizeof(int64_t));
-        out->J[col->n] = val;
+        col_put(out, col->n, cell);
         return out;
     }
     if (col->t == T_FVEC) {
         V *out = v_fvec(col->n + 1);
         memcpy(out->F, col->F, (size_t)col->n * sizeof(double));
-        out->F[col->n] = cell->t == T_FLOAT ? cell->f : (double)cell->j;
+        col_put(out, col->n, cell);
         return out;
     }
     if (col->t == T_BVEC) {
         V *out = v_bvec(col->n + 1);
         memcpy(out->B, col->B, (size_t)col->n);
-        out->B[col->n] = cell->j ? 1 : 0;
+        col_put(out, col->n, cell);
         return out;
     }
     if (col->t == T_CVEC) {
         V *out = v_cvec(col->n + 1);
         if (col->n > 0) memcpy(out->B, col->B, (size_t)col->n);
-        out->B[col->n] = (unsigned char)cell->j;
+        col_put(out, col->n, cell);
         return out;
     }
     if (col->t == T_IMAT) {
         int64_t cols = mat_cols(col);
         V *out = v_imat(col->n + 1, cols);
         if (col->n > 0) memcpy(out->J, col->J, (size_t)col->n * cols * 8);
-        mat_append_row(out, col, cell);
+        col_put(out, col->n, cell);
         return out;
     }
     if (col->t == T_FMAT) {
         int64_t cols = mat_cols(col);
         V *out = v_fmat(col->n + 1, cols);
         if (col->n > 0) memcpy(out->F, col->F, (size_t)col->n * cols * 8);
-        mat_append_row(out, col, cell);
+        col_put(out, col->n, cell);
         return out;
     }
     if (col->t == T_BMAT) {
         int64_t cols = mat_cols(col);
         V *out = v_bmat(col->n + 1, cols);
         if (col->n > 0) memcpy(out->B, col->B, (size_t)col->n * cols);
-        mat_append_row(out, col, cell);
+        col_put(out, col->n, cell);
         return out;
     }
     if (col->t == T_CMAT) {
         int64_t cols = mat_cols(col);
         V *out = v_cmat(col->n + 1, cols);
         if (col->n > 0) memcpy(out->B, col->B, (size_t)col->n * cols);
-        mat_append_row(out, col, cell);
+        col_put(out, col->n, cell);
         return out;
     }
     if (col->t == T_LIST) {
@@ -1938,22 +1775,14 @@ static V *append_cell(V *col, V *cell) {
                 col->L = nl;
                 col->_ht_cap = cap;
             }
-            if (cell->t == T_STR) {
-                col->L[col->n++] = v_str(cell->s);
-            } else {
-                col->L[col->n++] = v_ref(cell);
-            }
+            col_put(col, col->n++, cell);
             return col;
         }
         V *out = v_list(col->n + 1);
         for (int64_t i = 0; i < col->n; i++) {
             out->L[i] = v_ref(col->L[i]);
         }
-        if (cell->t == T_STR) {
-            out->L[col->n] = v_str(cell->s);
-        } else {
-            out->L[col->n] = v_ref(cell);
-        }
+        col_put(out, col->n, cell);
         return out;
     }
     return v_err("insert: unsupported column type");
@@ -1970,25 +1799,160 @@ static int item_fits(int t, int xt) {
     default: return 1;
     }
 }
-/* NULL if cell can be inserted into col, else the error, which names what the column holds: a matrix
-   takes a row of its width whose items fit, any other column an item that fits. */
-static V *insert_fit_err(V *col, V *cell, const char *name) {
+/* NULL if col holds cell, else the error of op (insert or update), which names what the column
+   holds: a matrix takes a row of its width whose items fit, any other column an item that fits. */
+static V *fit_err(const char *op, V *col, V *cell, const char *name) {
     const char *holds = type_name(col_item_t(col->t));
     if (!is_mat_t(col->t)) {
         return item_fits(col->t, cell->t) ? NULL :
-            v_errf("insert: column '%s' holds %s, not %s", name, holds, type_name(cell->t));
+            v_errf("%s: column '%s' holds %s, not %s", op, name, holds, type_name(cell->t));
     }
     if (!is_vec_t(cell->t) && cell->t != T_LIST)
-        return v_errf("insert: column '%s' holds rows of %s, not %s (a row is a list of %lld)",
-                      name, holds, type_name(cell->t), (long long)mat_cols(col));
-    if (cell->n != mat_cols(col)) return v_err("insert: matrix width mismatch");
+        return v_errf("%s: column '%s' holds rows of %s, not %s (a row is a list of %lld)",
+                      op, name, holds, type_name(cell->t), (long long)mat_cols(col));
+    if (cell->n != mat_cols(col)) return v_errf("%s: matrix width mismatch", op);
     int bad = cell->t != T_LIST && !item_fits(col->t, col_item_t(cell->t)) ? col_item_t(cell->t) : -1;
     for (int64_t j = 0; bad < 0 && cell->t == T_LIST && j < cell->n; j++) {
         int xt = cell->L[j] ? cell->L[j]->t : T_NIL;
         if (!item_fits(col->t, xt)) bad = xt;
     }
     return bad < 0 ? NULL :
-        v_errf("insert: column '%s' holds rows of %s, not %s", name, holds, type_name(bad));
+        v_errf("%s: column '%s' holds rows of %s, not %s", op, name, holds, type_name(bad));
+}
+/* Sets each row mask picks in col to row r of v, or to its own row of v if r < 0; v is a column of
+   col's own kind and width, and may be col itself when r >= 0 (row r is left as it is). */
+static void col_copy_rows(V *col, V *v, int64_t r, V *mask) {
+    int64_t n = mask->n < col->n ? mask->n : col->n;
+    unsigned char *m = mask->B;
+    if (col->t == T_IVEC) {
+        int64_t *d = col->J, *x = v->J;
+        for (int64_t i = 0; i < n; i++) if (m[i]) d[i] = x[r < 0 ? i : r];
+    } else if (col->t == T_FVEC) {
+        double *d = col->F, *x = v->F;
+        for (int64_t i = 0; i < n; i++) if (m[i]) d[i] = x[r < 0 ? i : r];
+    } else if (col->t == T_LIST) {
+        for (int64_t i = 0; i < n; i++)
+            if (m[i] && i != r) { v_free(col->L[i]); col->L[i] = v_ref(v->L[r < 0 ? i : r]); }
+    } else {
+        /* a list[bool] or list[char], or a matrix: a row is w items of sz bytes */
+        size_t sz = col->t == T_IMAT || col->t == T_FMAT ? 8 : 1, w = is_mat_t(col->t) ? (size_t)mat_cols(col) : 1;
+        unsigned char *d = col->t == T_IMAT ? (unsigned char *)col->J : col->t == T_FMAT ? (unsigned char *)col->F : col->B;
+        unsigned char *x = col->t == T_IMAT ? (unsigned char *)v->J : col->t == T_FMAT ? (unsigned char *)v->F : v->B;
+        for (int64_t i = 0; i < n; i++)
+            if (m[i] && i != r) memcpy(d + (size_t)i * w * sz, x + (size_t)(r < 0 ? i : r) * w * sz, w * sz);
+    }
+}
+/* Sets each row mask picks in col to its own row of v, a vector or matrix of another kind whose items
+   col holds (ints or chars into a list[float] or matrix[float], chars into a list[int] or
+   matrix[int]), each item converted as col_put converts it. */
+static void col_convert_rows(V *col, V *v, V *mask) {
+    int64_t n = mask->n < col->n ? mask->n : col->n, w = is_mat_t(col->t) ? mat_cols(col) : 1;
+    int to_float = col->t == T_FVEC || col->t == T_FMAT, ints = v->t == T_IVEC || v->t == T_IMAT;
+    for (int64_t i = 0; i < n; i++) {
+        if (!mask->B[i]) continue;
+        for (int64_t j = i * w; j < (i + 1) * w; j++) {
+            int64_t x = ints ? v->J[j] : v->B[j];
+            if (to_float) col->F[j] = (double)x; else col->J[j] = x;
+        }
+    }
+}
+/* NULL if col (not a list) holds each row of v, a vector or matrix as long as col, else fit_err's
+   error: v's kind, and a matrix's width, say what every row of it is, so an empty v is checked as
+   a full one is. A vector is a column for a vector column only (one row for a matrix column). */
+static V *fit_col_err(V *col, V *v, const char *name) {
+    const char *holds = type_name(col_item_t(col->t));
+    int xt = col_item_t(v->t);
+    if (!is_mat_t(col->t)) {
+        if (is_mat_t(v->t))   /* each row of v is a row, which a vector column doesn't hold */
+            xt = v->t == T_IMAT ? T_IVEC : v->t == T_FMAT ? T_FVEC : v->t == T_CMAT ? T_CVEC : T_BVEC;
+        return item_fits(col->t, xt) ? NULL :
+            v_errf("update: column '%s' holds %s, not %s", name, holds, type_name(xt));
+    }
+    if (mat_cols(v) != mat_cols(col)) return v_err("update: matrix width mismatch");
+    return item_fits(col->t, xt) ? NULL :
+        v_errf("update: column '%s' holds rows of %s, not %s", name, holds, type_name(xt));
+}
+/* col with the rows mask picks set from v: one value for each of them, or, if v is a list, a matrix,
+   or a vector (but one row for a matrix column), a column as long as col whose row i goes in row i.
+   Each value goes in as insert puts it, or the update is an error that changes nothing. */
+static V *merge_update_col(V *col, V *v, V *mask, const char *name) {
+    int whole = v->t == T_LIST || is_mat_t(v->t) || (is_vec_t(v->t) && !is_mat_t(col->t));
+    if (whole && v->n != col->n) return v_err("update: column length mismatch");
+    V *err = NULL;
+    if (!whole) {
+        err = fit_err("update", col, v, name);
+    } else if (col->t == T_LIST) {
+        /* a list column holds anything */
+    } else if (v->t == T_LIST) {
+        for (int64_t i = 0; !err && i < v->n; i++) err = fit_err("update", col, v->L[i], name);
+    } else {
+        err = fit_col_err(col, v, name);
+    }
+    if (err) return err;
+    V *out = v_copy(col);
+    if (v->t == col->t) {
+        col_copy_rows(out, v, -1, mask);   /* a column of col's own kind: its rows as they are */
+        return out;
+    }
+    if (whole && (v->t == T_IVEC || v->t == T_CVEC || v->t == T_IMAT || v->t == T_CMAT) &&
+        (out->t == T_IVEC || out->t == T_FVEC || out->t == T_IMAT || out->t == T_FMAT)) {
+        col_convert_rows(out, v, mask);   /* converted in place, without a value for each row */
+        return out;
+    }
+    for (int64_t i = 0; i < mask->n && i < out->n; i++) {
+        if (!mask->B[i]) continue;
+        if (!whole && out->t == T_LIST) {   /* one value into a list column: each row its own copy */
+            v_free(out->L[i]);
+            out->L[i] = v_copy(v);
+            continue;
+        }
+        V *x = whole ? col_get(v, i) : v;
+        if (out->t == T_LIST) v_free(out->L[i]);
+        col_put(out, i, x);
+        if (whole) v_free(x);
+        /* one value into a vector or matrix: put in once, then copied to the other rows */
+        if (!whole && out->t != T_LIST) { col_copy_rows(out, out, i, mask); break; }
+    }
+    return out;
+}
+V *table_sql_update(V *from, V *cols, V *where) {
+    if (!from || from->t == T_ERR) {
+        return from ? v_ref(from) : v_err("update: missing table");
+    }
+    if (from->t != T_TABLE) {
+        return v_err("update: need table");
+    }
+    if (!cols || cols->t != T_DICT) {
+        return v_err("update: need assignment dict");
+    }
+    V *mask = where_mask(from, where);
+    if (mask->t == T_ERR) {
+        return mask;
+    }
+    V *new_data = v_list(from->keys->n);
+    for (int64_t c = 0; c < from->keys->n; c++) {
+        new_data->L[c] = v_ref(from->vals->L[c]);
+    }
+    for (int64_t u = 0; u < cols->keys->n; u++) {
+        const char *name = cols->keys->L[u]->s;
+        V *new_col = cols->vals->L[u];
+        int idx = tbl_col_idx(from, name);
+        if (idx < 0) {
+            v_free(mask);
+            v_free(new_data);
+            return v_errf("update: unknown column '%s'", name);
+        }
+        V *merged = merge_update_col(from->vals->L[idx], new_col, mask, name);
+        if (merged->t == T_ERR) {
+            v_free(mask);
+            v_free(new_data);
+            return merged;
+        }
+        v_free(new_data->L[idx]);
+        new_data->L[idx] = merged;
+    }
+    v_free(mask);
+    return v_table_own(v_copy(from->keys), new_data);
 }
 static void col_truncate(V *col, int64_t n0) {
     if (!col || col->n <= n0) return;
@@ -2083,7 +2047,7 @@ V *table_sql_insert(V *table, V *cols, V *vals) {
                 }
             }
         }
-        V *err = insert_fit_err(table->vals->L[idx], vals_list->L[i], name);
+        V *err = fit_err("insert", table->vals->L[idx], vals_list->L[i], name);
         if (err) {
             if (free_vals_list) v_free(vals_list);
             return err;

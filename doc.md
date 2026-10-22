@@ -596,6 +596,9 @@ delete from u where id = 2
 ```
 
 A bool mask in `where` has one item per row of the table; a mask of another length is an error value.
+An error value in `where` is the statement's result (a `from` that isn't a table, or an error value
+on the right of an `update`, comes first), and a raise in it stops the statement: either way
+`update` and `delete` change nothing (a `.iefs` file is not rewritten).
 
 `by col1, col2` groups and sorts ascending. No separate `group by` / `order by`. Prefer core `,` / `union` / `outer` table joins (see [Table joins](#table-joins----union--outer)); SQL `t1 join t2 on col` is not yet implemented.
 
@@ -712,6 +715,17 @@ and a char its code), a `list[bool]` a bool, a `list[char]` a char, a matrix a r
 whose items fit, and a `list` anything. `create table u (id: 0, name: "")` makes `id` a `list[int]`
 and `name` a `list`, so `insert into u (id, name) values ("ada", 1)` is
 `insert: column 'id' holds int, not str`.
+
+`update` puts values in a column by the same rule (though `insert` puts in the value itself, so a
+dict it inserts is shared with its variable), or is an error and changes nothing:
+`update id : "x" from u` is `update: column 'id' holds int, not str`, whichever rows `where` picks.
+In `col : expr`, a vector, list or matrix is a column, with a value for each row of the table
+(`update amount : amount * 2 from t`), except that a vector is one row for a matrix column
+(`update m : [0, 0] from t where id = 1` for a `matrix[int]` column `m`); anything else is one
+value for every row `where` picks, each row with its own copy of it (a dict put in a `list`
+column is not shared by the rows, or with the variable it came from). A column of another
+height is `update: column length mismatch`, and an error value is the update's result (a raise in
+`where` still stops it).
 
 A group's `sum` of an int column is an int, added as `sum` adds a `list[int]`: exact past 2^53,
 and, if any group's int sum in the select doesn't fit in an int, every int sum in it is a

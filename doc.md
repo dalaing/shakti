@@ -553,7 +553,8 @@ Supported formats: **CSV**, **TSV**, and **XML**. `save` writes **CSV** and **TS
   `100000000000000.0`); infinities and NaN as `inf`, `-inf` and `nan`.
 - String columns: list-of-string columns write each cell as text; `None` / unsupported cell types emit an empty field.
 - Matrix columns are not supported (save fails).
-- Delimiter is `,` for `.csv` and tab for `.tsv`. Fields are not quoted; values must not contain the delimiter.
+- Delimiter is `,` for `.csv` and tab for `.tsv`. A field holding the delimiter, a `"` or a line break is
+  written in double quotes, with each `"` in it doubled.
 
 ### CSV / TSV load
 
@@ -563,9 +564,15 @@ Supported formats: **CSV**, **TSV**, and **XML**. `save` writes **CSV** and **TS
   `1, 2` and `1," 2 "` are ints; `2.0` and `1e3` make the column float.
 - Empty fields (e.g. CSV `1,` or TSV `1\t`) pad as `0`. Leading/trailing empty fields are preserved.
 - String columns written by `save` do **not** round-trip as strings — reload yields numerics (often `0` for labels).
+- A field in double quotes may hold the delimiter, line breaks (anywhere in it, at its end too) and `""`
+  (one `"`), as `save` writes them; a quoted field still open at the end of the file is an error. A
+  field is quoted only when `"` is its first character (for a record's first field, its first after
+  padding; `1, "a"` is text), and a `"` that opens a field is closed by the next lone `"`, even lines
+  later: the lines between are part of the field.
 - Normal-sized files load via a single buffered read (fast path). Files larger than
   `SHAKTI_CSV_MAX_BYTES` (default 1 GiB; override with that env var) stream with
-  `getline` so the whole file need not reside in memory.
+  `getline` so the whole file need not reside in memory; a record is held whole, though, so a quoted
+  field never closed reads the rest of the file into memory before the error.
 
 ## Input
 

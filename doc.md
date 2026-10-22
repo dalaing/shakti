@@ -729,8 +729,16 @@ height is `update: column length mismatch`, and an error value is the update's r
 
 A group's `sum` of an int column is an int, added as `sum` adds a `list[int]`: exact past 2^53,
 and, if any group's int sum in the select doesn't fit in an int, every int sum in it is a
-float column, as on main. Of a float column it is a float. `avg`
-is a float, and `count` an int.
+float column. Of a float or `list[bool]` column it is a float. `avg` of an int, float or
+`list[bool]` column is a float, and `count` an int. Of a `list` column or a `list[char]` column, a
+group's `sum` and `avg` are what the builtins `sum` and `avg` give for its items (an error value
+for a group with an item they don't add, as `sum([1, None])` is). A group's `min` and `max` of a
+float column are floats; of any other column they are what the builtins `min` and `max` give for
+the group's items: an int for an int column, a bool for a `list[bool]` column, a char for a
+`list[char]` column, and for a `list` column the group's least and greatest item (an error value
+for a group whose items don't compare, as `min([1, None])` is). Of a matrix column, a group's
+`sum`, `avg`, `min` and `max` are those of the matrix of the group's rows, taken over all its
+items: rows `[1, 10]` and `[2, 20]` have `sum` 33 and `avg` 8.25.
 
 The aggregates are `count`, `sum`, `avg`, `min` and `max`; any other word in a select is a column's
 name. A column the table doesn't have is an error value, with or without `by`:

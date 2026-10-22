@@ -944,6 +944,38 @@ static int lookup_col_codec(V *codecs, const char *name, int def_codec, int def_
     return 0;
 }
 
+int iefs_codecs_check(V *v, V *codecs, const char *who, char *err, size_t err_cap) {
+    if (!codecs || codecs->t != T_DICT || !codecs->keys || codecs->keys->t != T_LIST)
+        return 0;
+    V *cols = (v && (v->t == T_TABLE || v->t == T_DICT) && v->keys && v->keys->t == T_LIST)
+                  ? v->keys : NULL;
+    for (int64_t i = 0; i < codecs->keys->n; i++) {
+        V *k = codecs->keys->L[i];
+        int is_str = k && k->t == T_STR && k->s;
+        int found = 0;
+        for (int64_t j = 0; is_str && cols && j < cols->n && !found; j++) {
+            V *c = cols->L[j];
+            found = c && c->t == T_STR && c->s && strcmp(c->s, k->s) == 0;
+        }
+        if (found)
+            continue;
+        if (is_str) {
+            /* a long key is cut to its first 60 bytes (at a character boundary), then "..." */
+            size_t len = strlen(k->s), cut = len > 60 ? 60 : len;
+            while (cut < len && cut > 0 && ((unsigned char)k->s[cut] & 0xC0) == 0x80)
+                cut--;
+            snprintf(err, err_cap, "%s: codecs names no column '%.*s%s'", who, (int)cut, k->s,
+                     cut < len ? "..." : "");
+        } else {
+            char *r = k ? v_repr(k) : NULL;
+            snprintf(err, err_cap, "%s: codecs names no column %s", who, r ? r : "None");
+            free(r);
+        }
+        return -1;
+    }
+    return 0;
+}
+
 typedef struct {
     IefsExtentW *ext;
     int n_ext;
@@ -972,6 +1004,11 @@ static int iefs_v3_prepare(V *v, int codec, int outer, int level, V *codecs, Ief
     IefsExtentW *ext = NULL;
     int n_ext = 0;
     uint16_t v3_flags = 0;
+    char cerr[256];
+    if (iefs_codecs_check(v, codecs, "iefs", cerr, sizeof cerr) != 0) {
+        set_err(err, err_cap, cerr);
+        return -1;
+    }
 
     if ((v->t == T_TABLE || v->t == T_DICT) && v->keys && v->vals &&
         v->keys->t == T_LIST && v->vals->t == T_LIST && v->keys->n == v->vals->n) {
@@ -2772,7 +2809,8 @@ static V *u8vec_from_buf(const unsigned char *p, size_t n) {
 }
 
 V *bi_iefs_dumps(V **a, int n) {
-    /* iefs_dumps(value[, codec[, level[, format[, codecs]]]]) */
+    /* iefs_dumps(value[, codec[, level[, format[, codecs]]]]); format 0 is the default format,
+     * as iefs_save's eight-argument form (the one lib/iefs.ie calls) takes it. */
     if (n < 1 || !a[0])
         return v_err("iefs_dumps(value[, codec[, level[, format[, codecs]]]])");
     int codec = SHAKTI_CODEC_NONE;
@@ -2795,9 +2833,11 @@ V *bi_iefs_dumps(V **a, int n) {
     if (n > 3) {
         if (a[3]->t != T_INT )
             return v_err("iefs_dumps: format must be 2 or 3");
-        ver = (unsigned)a[3]->j;
-        if (ver != 2 && ver != 3)
-            return v_err("iefs_dumps: format must be 2 or 3");
+        if (a[3]->j != 0) {
+            ver = (unsigned)a[3]->j;
+            if (ver != 2 && ver != 3)
+                return v_err("iefs_dumps: format must be 2 or 3");
+        }
     }
     if (n > 4) {
         if (a[4]->t != T_DICT && !(a[4]->t == T_LIST && a[4]->n == 0))

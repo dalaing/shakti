@@ -24,9 +24,17 @@ def create(h, name, schema, part:"date"):
     return hdb_create(h, name, schema, part)
 
 def write(h, name, part, table, codecs:""):
-    if type(codecs) = "dict":
-        return hdb_write(h, name, part, table, codecs)
-    return hdb_write(h, name, part, table)
+    cs : codecs
+    # codecs: an empty str, list or vector (list[int], list[float], list[bool], list[char])
+    # is no codecs, which the builtin takes as []; an error value comes back as it is;
+    # anything else goes to the builtin, which refuses what isn't a dict
+    t : type(cs)
+    if t = "error":
+        return cs
+    if t = "str" or t = "list" or t = "list[int]" or t = "list[float]" or t = "list[bool]" or t = "list[char]":
+        if len(cs) = 0:
+            cs : []
+    return hdb_write(h, name, part, table, cs)
 
 def parts(h, name, lo:"", hi:"", eq:""):
     return hdb_parts(h, name, lo, hi, eq)

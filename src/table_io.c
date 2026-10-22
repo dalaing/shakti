@@ -79,15 +79,19 @@ static char *read_all(const char *s) {
     return b;
 }
 
+/* Padding around a field: spaces, and tabs unless the tab is the delimiter (TSV tabs are fields).
+   At the end of a field a \r or \n is padding too. */
+static int is_pad(char ch, char delim) { return ch == ' ' || (ch == '\t' && delim != '\t'); }
+static int is_end_pad(char ch, char delim) { return is_pad(ch, delim) || ch == '\r' || ch == '\n'; }
+
 /* Trim padding whitespace; never trim `delim` (TSV tabs are fields). */
 static void strip_pad(char *s, char delim) {
     char *a = s;
-    W(*a == ' ' || (*a == '\t' && delim != '\t'), a++)
+    W(is_pad(*a, delim), a++)
     if (a != s)
         memmove(s, a, strlen(a) + 1);
     size_t n = strlen(s);
-    W(n && (s[n - 1] == ' ' || (s[n - 1] == '\t' && delim != '\t') || s[n - 1] == '\r' || s[n - 1] == '\n'),
-      s[--n] = 0)
+    W(n && is_end_pad(s[n - 1], delim), s[--n] = 0)
 }
 
 static const char *delim_skip_field(const char *p, char c, int *ate_delim) {
@@ -296,6 +300,7 @@ static V *table_keep_columns(V *t, V *columns_opt) {
         return out;
     }
 }
+/* Whether a field reads as an int once the padding strip_pad takes off is gone. */
 static int field_is_int(const char *line, int field, char delim) {
     const char *p = line ? line : "";
     int f;
@@ -304,12 +309,16 @@ static int field_is_int(const char *line, int field, char delim) {
         p = delim_skip_field(p, delim, &ate);
         if (!ate) return 0;
     }
-    if (*p == '"') p++;
+    int quoted = *p == '"';
+    if (quoted) p++;
+    W(is_pad(*p, delim), p++)
     if (*p == '-' || *p == '+') p++;
-    if (!*p || *p == delim || *p == '"') return 0;
-    for (; *p && *p != delim && *p != '"'; p++)
-        if (!isdigit((unsigned char)*p)) return 0;
-    return 1;
+    if (!isdigit((unsigned char)*p)) return 0;
+    W(isdigit((unsigned char)*p), p++)
+    W(is_end_pad(*p, delim), p++)
+    /* The field ends at the end of the text, or at its closing quote if it is quoted (a "" or a
+       delimiter inside the quotes is part of it), or at the delimiter if not. */
+    return !*p || (quoted ? *p == '"' && p[1] != '"' : *p == delim);
 }
 static V *table_delim_load(const char *path, V *columns_opt, char c, const char *fmt) {
     /* Prefer a single buffered read for normal-sized files (fast path / benches).

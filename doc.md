@@ -558,6 +558,9 @@ Supported formats: **CSV**, **TSV**, and **XML**. `save` writes **CSV** and **TS
 ### CSV / TSV load
 
 - Header required; data rows load as numeric columns (`ivec` or `fvec`). Non-numeric text parses as `0`.
+  A column loads as an `ivec` when each of its fields is written as digits with an optional sign, once
+  the spaces around it (and tabs, in CSV, and a `\r` at its end) are taken off, inside quotes too:
+  `1, 2` and `1," 2 "` are ints; `2.0` and `1e3` make the column float.
 - Empty fields (e.g. CSV `1,` or TSV `1\t`) pad as `0`. Leading/trailing empty fields are preserved.
 - String columns written by `save` do **not** round-trip as strings — reload yields numerics (often `0` for labels).
 - Normal-sized files load via a single buffered read (fast path). Files larger than

@@ -429,6 +429,8 @@ for row in m:                 # each row as a vector, as m[i] gives it
     print(row)
 for i, row in enumerate(m):   # each row with its index
     print(i, row)
+map(sum, m)                   # [16, 7]: map, filter and zip take the rows too
+reverse(m)                    # [[3, 4], [9, 7]]: the rows in reverse order
 ```
 
 ### Operators
@@ -489,7 +491,9 @@ k : ktable(a:1, b:2)
 Each column of `table(...)` (named arguments or a dict) is a vector, list or matrix, and all have the same length, the table's row count. Anything else (a scalar, a string, a dict, a table, None) or columns of different lengths is an error value.
 
 `for k in d` gives each key of a dict in order, and `for k, v in d` each key
-with its value. `enumerate(d)` pairs each key with its index: `[[0, "a"], [1, "b"]]`.
+with its value. `enumerate(d)` pairs each key with its index: `[[0, "a"], [1, "b"]]`;
+`map`, `filter` and `zip` take the keys too (`zip(d, [7, 8])` is `[["a", 7], ["b", 8]]`),
+and `reverse(d)` is the dict with its entries in reverse order.
 
 ## I/O and JSON
 

@@ -1611,9 +1611,21 @@ static V *bi_reverse(V**a,in){P(n<1,v_list(0))V*v=a[0];
     if(v->t==T_BVEC){V*r=v_bvec(v->n);for(int64_t i=0;i<v->n;i++)r->B[i]=v->B[v->n-1-i];return r;}
     if(v->t==T_LIST){V*r=v_list(v->n);for(int64_t i=0;i<v->n;i++)r->L[i]=v_ref(v->L[v->n-1-i]);return r;}
     if(v->t==T_STR){int64_t sl=strlen(v->s);char*b=malloc(sl+1);if(!b)return v_err("reverse: out of memory");for(int64_t i=0;i<sl;i++)b[i]=v->s[sl-1-i];b[sl]=0;V*r=v_str(b);free(b);return r;}
+    if(is_mat_t(v->t)){int64_t c=mat_cols(v);
+        V*r=v->t==T_IMAT?v_imat(v->n,c):v->t==T_FMAT?v_fmat(v->n,c):v->t==T_CMAT?v_cmat(v->n,c):v_bmat(v->n,c);
+        for(int64_t i=0;i<v->n;i++){int64_t d=mat_idx(r,i,0),o=mat_idx(v,v->n-1-i,0);
+            if(v->t==T_IMAT)memcpy(r->J+d,v->J+o,(size_t)c*sizeof(int64_t));
+            else if(v->t==T_FMAT)memcpy(r->F+d,v->F+o,(size_t)c*sizeof(double));
+            else memcpy(r->B+d,v->B+o,(size_t)c);}
+        return r;}
+    if(v->t==T_DICT){V*k=v_list(v->n),*w=v_list(v->n);
+        for(int64_t i=0;i<v->n;i++){k->L[i]=v_copy(v->keys->L[v->n-1-i]);w->L[i]=v_copy(v->vals->L[v->n-1-i]);}
+        return v_dict_own(k,w);}
     return v_copy(v);}
+static int64_t seq_n(V *v);
+static V *item_at(V *v, int64_t i);
 static V *bi_zip(V**a,in){
-    P(n<2,v_list(0))int64_t ml=a[0]->n;for(int i=1;i<n;i++)if(a[i]->n<ml)ml=a[i]->n;
+    P(n<2,v_list(0))int64_t ml=seq_n(a[0]);for(int i=1;i<n;i++)if(seq_n(a[i])<ml)ml=seq_n(a[i]);
     if(n==2&&a[0]->t==T_IVEC&&a[1]->t==T_IVEC){
         V*r=v_list(ml);
         for(int64_t i=0;i<ml;i++){
@@ -1629,7 +1641,7 @@ static V *bi_zip(V**a,in){
             else if(a[j]->t==T_FVEC)u->L[j]=v_float(a[j]->F[i]);
             else if(a[j]->t==T_CVEC)u->L[j]=v_char(a[j]->B[i]);
             else if(a[j]->t==T_BVEC)u->L[j]=v_bool(a[j]->B[i]!=0);
-            else if(a[j]->t==T_LIST)u->L[j]=v_ref(a[j]->L[i]);else u->L[j]=v_nil();}
+            else if(a[j]->t==T_LIST)u->L[j]=v_ref(a[j]->L[i]);else u->L[j]=item_at(a[j],i);}
         r->L[i]=u;}return r;}
 static int is_seq_t(int t) {
     return t==T_STR||t==T_LIST||t==T_IVEC||t==T_FVEC||t==T_CVEC||t==T_BVEC;
@@ -1637,7 +1649,7 @@ static int is_seq_t(int t) {
 static int64_t seq_n(V *v) {
     if (!v) return 0;
     if (v->t==T_STR) return v->s ? (int64_t)strlen(v->s) : 0;
-    return v->n;
+    return v->n > 0 ? v->n : 0;   /* a builtin function's n is -1 */
 }
 static V *seq_elem(V *v, int64_t i) {
     char b[2];
@@ -1651,8 +1663,15 @@ static V *seq_elem(V *v, int64_t i) {
     default: return v_nil();
     }
 }
+/* Item i of v as for gives it, for enumerate, map, filter and zip: a matrix's row, a dict's key, a
+ * list's or vector's item, a str's one-character str; None for anything else (a table's row). */
+static V *item_at(V *v, int64_t i) {
+    if (is_mat_t(v->t)) return v_mat_row(v, i);
+    if (v->t==T_DICT) return v_ref(v->keys->L[i]);
+    return seq_elem(v, i);
+}
 static V *bi_enumerate(V**a,in){
-    P(n<1,v_list(0))V*v=a[0];int64_t cnt=v->t==T_STR?(int64_t)strlen(v->s):v->n;
+    P(n<1,v_list(0))V*v=a[0];int64_t cnt=seq_n(v);
     V*r=v_list(cnt);
     if(v->t==T_IVEC){
         for(int64_t i=0;i<cnt;i++){
@@ -1666,28 +1685,19 @@ static V *bi_enumerate(V**a,in){
     for(int64_t i=0;i<cnt;i++){
         V*u=v_list(2);
         u->L[0]=v_int(i);
-        if(v->t==T_FVEC)u->L[1]=v_float(v->F[i]);
-        else if(v->t==T_CVEC)u->L[1]=v_char(v->B[i]);
-        else if(v->t==T_BVEC)u->L[1]=v_bool(v->B[i]!=0);
-        else if(v->t==T_LIST)u->L[1]=v_ref(v->L[i]);
-        else if(v->t==T_STR){char b[2]={v->s[i],0};u->L[1]=v_str(b);}
-        else if(is_mat_t(v->t))u->L[1]=v_mat_row(v,i);
-        else if(v->t==T_DICT)u->L[1]=v_ref(v->keys->L[i]);
-        else u->L[1]=v_nil();
+        u->L[1]=item_at(v,i);
         r->L[i]=u;
     }
     return r;
 }
 static V *bi_map(V**a,in,Env*e){
     P(n<2||a[0]->t!=T_FN,v_err("map(fn,iter)"))
-    V*fn=a[0],*iter=a[1];int64_t cnt=iter->t==T_STR?(int64_t)strlen(iter->s):iter->n;
+    V*fn=a[0],*iter=a[1];int64_t cnt=seq_n(iter);
     V*r=v_list(cnt);
     if(fn->n==-1) {
         for(int64_t i=0;i<cnt;++i){
             if(iter->t!=T_STR&&i>=iter->n){r->n=i;break;}
-            V*item;if(is_mat_t(iter->t))item=v_mat_row(iter,i);
-            else if(is_seq_t(iter->t))item=seq_elem(iter,i);
-            else item=v_nil();
+            V*item=item_at(iter,i);
             V*rv=builtin_call(fn->s,&item,1,NULL,NULL,0,e);
             v_free(item);
             if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
@@ -1696,9 +1706,7 @@ static V *bi_map(V**a,in,Env*e){
     } else {
         for(int64_t i=0;i<cnt;i++){
             if(iter->t!=T_STR&&i>=iter->n){r->n=i;break;}
-            V*item;if(is_mat_t(iter->t))item=v_mat_row(iter,i);
-            else if(is_seq_t(iter->t))item=seq_elem(iter,i);
-            else item=v_nil();
+            V*item=item_at(iter,i);
             Env*ce=env_new(fn->closure);if(fn->params->n>0)env_set(ce,fn->params->L[0]->s,item);v_free(item);
             if(fn->j<0||fn->j>=fn_ast_n){env_free(ce);v_free(r);return v_err("map: bad function");}
             V*rv=eval_fn(fn_ast[(int)fn->j],ce);if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
@@ -1709,15 +1717,13 @@ static V *bi_map(V**a,in,Env*e){
 }
 static V *bi_filter(V**a,in,Env*e){
     P(n<2||a[0]->t!=T_FN,v_err("filter(fn,iter)"))
-    V*fn=a[0],*iter=a[1];int64_t cnt=iter->t==T_STR?(int64_t)strlen(iter->s):iter->n;
+    V*fn=a[0],*iter=a[1];int64_t cnt=seq_n(iter);
     V**tmp=calloc(cnt?cnt:1,sizeof(V*));int64_t out=0;
     if(!tmp)return v_err("filter: out of memory");
     if(fn->n==-1) {
         for(int64_t i=0;i<cnt;++i){
             if(iter->t!=T_STR&&i>=iter->n)break;
-            V*item;if(is_mat_t(iter->t))item=v_mat_row(iter,i);
-            else if(is_seq_t(iter->t))item=seq_elem(iter,i);
-            else item=v_nil();
+            V*item=item_at(iter,i);
             V*rv=builtin_call(fn->s,&item,1,NULL,NULL,0,e);
             if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
             int keep=is_truthy(rv);   /* the truth `if` uses */
@@ -1727,9 +1733,7 @@ static V *bi_filter(V**a,in,Env*e){
     } else {
         for(int64_t i=0;i<cnt;i++){
             if(iter->t!=T_STR&&i>=iter->n)break;
-            V*item;if(is_mat_t(iter->t))item=v_mat_row(iter,i);
-            else if(is_seq_t(iter->t))item=seq_elem(iter,i);
-            else item=v_nil();
+            V*item=item_at(iter,i);
             Env*ce=env_new(fn->closure);if(fn->params->n>0)env_set(ce,fn->params->L[0]->s,item);
             if(fn->j<0||fn->j>=fn_ast_n){v_free(item);env_free(ce);free(tmp);return v_err("filter: bad function");}
             V*rv=eval_fn(fn_ast[(int)fn->j],ce);if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}

@@ -18,6 +18,9 @@
 
 /* 1 when a float truncates to a C int: not NaN, not an infinity, and inside int's range */
 static inline int float_fits_int(double d) { return d > INT_MIN - 1.0 && d < INT_MAX + 1.0; }
+/* d with a NaN's sign bit cleared, for writing as text: glibc writes "-nan" for a NaN with it set
+ * (as 0 * inf makes on x86-64, or -float("nan")), other C libraries "nan" */
+static inline double nan_unsigned(double d) { return isnan(d) ? fabs(d) : d; }
 
 #ifdef __cplusplus
 extern "C" {

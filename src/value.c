@@ -150,10 +150,10 @@ static void mat_cell_format(V *v, int64_t r, int64_t c, char *buf, size_t cap) {
         snprintf(buf, cap, "0x%02x", v->B[mat_idx(v, r, c)]);
     else if (v->t == T_FMAT) {
         double d = v->F[mat_idx(v, r, c)];
-        if (d == (int64_t)d && d < 1e15 && d > -1e15)
+        if (d < 1e15 && d > -1e15 && d == (int64_t)d)
             snprintf(buf, cap, "%.1f", d);
         else
-            snprintf(buf, cap, "%g", d);
+            snprintf(buf, cap, "%g", nan_unsigned(d));
     } else
         snprintf(buf, cap, "%s", v->B[mat_idx(v, r, c)] ? "True" : "False");
 }
@@ -1040,7 +1040,7 @@ static void table_cell_buf(V *col, int64_t r, char *buf, size_t cap) {
     buf[0] = 0;
     if (!col || r < 0) return;
     if (col->t == T_IVEC && r < col->n) snprintf(buf, cap, "%lld", (long long)col->J[r]);
-    else if (col->t == T_FVEC && r < col->n) snprintf(buf, cap, "%g", col->F[r]);
+    else if (col->t == T_FVEC && r < col->n) snprintf(buf, cap, "%g", nan_unsigned(col->F[r]));
     else if (col->t == T_CVEC && r < col->n) snprintf(buf, cap, "0x%02x", (int)col->B[r]);
     else if (col->t == T_BVEC && r < col->n) snprintf(buf, cap, "%s", col->B[r] ? "True" : "False");
     else if (col->t == T_LIST && r < col->n) {
@@ -1085,9 +1085,9 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         break;
     }
     case T_FLOAT:{
-        if(v->f == (int64_t)v->f && v->f < 1e15 && v->f > -1e15)
+        if(v->f < 1e15 && v->f > -1e15 && v->f == (int64_t)v->f)
             fprintf(fp, "%.1f", v->f);
-        else fprintf(fp, "%g", v->f);
+        else fprintf(fp, "%g", nan_unsigned(v->f));
         break;
     }
     case T_STR:
@@ -1104,8 +1104,8 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
         for(int64_t i=0;i<v->n;i++) {
             if(i) fprintf(fp,", ");
             double d = v->F[i];
-            if(d == (int64_t)d && d < 1e15 && d > -1e15) fprintf(fp,"%.1f",d);
-            else fprintf(fp,"%g",d);
+            if(d < 1e15 && d > -1e15 && d == (int64_t)d) fprintf(fp,"%.1f",d);
+            else fprintf(fp,"%g",nan_unsigned(d));
         }
         fprintf(fp, "]"); break;
     case T_BVEC:
@@ -1142,8 +1142,8 @@ static void print_val_depth(V *v, FILE *fp, int repr_mode, int depth) {
             for (int64_t i = 0; i < v->n; i++) {
                 if (i) fprintf(fp, ", ");
                 double d = v->L[i]->f;
-                if (d == (int64_t)d && d < 1e15 && d > -1e15) fprintf(fp, "%.1f", d);
-                else fprintf(fp, "%g", d);
+                if (d < 1e15 && d > -1e15 && d == (int64_t)d) fprintf(fp, "%.1f", d);
+                else fprintf(fp, "%g", nan_unsigned(d));
             }
         } else {
             for (int64_t i = 0; i < v->n; i++) {

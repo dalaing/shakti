@@ -1104,7 +1104,7 @@ V *eval(Node *n, Env *e) {
                         /* static: on the stack it would be in every eval frame, so in every call */
                         static char buf[512];
                         double dv = val->t == T_FLOAT ? val->f : (double)val->j;
-                        snprintf(buf, sizeof buf, fmt, dv);
+                        snprintf(buf, sizeof buf, fmt, nan_unsigned(dv));
                         vs = strdup(buf);
                     } else {
                         vs = v_to_str(val);

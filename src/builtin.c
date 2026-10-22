@@ -1720,7 +1720,7 @@ static V *bi_filter(V**a,in,Env*e){
             else item=v_nil();
             V*rv=builtin_call(fn->s,&item,1,NULL,NULL,0,e);
             if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
-            int keep=rv&&((rv->t==T_BOOL&&rv->j)||(rv->t==T_INT&&rv->j)||(rv->t!=T_NIL&&rv->t!=T_BOOL&&rv->t!=T_INT));
+            int keep=is_truthy(rv);   /* the truth `if` uses */
             v_free(rv);
             if(keep)tmp[out++]=item;else v_free(item);
         }
@@ -1733,7 +1733,7 @@ static V *bi_filter(V**a,in,Env*e){
             Env*ce=env_new(fn->closure);if(fn->params->n>0)env_set(ce,fn->params->L[0]->s,item);
             if(fn->j<0||fn->j>=fn_ast_n){v_free(item);env_free(ce);free(tmp);return v_err("filter: bad function");}
             V*rv=eval_fn(fn_ast[(int)fn->j],ce);if(g_returning){g_returning=0;v_free(rv);rv=g_retval;g_retval=NULL;}
-            int keep=rv&&((rv->t==T_BOOL&&rv->j)||(rv->t==T_INT&&rv->j)||(rv->t!=T_NIL&&rv->t!=T_BOOL&&rv->t!=T_INT));
+            int keep=is_truthy(rv);   /* the truth `if` uses */
             v_free(rv);env_free(ce);if(keep)tmp[out++]=item;else v_free(item);
         }
     }

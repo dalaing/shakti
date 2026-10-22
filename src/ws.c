@@ -701,6 +701,10 @@ static int ws_client_handshake(WsIo *io, const char *host, int port, const char 
     const char *hdrs = strstr(resp, "\r\n") + 2;
     if (!ws_header_has(hdrs, "Upgrade", "websocket")) return -1;
     if (!ws_header_has(hdrs, "Connection", "upgrade")) return -1;
+    /* The request names no extension or subprotocol, so a server that names one uses something
+       not asked for (RFC 6455 4.1). */
+    if (ws_header_has(hdrs, "Sec-WebSocket-Extensions", NULL)) return -1;
+    if (ws_header_has(hdrs, "Sec-WebSocket-Protocol", NULL)) return -1;
     char accept[64];
     if (ws_extract_header(hdrs, "Sec-WebSocket-Accept", accept, sizeof accept) != 0) return -1;
     if (strcmp(accept, expect) != 0) return -1;

@@ -41,6 +41,8 @@
 #endif
 
 #define IPC_MAX_HANDLES 128
+/* A shared-memory name's lock file, /tmp/shakti-<uid>/<name>.lock, with a name of up to 255 bytes. */
+#define IPC_SHM_LOCK_MAX 320
 #define IPC_INBOX_MAX 64
 #define IPC_REPLY_TO_MAX 32
 #define IPC_ENV_MAGIC 0x49u
@@ -147,7 +149,7 @@ typedef struct {
     int fd;
     int nonblock;
     char uds_path[108];
-    int lock_fd;              /* a Unix listener's flock on its lock file, or -1 */
+    int lock_fd;              /* a Unix listener's or a ring creator's flock on its lock file, or -1 */
     IpcRxBuf rx;
     IpcInbox inbox;
     IpcInbox async_q;
@@ -173,6 +175,7 @@ typedef struct {
     uint32_t shm_cap;         /* cached at create/attach; not re-read from the mapping */
     uint32_t shm_max_readers;
     char shm_name[256];
+    char shm_lock_path[IPC_SHM_LOCK_MAX]; /* a ring creator's lock file (ipc_shm_lock) */
     int shm_owner;
     int shm_side;
     int shm_bcast;
@@ -186,6 +189,8 @@ typedef struct {
     void *ptr;
     size_t size;
     char name[256];
+    int lock_fd;              /* the flock on its name's lock file (ipc_shm_lock) */
+    char lock_path[IPC_SHM_LOCK_MAX];
 } IpcShmSlot;
 
 int ipc_copy_cstr(char *dst, size_t cap, const char *src);
@@ -195,7 +200,15 @@ size_t ipc_posix_shm_name_max(void);
 int ipc_format_posix_shm_name(char *dst, size_t cap, const char *prefix, const char *user);
 int ipc_shm_chan_name(char *dst, size_t cap, const char *user);
 int ipc_shm_check_fd(int fd, size_t *size_out, char *err, size_t err_cap);
-int ipc_shm_create_fd(const char *posix, char *err, size_t err_cap);
+int ipc_shm_create_fd(const char *posix, int *lock_out, char lock_path[IPC_SHM_LOCK_MAX], char *err,
+                      size_t err_cap);
+/* A shared-memory name is in use while its creator holds the lock: an flock on <name>.lock in
+   /tmp/shakti-<uid>, from the create until the close or the end of the process. ipc_shm_lock takes
+   it (the lock's fd, with the lock file's path in lock_path; -1 with err set, "already in use" if
+   it is held); ipc_shm_unlock releases it, removing the lock file and (if made) the name while the
+   lock file at lock_path is still the one held. */
+int ipc_shm_lock(const char *posix, char lock_path[IPC_SHM_LOCK_MAX], char *err, size_t err_cap);
+void ipc_shm_unlock(const char *posix, const char *lock_path, int lock_fd, int made);
 int ipc_hmac(const char *key, const unsigned char *data, size_t len, unsigned char out[IPC_MAC_LEN]);
 int ipc_mac_equal(const unsigned char *a, const unsigned char *b, size_t n);
 int ipc_random_bytes(unsigned char *buf, size_t n);
@@ -214,7 +227,7 @@ int ipc_inbox_take(IpcInbox *box, int want_corr, uint32_t corr,
 
 int sock_set_block(int fd, int block);
 int ipc_is_localhost(const char *host);
-IpcTransport ipc_parse_transport(const char *s);
+int ipc_parse_transport(const char *fn, const char *s, IpcTransport *out, char *err, size_t err_cap);
 int ipc_sock_send(IpcHandle *s, const char *data, size_t len, char *err, size_t err_cap);
 int ipc_sock_send_parts(IpcHandle *s,
                         const void *p0, size_t n0,
@@ -252,7 +265,8 @@ int ipc_shm_recv_side(IpcHandle *s, int block, int timeout_ms,
                       char **out, size_t *out_len, char *err, size_t err_cap);
 int ipc_shm_chan_open(const char *user_name, size_t size, int create,
                       void **ptr_out, size_t *size_out, char *posix_out, size_t posix_cap,
-                      int *owner, char *err, size_t err_cap);
+                      int *owner, int *lock_out, char lock_path[IPC_SHM_LOCK_MAX], char *err,
+                      size_t err_cap);
 int ipc_shm_readable(IpcHandle *s);
 size_t ipc_bcast_total_size(size_t ring_cap, uint32_t max_readers);
 

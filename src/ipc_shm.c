@@ -26,9 +26,10 @@ int ipc_shm_recv_side(IpcHandle *s, int block, int timeout_ms,
 }
 int ipc_shm_chan_open(const char *user_name, size_t size, int create,
                       void **ptr_out, size_t *size_out, char *posix_out, size_t posix_cap,
-                      int *owner, char *err, size_t err_cap) {
+                      int *owner, int *lock_out, char lock_path[IPC_SHM_LOCK_MAX], char *err,
+                      size_t err_cap) {
     (void)user_name; (void)size; (void)create; (void)ptr_out; (void)size_out;
-    (void)posix_out; (void)posix_cap; (void)owner;
+    (void)posix_out; (void)posix_cap; (void)owner; (void)lock_out; (void)lock_path;
     snprintf(err, err_cap, "ipc: shm not supported on this platform");
     return -1;
 }
@@ -348,7 +349,13 @@ int ipc_shm_check_fd(int fd, size_t *size_out, char *err, size_t err_cap) {
     return 0;
 }
 
-int ipc_shm_create_fd(const char *posix, char *err, size_t err_cap) {
+/* Create the shared-memory object posix, holding its name's lock (*lock_out, its file lock_path).
+   A name whose lock is held is in use; one whose lock nobody holds was left by a process that ended
+   without closing it, and is replaced. */
+int ipc_shm_create_fd(const char *posix, int *lock_out, char lock_path[IPC_SHM_LOCK_MAX], char *err,
+                      size_t err_cap) {
+    int lock = ipc_shm_lock(posix, lock_path, err, err_cap);
+    if (lock < 0) return -1;
     shm_unlink(posix);
     int fd = shm_open(posix, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {
@@ -356,14 +363,18 @@ int ipc_shm_create_fd(const char *posix, char *err, size_t err_cap) {
             snprintf(err, err_cap, "ipc: shm name already in use by another user (%s)", posix);
         else
             snprintf(err, err_cap, "ipc: shm_create: %s", strerror(errno));
+        ipc_shm_unlock(posix, lock_path, lock, 0);
         return -1;
     }
+    *lock_out = lock;
     return fd;
 }
 
 int ipc_shm_chan_open(const char *user_name, size_t size, int create,
                       void **ptr_out, size_t *size_out, char *posix_out, size_t posix_cap,
-                      int *owner, char *err, size_t err_cap) {
+                      int *owner, int *lock_out, char lock_path[IPC_SHM_LOCK_MAX], char *err,
+                      size_t err_cap) {
+    *lock_out = -1;
     if (!ipc_valid_shm_user_name(user_name)) {
         snprintf(err, err_cap, "ipc: bad shm name");
         return -1;
@@ -380,12 +391,13 @@ int ipc_shm_chan_open(const char *user_name, size_t size, int create,
     int fd;
     size_t map_size = size;
     if (create) {
-        fd = ipc_shm_create_fd(posix_out, err, err_cap);
+        fd = ipc_shm_create_fd(posix_out, lock_out, lock_path, err, err_cap);
         if (fd < 0) return -1;
         if (ftruncate(fd, (off_t)map_size) != 0) {
             snprintf(err, err_cap, "ipc: shm ftruncate: %s", strerror(errno));
             close(fd);
-            shm_unlink(posix_out);
+            ipc_shm_unlock(posix_out, lock_path, *lock_out, 1);
+            *lock_out = -1;
             return -1;
         }
         *owner = 1;
@@ -405,7 +417,10 @@ int ipc_shm_chan_open(const char *user_name, size_t size, int create,
     close(fd);
     if (ptr == MAP_FAILED) {
         snprintf(err, err_cap, "ipc: shm mmap: %s", strerror(errno));
-        if (create) shm_unlink(posix_out);
+        if (create) {
+            ipc_shm_unlock(posix_out, lock_path, *lock_out, 1);
+            *lock_out = -1;
+        }
         return -1;
     }
     if (create) {
